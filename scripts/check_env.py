@@ -8,7 +8,13 @@ import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
+BIN_DIR = ROOT / "bin"
+if BIN_DIR.exists():
+    os.environ["PATH"] = str(BIN_DIR) + os.pathsep + os.environ.get("PATH", "")
+    os.add_dll_directory(str(BIN_DIR))
 
 def ok(label: str, good: bool, extra: str = "") -> bool:
     print(("[ OK ] " if good else "[FAIL] ") + label + ((" - " + extra) if extra else ""))
