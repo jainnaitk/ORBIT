@@ -1,0 +1,36 @@
+# secrets & cookies
+.env
+.env.*
+!.env.example
+*cookies*.txt
+headers_auth.json
+*.pem
+*.key
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# binaries, audio, local data
+bin/*.dll
+bin/*.exe
+*.opus
+*.m4a
+*.mp3
+*.webm
+*.db
+*.sqlite
+
+# ui
+node_modules/
+ui/dist/
+ui/src-tauri/target/
+
+# os
+Thumbs.db

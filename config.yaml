@@ -1,0 +1,42 @@
+app:
+  name: MetroLite
+  data_dir: "%LOCALAPPDATA%\\metrolite"
+  downloads_dir: "%LOCALAPPDATA%\\metrolite\\downloads"
+  ram_budget_active_mb: 185
+  ram_budget_tray_mb: 60
+
+audio:
+  quality: high                    # high (128-160kbps opus) | medium (64-96kbps) | low (48kbps)
+  format_selector: "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio"
+  gapless: true
+  normalize_volume: false          # true adds mpv dynaudnorm filter
+  default_volume: 80               # 0 - 100
+  mpv_demuxer_max_mb: 15           # keeps libmpv RAM under ~22 MB
+  mpv_demuxer_back_mb: 5
+  stream_url_ttl_s: 18000          # refresh expiring googlevideo URLs before 5h
+
+downloads:
+  preferred_ext: opus              # opus | m4a
+  embed_metadata: true
+  embed_thumbnail: true
+  max_concurrent: 2
+
+queue:
+  autoplay_radio: true             # auto-fetch YTM watch playlist when queue ends
+  history_limit: 500
+
+hotkeys:
+  enabled: true
+  play_pause: media_play_pause
+  next_track: media_next
+  prev_track: media_previous
+
+bridge:
+  host: "127.0.0.1"
+  port: 8766
+
+ui:
+  theme: dark                      # dark | oled
+  close_to_tray: true
+  destroy_webview_on_tray: true    # frees ~100 MB RAM when minimized/closed to tray
+  thumbnail_cache_mb: 40
