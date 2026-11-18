@@ -34,6 +34,7 @@ class AppConfig(BaseModel):
     downloads_dir: Path = Field(
         default_factory=lambda: expand_path("%LOCALAPPDATA%\\metrolite\\downloads")
     )
+    cookies_file: Path | None = None
     ram_budget_active_mb: int = 185
     ram_budget_tray_mb: int = 60
 
@@ -41,6 +42,11 @@ class AppConfig(BaseModel):
     @classmethod
     def _resolve_paths(cls, v: Any) -> Path:
         return expand_path(v)
+
+    @field_validator("cookies_file", mode="before")
+    @classmethod
+    def _resolve_cookies_path(cls, v: Any) -> Path | None:
+        return expand_path(v) if v else None
 
 
 class AudioConfig(BaseModel):
@@ -85,6 +91,15 @@ class UIConfig(BaseModel):
     thumbnail_cache_mb: int = 40
 
 
+class YTMConfig(BaseModel):
+    cookies_file: Path | None = None
+
+    @field_validator("cookies_file", mode="before")
+    @classmethod
+    def _resolve_cookies(cls, v: Any) -> Path | None:
+        return expand_path(v) if v else None
+
+
 def find_default_config_path() -> Path:
     """Find the project config.yaml file if it exists."""
     cwd_config = Path.cwd() / "config.yaml"
@@ -106,6 +121,7 @@ class Settings(BaseSettings):
     hotkeys: HotkeysConfig = Field(default_factory=HotkeysConfig)
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    ytm: YTMConfig = Field(default_factory=YTMConfig)
 
     model_config = SettingsConfigDict(
         extra="ignore",
