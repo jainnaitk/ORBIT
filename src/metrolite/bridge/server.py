@@ -528,6 +528,13 @@ def create_app(
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def add_pna_header(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        if request.headers.get("access-control-request-private-network"):
+            response.headers["access-control-allow-private-network"] = "true"
+        return response
+
     app.state.controller = ctrl
     app.state.token = expected_token
 

@@ -522,7 +522,7 @@ def main() -> None:
         if not any(folder.iterdir()):
             (folder / ".gitkeep").write_text("", encoding="utf-8")
     print()
-    print("Done: %d created, %d skipped in %s" % (created, skipped, root))
+    print(f"Done: {created} created, {skipped} skipped in {root}")
     print(
         "Next: git init; git add -A; git commit -m 'chore: bootstrap'; "
         "uv sync; uv run python scripts/check_env.py"

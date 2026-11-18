@@ -1,0 +1,88 @@
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+
+:root {
+  --bg-base: #0B0B0F;
+  --bg-sidebar: #0E0E13;
+  --bg-surface: #14141B;
+  --bg-hover: #1C1C26;
+  --bg-player: #101016;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-light: rgba(255, 255, 255, 0.12);
+  --text-1: #F8FAFC;
+  --text-2: #94A3B8;
+  --accent: #38BDF8;
+  --liked: #FB7185;
+  --downloaded: #34D399;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+
+  --row-height: 56px;
+  --titlebar-height: 44px;
+  --player-height: 76px;
+  --sidebar-width: 220px;
+  --queue-width: 300px;
+}
+
+/* Optional OLED mode */
+[data-theme="oled"] {
+  --bg-base: #000000;
+  --bg-sidebar: #050507;
+  --bg-surface: #0D0D11;
+  --bg-hover: #16161D;
+  --bg-player: #08080B;
+  --border: rgba(255, 255, 255, 0.10);
+  --text-1: #FFFFFF;
+}
+
+/* Global resets & typography */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background-color: var(--bg-base);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Custom subtle scrollbar (no jank) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Titlebar dragging area */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Strict 60fps animation rules: transform & opacity only */
+.transition-smooth {
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1), opacity 150ms cubic-bezier(0.2, 0, 0, 1);
+}
