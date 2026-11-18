@@ -34,7 +34,7 @@ Single user, local-first, no login required (optional browser cookies for person
 
 ## Progress (update after every phase)
 - [x] P0 scaffold       - [x] P1 audio & YTM core   - [x] P2 downloads & library
-- [x] P3 bridge & SMTC  - [ ] P4 UI design          - [ ] P5 Tauri player UI
+- [x] P3 bridge & SMTC  - [x] P4 UI design          - [ ] P5 Tauri player UI
 - [ ] P6 tray & RAM opt - [ ] P7 ship
 
 ## Handoff (when another agent takes over)
