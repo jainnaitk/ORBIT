@@ -33,7 +33,7 @@ Single user, local-first, no login required (optional browser cookies for person
 - Prompts live in docs/PHASES.md. When asked "Do Phase X step Y", follow that prompt and its Done-when checks exactly.
 
 ## Progress (update after every phase)
-- [x] P0 scaffold       - [x] P1 audio & YTM core   - [ ] P2 downloads & library
+- [x] P0 scaffold       - [x] P1 audio & YTM core   - [x] P2 downloads & library
 - [ ] P3 bridge & SMTC  - [ ] P4 UI design          - [ ] P5 Tauri player UI
 - [ ] P6 tray & RAM opt - [ ] P7 ship
 
