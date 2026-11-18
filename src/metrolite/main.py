@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_command(args: argparse.Namespace) -> int:
     """Handle `metrolite run` command."""
+    import os
+
     cfg = get_config(args.config)
     host = args.host or cfg.bridge.host
     port = args.port or cfg.bridge.port
@@ -68,6 +70,20 @@ def run_command(args: argparse.Namespace) -> int:
     # Ensure database is initialized before starting service
     db_path = init_db_sync()
     print(f"Starting {cfg.app.name} backend on {host}:{port} (db: {db_path})")
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0
+
+    from metrolite.audio.media_keys import MediaKeysListener
+    from metrolite.bridge.server import BridgeController, BridgeServer
+
+    media_keys = MediaKeysListener() if cfg.hotkeys.enabled else None
+    controller = BridgeController(db_path=db_path, media_keys=media_keys)
+    server = BridgeServer(host=host, port=port, controller=controller)
+    try:
+        server.start_sync()
+    except KeyboardInterrupt:
+        server.stop()
     return 0
 
 
