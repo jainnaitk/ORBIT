@@ -232,6 +232,13 @@ class YTMusicClient:
                 "Failed to initialize YTMusic with auth: %s. Falling back to unauthenticated.", e
             )
             self._yt = YTMusic(auth=None, language=language)
+        finally:
+            import locale
+
+            try:
+                locale.setlocale(locale.LC_NUMERIC, "C")
+            except locale.Error:
+                pass
 
     def _run_sync(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Execute a synchronous ytmusicapi function with standardized error handling."""
