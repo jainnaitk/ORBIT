@@ -19,6 +19,7 @@ import {
   AddToPlaylistModal,
   SettingsModal,
 } from './components/Modals';
+import { UpdateAvailableModal } from './components/UpdateCenter';
 import {
   useBridge,
   bridgeSocket,
@@ -43,9 +44,27 @@ export default function App() {
     setQueue,
     downloads,
     setDownloads,
+    updateState,
+    setUpdateState,
     api,
     lastError,
   } = useBridge();
+
+  const [isUpdateTabOpen, setIsUpdateTabOpen] = useState<boolean>(false);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState<boolean>(false);
+  const promptedUpdateVersionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (
+      updateState?.update_available &&
+      updateState.latest_version &&
+      (updateState.status === 'available' || updateState.status === 'ready') &&
+      promptedUpdateVersionRef.current !== updateState.latest_version
+    ) {
+      promptedUpdateVersionRef.current = updateState.latest_version;
+      setIsUpdateModalOpen(true);
+    }
+  }, [updateState?.update_available, updateState?.latest_version, updateState?.status]);
 
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
@@ -800,6 +819,8 @@ export default function App() {
         return;
       }
       if (e.key === 'Escape') {
+        if (isUpdateModalOpen) return setIsUpdateModalOpen(false);
+        if (isUpdateTabOpen) return setIsUpdateTabOpen(false);
         if (isCreatePlaylistOpen) return setIsCreatePlaylistOpen(false);
         if (addToPlaylistTrack) return setAddToPlaylistTrack(null);
         if (isSettingsOpen) return setIsSettingsOpen(false);
@@ -814,11 +835,56 @@ export default function App() {
     handleNext,
     handlePrev,
     handleToggleLike,
+    isUpdateModalOpen,
+    isUpdateTabOpen,
     isCreatePlaylistOpen,
     addToPlaylistTrack,
     isSettingsOpen,
     rightDrawer,
   ]);
+
+  const handleCheckUpdates = useCallback(async () => {
+    try {
+      const next = await api.checkForUpdates(true);
+      setUpdateState(next);
+    } catch {
+      // Handled via socket or retry
+    }
+  }, [api, setUpdateState]);
+
+  const handleToggleUpdateTab = useCallback(() => {
+    setIsUpdateTabOpen((prev) => {
+      const nextOpen = !prev;
+      if (nextOpen && (!updateState || updateState.status === 'idle')) {
+        void api
+          .checkForUpdates(false)
+          .then((s) => setUpdateState(s))
+          .catch(() => {});
+      }
+      return nextOpen;
+    });
+  }, [api, setUpdateState, updateState]);
+
+  const handleCloseUpdateTab = useCallback(() => {
+    setIsUpdateTabOpen(false);
+  }, []);
+
+  const handleOpenUpdateDownloadTabFromModal = useCallback(() => {
+    setIsUpdateModalOpen(false);
+    setIsUpdateTabOpen(true);
+  }, []);
+
+  const handleDownloadAndInstallUpdate = useCallback(async () => {
+    try {
+      const next =
+        updateState?.status === 'ready'
+          ? await api.installUpdate()
+          : await api.downloadUpdate(true);
+      setUpdateState(next);
+    } catch {
+      // Handled via socket update_status
+    }
+  }, [api, setUpdateState, updateState?.status]);
 
   const handleToggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((c) => !c);
@@ -954,6 +1020,12 @@ export default function App() {
           onOpenSettings={handleOpenSettings}
           onEnterIsland={handleEnterIslandAction}
           onFocusSearchTab={handleFocusSearchTab}
+          updateState={updateState}
+          isUpdateTabOpen={isUpdateTabOpen}
+          onToggleUpdateTab={handleToggleUpdateTab}
+          onCloseUpdateTab={handleCloseUpdateTab}
+          onCheckUpdates={handleCheckUpdates}
+          onDownloadAndInstallUpdate={handleDownloadAndInstallUpdate}
         />
 
         <div className="flex flex-1 min-h-0 overflow-hidden gap-2 sm:gap-3 px-2 sm:px-3 pb-2">
@@ -1112,6 +1184,13 @@ export default function App() {
         onChangeCosmicMode={handleChangeCosmicMode}
         autoDownloadLiked={autoDownloadLiked}
         onToggleAutoDownloadLiked={handleToggleAutoDownloadLiked}
+      />
+
+      <UpdateAvailableModal
+        isOpen={isUpdateModalOpen}
+        updateState={updateState}
+        onDismiss={() => setIsUpdateModalOpen(false)}
+        onOpenDownloadTab={handleOpenUpdateDownloadTabFromModal}
       />
 
       {visibleError && (

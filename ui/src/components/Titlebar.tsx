@@ -8,9 +8,13 @@ import {
   Square,
   X,
   PictureInPicture2,
+  Download,
+  Loader2,
 } from 'lucide-react';
 import { OrbitLogo } from './OrbitLogo';
+import { UpdateTabPopover } from './UpdateCenter';
 import { minimizeWindow, toggleMaximizeWindow, closeWindow } from '../api/client';
+import type { UpdateState } from '../api/types';
 
 interface TitlebarProps {
   searchQuery: string;
@@ -24,6 +28,12 @@ interface TitlebarProps {
   onOpenSettings: () => void;
   onEnterIsland: () => void;
   onFocusSearchTab: () => void;
+  updateState: UpdateState | null;
+  isUpdateTabOpen: boolean;
+  onToggleUpdateTab: () => void;
+  onCloseUpdateTab: () => void;
+  onCheckUpdates: () => void;
+  onDownloadAndInstallUpdate: () => void;
 }
 
 export const Titlebar = memo(({
@@ -38,6 +48,12 @@ export const Titlebar = memo(({
   onOpenSettings,
   onEnterIsland,
   onFocusSearchTab,
+  updateState,
+  isUpdateTabOpen,
+  onToggleUpdateTab,
+  onCloseUpdateTab,
+  onCheckUpdates,
+  onDownloadAndInstallUpdate,
 }: TitlebarProps) => {
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -59,6 +75,9 @@ export const Titlebar = memo(({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onFocusSearchTab]);
+
+  const hasUpdate = Boolean(updateState?.update_available);
+  const isDownloadingUpdate = updateState?.status === 'downloading';
 
   return (
     <header
@@ -127,8 +146,53 @@ export const Titlebar = memo(({
         )}
       </div>
 
-      {/* Right: Dynamic Island Toggle, Settings & Window Controls */}
+      {/* Right: GitHub App Update Toggle (left of Dynamic Island), Dynamic Island, Settings & Window Controls */}
       <div className="flex items-center no-drag gap-0.5 sm:gap-1 flex-none">
+        <div className="relative">
+          <button
+            type="button"
+            onClick={onToggleUpdateTab}
+            title={
+              isDownloadingUpdate
+                ? `Downloading ORBIT v${updateState?.latest_version} (${Math.round(updateState?.progress_pct ?? 0)}%)`
+                : hasUpdate
+                ? `Update Available: v${updateState?.latest_version} — Click to open Downloads`
+                : 'App Updates (GitHub)'
+            }
+            className={`relative w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center rounded-full transition-colors ${
+              isUpdateTabOpen
+                ? 'bg-white/[0.14] text-white'
+                : hasUpdate
+                ? 'text-[#F4F6FF] bg-white/[0.07] hover:bg-white/[0.14]'
+                : 'text-[#9AA5C4] hover:text-white hover:bg-white/[0.08]'
+            }`}
+            style={hasUpdate ? { color: 'var(--dynamic-accent)' } : undefined}
+          >
+            {isDownloadingUpdate ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Download size={14} />
+            )}
+            {hasUpdate && !isDownloadingUpdate && (
+              <span
+                className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full ring-2 ring-[#06080F]"
+                style={{
+                  background: 'var(--dynamic-accent)',
+                  boxShadow: '0 0 8px var(--dynamic-accent)',
+                }}
+              />
+            )}
+          </button>
+
+          <UpdateTabPopover
+            isOpen={isUpdateTabOpen}
+            updateState={updateState}
+            onClose={onCloseUpdateTab}
+            onCheckUpdates={onCheckUpdates}
+            onDownloadAndInstall={onDownloadAndInstallUpdate}
+          />
+        </div>
+
         <button
           onClick={onEnterIsland}
           title="Dynamic Island Mini-Player (Always on Top)"

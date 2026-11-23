@@ -15,6 +15,7 @@ import type {
   Playlist,
   QueueData,
   Track,
+  UpdateState,
 } from './types';
 
 export const isTauri = (): boolean => {
@@ -473,6 +474,28 @@ export class BridgeApiClient {
       body: JSON.stringify(settings),
     });
   }
+
+  public async getUpdateStatus(): Promise<UpdateState> {
+    return this.request('/updates/status');
+  }
+
+  public async checkForUpdates(force: boolean = true): Promise<UpdateState> {
+    return this.request(`/updates/check?force=${force ? 'true' : 'false'}`, {
+      method: 'POST',
+    });
+  }
+
+  public async downloadUpdate(autoInstall: boolean = true): Promise<UpdateState> {
+    return this.request(`/updates/download?auto_install=${autoInstall ? 'true' : 'false'}`, {
+      method: 'POST',
+    });
+  }
+
+  public async installUpdate(): Promise<UpdateState> {
+    return this.request('/updates/install', {
+      method: 'POST',
+    });
+  }
 }
 
 export const bridgeApi = new BridgeApiClient();
@@ -614,6 +637,7 @@ export function useBridge() {
   const [playback, setPlayback] = useState<PlaybackTick | null>(null);
   const [queue, setQueue] = useState<QueueData | null>(null);
   const [downloads, setDownloads] = useState<Record<string, DownloadProgress>>({});
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
@@ -625,13 +649,15 @@ export function useBridge() {
       setConfig(cfg);
       bridgeApi.setConfig(cfg);
 
-      const [qData, healthData] = await Promise.allSettled([
+      const [qData, healthData, updData] = await Promise.allSettled([
         bridgeApi.getQueue(),
         bridgeApi.getHealth(),
+        bridgeApi.getUpdateStatus(),
       ]);
 
       if (qData.status === 'fulfilled' && mountedRef.current) setQueue(qData.value);
       if (healthData.status === 'fulfilled' && mountedRef.current) setLastError(null);
+      if (updData.status === 'fulfilled' && mountedRef.current) setUpdateState(updData.value);
     } catch (err: any) {
       if (mountedRef.current) setLastError(err?.message || 'Failed connecting to ORBIT bridge');
     }
@@ -691,6 +717,12 @@ export function useBridge() {
       }
     });
 
+    const unsubUpdate = bridgeSocket.on('update_status', (uState) => {
+      if (mountedRef.current && uState) {
+        setUpdateState(uState);
+      }
+    });
+
     const unsubError = bridgeSocket.on('error', (errEvt) => {
       if (mountedRef.current && errEvt?.message) {
         setLastError(errEvt.message);
@@ -704,6 +736,7 @@ export function useBridge() {
       unsubTrackChanged();
       unsubQueue();
       unsubDownload();
+      unsubUpdate();
       unsubError();
     };
   }, [syncInitialState]);
@@ -722,6 +755,8 @@ export function useBridge() {
     setQueue,
     downloads,
     setDownloads,
+    updateState,
+    setUpdateState,
     api: bridgeApi,
     lastError,
     reconnect,

@@ -117,7 +117,7 @@ class YTMConfig(BaseModel):
 
 class UpdatesConfig(BaseModel):
     enabled: bool = True
-    github_repo: str = "naitikjain/orbit"
+    github_repo: str = "jainnaitk/ORBIT"
     current_version: str = "0.1.0"
     check_on_startup: bool = True
 
@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     ytm: YTMConfig = Field(default_factory=YTMConfig)
+    updates: UpdatesConfig = Field(default_factory=UpdatesConfig)
 
     model_config = SettingsConfigDict(
         extra="ignore",

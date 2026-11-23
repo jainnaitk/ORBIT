@@ -47,7 +47,6 @@ ui:
 
 updates:
   enabled: true
-  github_repo: "naitikjain/orbit"  # update to your exact GitHub owner/repo
+  github_repo: "jainnaitk/ORBIT"
   current_version: "0.1.0"
   check_on_startup: true
-

@@ -106,7 +106,7 @@ class UpdateManager:
         self.github_repo: str = (
             github_repo
             or (getattr(upd_cfg, "github_repo", None) if upd_cfg else None)
-            or "naitikjain/orbit"
+            or "jainnaitk/ORBIT"
         ).strip()
         self.current_version: str = (
             current_version
@@ -326,35 +326,37 @@ class UpdateManager:
         self._emit()
 
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0),
-                follow_redirects=True,
-                headers={"User-Agent": _GITHUB_API_HEADERS["User-Agent"]},
-            ) as client:
-                async with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    if not _is_trusted_download_url(str(resp.url)):
-                        raise ValueError("Redirected to untrusted download host")
+            async with (
+                httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0),
+                    follow_redirects=True,
+                    headers={"User-Agent": _GITHUB_API_HEADERS["User-Agent"]},
+                ) as client,
+                client.stream("GET", url) as resp,
+            ):
+                resp.raise_for_status()
+                if not _is_trusted_download_url(str(resp.url)):
+                    raise ValueError("Redirected to untrusted download host")
 
-                    total = int(resp.headers.get("content-length") or expected_size or 0)
-                    downloaded = 0
-                    last_emit = 0.0
-                    with part_path.open("wb") as fh:
-                        async for chunk in resp.aiter_bytes(chunk_size=65536):
-                            fh.write(chunk)
-                            downloaded += len(chunk)
-                            now = time.monotonic()
-                            if now - last_emit >= 0.15:
-                                last_emit = now
-                                pct = (downloaded / total * 100.0) if total > 0 else 0.0
-                                self._state.update(
-                                    {
-                                        "downloaded_bytes": downloaded,
-                                        "total_bytes": total,
-                                        "progress_pct": round(min(99.9, pct), 1),
-                                    }
-                                )
-                                self._emit()
+                total = int(resp.headers.get("content-length") or expected_size or 0)
+                downloaded = 0
+                last_emit = 0.0
+                with part_path.open("wb") as fh:
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.monotonic()
+                        if now - last_emit >= 0.15:
+                            last_emit = now
+                            pct = (downloaded / total * 100.0) if total > 0 else 0.0
+                            self._state.update(
+                                {
+                                    "downloaded_bytes": downloaded,
+                                    "total_bytes": total,
+                                    "progress_pct": round(min(99.9, pct), 1),
+                                }
+                            )
+                            self._emit()
 
             part_path.replace(target)
             final_size = target.stat().st_size
@@ -421,9 +423,9 @@ class UpdateManager:
         try:
             if sys.platform == "win32":
                 if ext == ".msi":
-                    subprocess.Popen(["msiexec", "/i", str(target)], close_fds=True)  # noqa: S603, S607
+                    subprocess.Popen(["msiexec", "/i", str(target)], close_fds=True)
                 else:
-                    os.startfile(str(target))  # noqa: S606
+                    os.startfile(str(target))
             else:
                 raise RuntimeError("Automatic installer launch is supported on Windows only.")
 

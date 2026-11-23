@@ -119,11 +119,42 @@ export interface BridgeErrorEvent {
   consecutive_errors?: number;
 }
 
+export type UpdateStatusKind =
+  | 'idle'
+  | 'checking'
+  | 'up_to_date'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'launched'
+  | 'error';
+
+export interface UpdateState {
+  status: UpdateStatusKind;
+  repo: string;
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  release_name?: string | null;
+  release_notes?: string | null;
+  published_at?: string | null;
+  html_url?: string | null;
+  asset_name?: string | null;
+  asset_size?: number;
+  download_url?: string | null;
+  downloaded_path?: string | null;
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  progress_pct?: number;
+  error?: string | null;
+}
+
 export type BridgeEventMap = {
   playback_tick: PlaybackTick;
   track_changed: TrackChangedEvent;
   queue_changed: QueueData;
   download_progress: DownloadProgress;
   library_changed: LibraryChangedEvent;
+  update_status: UpdateState;
   error: BridgeErrorEvent;
 };

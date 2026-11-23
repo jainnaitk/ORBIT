@@ -41,6 +41,7 @@ from metrolite.config import get_config
 from metrolite.library.downloader import DownloadManager, DownloadProgress, validate_video_id
 from metrolite.library.manager import LibraryManager
 from metrolite.store.db import get_connection, get_default_db_path, init_db
+from metrolite.updates import UpdateManager
 from metrolite.ytm.client import Track, YTMusicClient
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,7 @@ class BridgeController:
         media_keys: MediaKeysListener | None = None,
         db_path: Path | None = None,
         ws_manager: WebSocketManager | None = None,
+        updater: UpdateManager | None = None,
     ) -> None:
         self.db_path = Path(db_path) if db_path is not None else get_default_db_path()
         self.ws_manager = ws_manager or WebSocketManager()
@@ -220,6 +222,7 @@ class BridgeController:
         )
         self.library = library or LibraryManager(db_path=self.db_path)
         self.downloader = downloader or DownloadManager(db_path=self.db_path)
+        self.updater = updater or UpdateManager()
         self.media_keys = media_keys
         self.loop: asyncio.AbstractEventLoop | None = None
         self._tick_task: asyncio.Task[None] | None = None
@@ -255,11 +258,16 @@ class BridgeController:
         self.queue._on_queue_changed = self._on_queue_changed
         if hasattr(self.downloader, "add_progress_listener"):
             self.downloader.add_progress_listener(self._on_download_progress)
+        if hasattr(self.updater, "add_listener"):
+            self.updater.add_listener(self._on_update_status)
 
         if self.media_keys is not None:
             self.media_keys.on_play_pause = self._on_media_key_play_pause
             self.media_keys.on_next = self._on_media_key_next
             self.media_keys.on_prev = self._on_media_key_prev
+
+    def _on_update_status(self, state: dict[str, Any]) -> None:
+        self.ws_manager.broadcast_sync("update_status", state, self.loop)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -1155,6 +1163,8 @@ class BridgeController:
         self._background_tasks.clear()
         if hasattr(self.downloader, "stop"):
             self.downloader.stop()
+        if hasattr(self.updater, "stop"):
+            self.updater.stop()
         if hasattr(self.player, "terminate"):
             self.player.terminate()
         trim_memory()
@@ -1234,6 +1244,15 @@ def create_app(
                 from metrolite.ytm.lyrics import backfill_downloaded_lyrics
 
                 ctrl.spawn_task(backfill_downloaded_lyrics(ctrl.ytm, ctrl.db_path))
+
+                upd_cfg = getattr(get_config(), "updates", None)
+                if upd_cfg and upd_cfg.enabled and upd_cfg.check_on_startup:
+                    async def _startup_update_check() -> None:
+                        await asyncio.sleep(4.0)
+                        with suppress(Exception):
+                            await ctrl.updater.check_for_updates(force=False)
+
+                    ctrl.spawn_task(_startup_update_check())
             yield
         finally:
             ctrl.shutdown()
@@ -1747,6 +1766,23 @@ def create_app(
             {"type": "settings_updated", "settings": settings_dict},
         )
         return settings_dict
+
+    @app.get("/updates/status", dependencies=[Depends(verify_token)])
+    async def get_update_status() -> dict[str, Any]:
+        return ctrl.updater.get_state()
+
+    @app.post("/updates/check", dependencies=[Depends(verify_token)])
+    async def check_updates(force: bool = Query(default=True)) -> dict[str, Any]:
+        return await ctrl.updater.check_for_updates(force=force)
+
+    @app.post("/updates/download", dependencies=[Depends(verify_token)])
+    async def download_update(auto_install: bool = Query(default=True)) -> dict[str, Any]:
+        ctrl.updater.start_download(auto_install=auto_install)
+        return ctrl.updater.get_state()
+
+    @app.post("/updates/install", dependencies=[Depends(verify_token)])
+    async def install_update() -> dict[str, Any]:
+        return ctrl.updater.launch_installer()
 
     return app
 
