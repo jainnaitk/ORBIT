@@ -44,3 +44,10 @@ ui:
   close_to_tray: true
   destroy_webview_on_tray: true    # frees ~100 MB RAM when minimized/closed to tray
   thumbnail_cache_mb: 40
+
+updates:
+  enabled: true
+  github_repo: "naitikjain/orbit"  # update to your exact GitHub owner/repo
+  current_version: "0.1.0"
+  check_on_startup: true
+

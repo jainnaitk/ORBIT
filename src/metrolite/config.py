@@ -115,6 +115,13 @@ class YTMConfig(BaseModel):
         return expand_path(v) if v else None
 
 
+class UpdatesConfig(BaseModel):
+    enabled: bool = True
+    github_repo: str = "naitikjain/orbit"
+    current_version: str = "0.1.0"
+    check_on_startup: bool = True
+
+
 def find_default_config_path() -> Path:
     """Find the project config.yaml file if it exists."""
     cwd_config = Path.cwd() / "config.yaml"

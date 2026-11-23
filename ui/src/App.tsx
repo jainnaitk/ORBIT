@@ -81,6 +81,7 @@ export default function App() {
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
   const [isIslandMode, setIsIslandMode] = useState<boolean>(false);
+  const [isWindowTransitioning, setIsWindowTransitioning] = useState<boolean>(false);
   const [restoreSeq, setRestoreSeq] = useState<number>(0);
   const savedBoundsRef = useRef<SavedWindowBounds | null>(null);
   const islandSwitchingRef = useRef<boolean>(false);
@@ -413,7 +414,27 @@ export default function App() {
     [api]
   );
 
-  // Atomic glitch-free transition into Dynamic Island (hides -> native resize/center -> React swap -> paint -> reveal)
+  const waitForViewportCondition = useCallback(
+    (predicate: () => boolean, timeoutMs: number = 140): Promise<void> => {
+      return new Promise((resolve) => {
+        const deadline = performance.now() + timeoutMs;
+        const check = () => {
+          if (predicate() || performance.now() >= deadline) {
+            requestAnimationFrame(() => resolve());
+            return;
+          }
+          requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      });
+    },
+    []
+  );
+
+  // Zero-hide, zero-ghost transition into Dynamic Island:
+  // 1) Paint 100% transparent frame while window stays visible (WebView2 stays awake).
+  // 2) Resize & center transparent HWND (zero stale pixels, DWM transitions disabled).
+  // 3) Wait until WebView2 commits <= 420px viewport width, then reveal Dynamic Island.
   const handleEnterIsland = useCallback(async () => {
     if (islandSwitchingRef.current) return;
     islandSwitchingRef.current = true;
@@ -421,31 +442,40 @@ export default function App() {
       setRightDrawer('none');
       setSuckPayload(null);
       if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
-      savedBoundsRef.current = await enterDynamicIslandWindow();
-      setIsIslandMode(true);
+      setIsWindowTransitioning(true);
       await waitForNextPaint();
-      await showMainWindow(true);
+      savedBoundsRef.current = await enterDynamicIslandWindow();
+      await waitForViewportCondition(() => window.innerWidth <= 420, 140);
+      setIsIslandMode(true);
+      setIsWindowTransitioning(false);
     } finally {
       islandSwitchingRef.current = false;
     }
-  }, []);
+  }, [waitForViewportCondition]);
 
+  // Zero-hide, zero-ghost transition back to Full App:
+  // 1) Paint 100% transparent frame so the Pill can NEVER flash at top-left of main window.
+  // 2) Restore main window bounds (DWM transitions disabled).
+  // 3) Wait until WebView2 commits restored viewport width, then reveal Full App cleanly.
   const handleExitIsland = useCallback(async () => {
     if (islandSwitchingRef.current) return;
     islandSwitchingRef.current = true;
     try {
       setSuckPayload(null);
       if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
+      setIsWindowTransitioning(true);
+      await waitForNextPaint();
       await exitDynamicIslandWindow(savedBoundsRef.current);
+      await waitForViewportCondition(() => window.innerWidth >= 420, 160);
       setRestoreSeq((s) => s + 1);
       setIsIslandMode(false);
-      await waitForNextPaint();
+      setIsWindowTransitioning(false);
       await showMainWindow(true);
       window.setTimeout(() => void trimProcessMemory(), 800);
     } finally {
       islandSwitchingRef.current = false;
     }
-  }, []);
+  }, [waitForViewportCondition]);
 
   const handlePlayTrack = useCallback(
     async (track: Track, index: number = 0, trackList?: Track[]) => {
@@ -871,6 +901,10 @@ export default function App() {
     void handleExitIsland();
   }, [handleExitIsland]);
 
+  if (isWindowTransitioning) {
+    return <div className="w-screen h-screen bg-transparent pointer-events-none" />;
+  }
+
   if (isIslandMode) {
     return (
       <DynamicIsland
@@ -889,7 +923,6 @@ export default function App() {
 
   return (
     <div
-      key={`orbit-shell-${restoreSeq}`}
       className={`relative flex flex-col h-screen w-screen overflow-hidden select-none text-[#F1F4FA] bg-[#06080F] ${
         restoreSeq > 0 ? 'eh-app-restore' : ''
       }`}
@@ -936,7 +969,10 @@ export default function App() {
             onOpenCreatePlaylist={handleOpenCreatePlaylist}
           />
 
-          <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent">
+          <main
+            className="flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent"
+            style={{ contain: 'layout style' }}
+          >
             {activeTab === 'home' && (
               <HomeView
                 currentTrackId={activeVideoId}

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Music } from 'lucide-react';
 
 interface TrackImageProps {
@@ -18,6 +18,20 @@ const SIZE_MAP: Record<'sm' | 'md' | 'lg', string> = {
   lg: '=w360-h360',
 };
 
+// Bounded set of URLs already decoded by WebView2 so tab switches & Dynamic Island morphs
+// render cached artwork on Frame 1 with zero blank/skeleton flicker.
+const __LOADED_IMAGE_URLS__ = new Set<string>();
+const MAX_LOADED_URL_CACHE = 320;
+
+function markUrlLoaded(url: string): void {
+  if (__LOADED_IMAGE_URLS__.has(url)) return;
+  if (__LOADED_IMAGE_URLS__.size >= MAX_LOADED_URL_CACHE) {
+    const oldest = __LOADED_IMAGE_URLS__.values().next().value;
+    if (oldest) __LOADED_IMAGE_URLS__.delete(oldest);
+  }
+  __LOADED_IMAGE_URLS__.add(url);
+}
+
 function normalizeThumb(url: string | null | undefined, size: 'sm' | 'md' | 'lg'): string | null {
   if (!url) return null;
   const trimmed = url.trim();
@@ -30,23 +44,11 @@ function normalizeThumb(url: string | null | undefined, size: 'sm' | 'md' | 'lg'
   return trimmed;
 }
 
-export const TrackImage = ({
-  src,
-  videoId,
-  alt = '',
-  size = 'md',
-  className = 'w-full h-full object-cover',
-  iconSize = 18,
-  eager = false,
-}: TrackImageProps) => {
-  const [stage, setStage] = useState<number>(0);
-  const [loaded, setLoaded] = useState<boolean>(false);
-
-  useEffect(() => {
-    setStage(0);
-    setLoaded(false);
-  }, [src, videoId, size]);
-
+function buildCandidates(
+  src: string | null | undefined,
+  videoId: string | null | undefined,
+  size: 'sm' | 'md' | 'lg'
+): string[] {
   const candidates: string[] = [];
   const normalized = normalizeThumb(src, size);
   if (normalized) candidates.push(normalized);
@@ -57,8 +59,37 @@ export const TrackImage = ({
     candidates.push(`https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/mqdefault.jpg`);
     candidates.push(`https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`);
   }
+  return candidates;
+}
 
+export const TrackImage = ({
+  src,
+  videoId,
+  alt = '',
+  size = 'md',
+  className = 'w-full h-full object-cover',
+  iconSize = 18,
+  eager = false,
+}: TrackImageProps) => {
+  const candidates = buildCandidates(src, videoId, size);
+  const key = `${src || ''}|${videoId || ''}|${size}`;
+  const [stageState, setStageState] = useState<{ key: string; stage: number }>({ key, stage: 0 });
+  const stage = stageState.key === key ? stageState.stage : 0;
   const activeUrl = candidates[stage];
+
+  const isCached = Boolean(activeUrl && __LOADED_IMAGE_URLS__.has(activeUrl));
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(isCached ? activeUrl : null);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  const isLoaded = isCached || (Boolean(activeUrl) && loadedUrl === activeUrl);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (activeUrl && img && img.complete && img.naturalWidth > 0) {
+      markUrlLoaded(activeUrl);
+      setLoadedUrl(activeUrl);
+    }
+  }, [activeUrl]);
 
   if (!activeUrl) {
     return (
@@ -70,7 +101,7 @@ export const TrackImage = ({
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#0C101C]">
-      {!loaded && (
+      {!isLoaded && (
         <div
           className="absolute inset-0 eh-skeleton"
           style={{
@@ -80,15 +111,23 @@ export const TrackImage = ({
         />
       )}
       <img
+        ref={imgRef}
         src={activeUrl}
         alt={alt}
-        loading={eager ? 'eager' : 'lazy'}
-        decoding="async"
+        loading={eager || isCached ? 'eager' : 'lazy'}
+        decoding={isCached ? 'sync' : 'async'}
         draggable={false}
         referrerPolicy="no-referrer"
-        onLoad={() => setLoaded(true)}
-        onError={() => setStage((s) => s + 1)}
-        className={`${className} transition-opacity duration-200 ${loaded ? 'opacity-100' : 'opacity-0'}`}
+        onLoad={() => {
+          markUrlLoaded(activeUrl);
+          setLoadedUrl(activeUrl);
+        }}
+        onError={() => {
+          setStageState({ key, stage: stage + 1 });
+        }}
+        className={`${className} ${isCached ? '' : 'transition-opacity duration-150'} ${
+          isLoaded ? 'opacity-100' : 'opacity-0'
+        }`}
       />
     </div>
   );

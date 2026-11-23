@@ -62,6 +62,32 @@ mod win_mem {
     pub const SWP_FRAMECHANGED: u32 = 0x0020;
     pub const SWP_NOCOPYBITS: u32 = 0x0100;
     pub const SW_SHOWNOACTIVATE: i32 = 4;
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            dw_attribute: u32,
+            pv_attribute: *const c_void,
+            cb_attribute: u32,
+        ) -> i32;
+    }
+
+    pub fn disable_dwm_transitions(hwnd: *mut c_void) {
+        if hwnd.is_null() {
+            return;
+        }
+        let disable: i32 = 1;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &disable as *const i32 as *const c_void,
+                size_of::<i32>() as u32,
+            );
+        }
+    }
 
     #[repr(C)]
     struct ProcessEntry32W {
@@ -283,20 +309,29 @@ fn show_main_window(window: WebviewWindow, focus: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Atomically hides window, captures bounds, shrinks & centers below top work-area edge for Dynamic Island.
-/// Caller swaps React DOM while hidden, waits 2 rAFs, then calls `show_main_window`.
+fn disable_window_transitions(window: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            win_mem::disable_dwm_transitions(hwnd.0 as *mut std::ffi::c_void);
+        }
+    }
+}
+
+/// Atomically captures bounds, shrinks & centers below top work-area edge for Dynamic Island.
+/// Window stays visible with a 100% transparent WebView2 frame so WebView2 never freezes rAF
+/// or flashes stale swap-chain frames on Windows 11 DWM.
 #[tauri::command]
 fn enter_dynamic_island(window: WebviewWindow) -> Result<SavedWindowBounds, String> {
+    disable_window_transitions(&window);
     let was_maximized = window.is_maximized().unwrap_or(false);
-    let _ = window.hide();
-    if was_maximized {
-        let _ = window.unmaximize();
-        // Ensure Windows SW_RESTORE never flashes the restored main window visible
-        let _ = window.hide();
-    }
-
     let size = window.inner_size().map_err(|e| e.to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
+
+    if was_maximized {
+        let _ = window.unmaximize();
+    }
+
     let saved = SavedWindowBounds {
         width: size.width,
         height: size.height,
@@ -376,13 +411,14 @@ fn resize_dynamic_island(window: WebviewWindow, expanded: bool) -> Result<(), St
     Ok(())
 }
 
-/// Atomically hides island, restores saved main window geometry, and keeps hidden until React paints.
+/// Restores saved main window geometry while the WebView2 surface is blank transparent
+/// (no SW_HIDE / SW_SHOW so WebView2 never freezes or flashes a stale Dynamic Island frame).
 #[tauri::command]
 fn exit_dynamic_island(
     window: WebviewWindow,
     saved: Option<SavedWindowBounds>,
 ) -> Result<(), String> {
-    let _ = window.hide();
+    disable_window_transitions(&window);
     let _ = window.set_always_on_top(false);
     let _ = window.set_resizable(true);
     let _ = window.set_shadow(false);
@@ -392,14 +428,26 @@ fn exit_dynamic_island(
         let scale = window.scale_factor().unwrap_or(1.0);
         let min_w = (380.0 * scale).round() as u32;
         let min_h = (320.0 * scale).round() as u32;
-        let w = bounds.width.max(min_w) as i32;
-        let h = bounds.height.max(min_h) as i32;
+        let mut w = bounds.width.max(min_w) as i32;
+        let mut h = bounds.height.max(min_h) as i32;
+        let mut x = bounds.x;
+        let mut y = bounds.y;
 
-        apply_bounds_atomic(&window, bounds.x, bounds.y, w, h);
+        // Clamp restored geometry cleanly inside the active monitor work area
+        if let Ok(Some(mon)) = window.current_monitor() {
+            let wa = mon.work_area();
+            w = w.min(wa.size.width as i32);
+            h = h.min(wa.size.height as i32);
+            let max_x = wa.position.x + (wa.size.width as i32 - w).max(0);
+            let max_y = wa.position.y + (wa.size.height as i32 - h).max(0);
+            x = x.clamp(wa.position.x, max_x);
+            y = y.clamp(wa.position.y, max_y);
+        }
+
+        apply_bounds_atomic(&window, x, y, w, h);
 
         if bounds.was_maximized {
             let _ = window.maximize();
-            let _ = window.hide();
         }
     } else {
         let _ = window.set_size(LogicalSize::new(1120.0, 700.0));
@@ -411,8 +459,11 @@ fn exit_dynamic_island(
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            // Disable DWM hide/show transition ghosting on frameless transparent window
+            if let Some(main_win) = app.get_webview_window("main") {
+                disable_window_transitions(&main_win);
+            }
             // Trim initial cold startup pages once WebView2 settles (~6s after launch)
-            let _main_win = app.get_webview_window("main");
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(6));
                 spawn_memory_trim();

@@ -20,6 +20,7 @@ import type { Track, DownloadProgress } from '../api/types';
 interface TrackListProps {
   tracks: Track[];
   loading?: boolean;
+  scrollKey?: string;
   currentTrackId?: string | null;
   isPlaying?: boolean;
   downloads?: Record<string, DownloadProgress>;
@@ -47,6 +48,7 @@ interface MenuPosition {
 export const TrackList = ({
   tracks,
   loading = false,
+  scrollKey,
   currentTrackId,
   isPlaying,
   downloads = {},
@@ -72,6 +74,12 @@ export const TrackList = ({
     estimateSize: () => 58,
     overscan: 3,
   });
+
+  useEffect(() => {
+    if (scrollKey !== undefined && parentRef.current) {
+      parentRef.current.scrollTop = 0;
+    }
+  }, [scrollKey]);
 
   useEffect(() => {
     if (!menuState) return;
@@ -138,7 +146,10 @@ export const TrackList = ({
 
   return (
     <>
-      <div className="flex-none flex items-center px-3 sm:px-5 py-2 gap-2.5 sm:gap-3.5 border-b border-white/[0.08] bg-white/[0.02] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#7A84A6] select-none">
+      <div
+        className="flex-none flex items-center px-3 sm:px-5 py-2 gap-2.5 sm:gap-3.5 border-b border-white/[0.08] bg-white/[0.02] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#7A84A6] select-none"
+        style={{ paddingRight: 'calc(1.25rem + 5px)' }}
+      >
         <div className="hidden sm:block w-6 flex-none text-center">#</div>
         <div className="flex-1 min-w-0">Title</div>
         {showPlayCount && <div className="hidden sm:block flex-none w-16 text-right">Plays</div>}
@@ -151,7 +162,7 @@ export const TrackList = ({
       <div
         ref={parentRef}
         className="flex-1 overflow-y-auto w-full select-none bg-transparent"
-        style={{ contain: 'strict' }}
+        style={{ contain: 'strict', scrollbarGutter: 'stable' }}
       >
         <div
           style={{

@@ -40,6 +40,17 @@ interface LibraryViewProps {
   onPlaylistDeleted: (playlistId: string) => void;
 }
 
+const __ORBIT_LIB_CACHE__: Record<string, Track[]> = {};
+const MAX_LIB_CACHE_KEYS = 12;
+
+function setLibCache(key: string, items: Track[]): void {
+  const keys = Object.keys(__ORBIT_LIB_CACHE__);
+  if (keys.length >= MAX_LIB_CACHE_KEYS && !(key in __ORBIT_LIB_CACHE__)) {
+    delete __ORBIT_LIB_CACHE__[keys[0]];
+  }
+  __ORBIT_LIB_CACHE__[key] = items;
+}
+
 export const LibraryView = memo(({
   tab,
   playlistId,
@@ -63,14 +74,17 @@ export const LibraryView = memo(({
   onOpenAddToPlaylist,
   onPlaylistDeleted,
 }: LibraryViewProps) => {
-  const [fetchedTracks, setFetchedTracks] = useState<Track[]>([]);
   const [historySort, setHistorySort] = useState<'recent' | 'most_played'>('recent');
-  const [isLoading, setIsLoading] = useState<boolean>(tab === 'history' || tab === 'playlist');
-  const reqSeqRef = useRef<number>(0);
-  const prevViewKeyRef = useRef<string | null>(null);
-
   const needsFetch = tab === 'history' || (tab === 'playlist' && !!playlistId);
   const viewKey = `${tab}:${playlistId || ''}:${historySort}`;
+  const cachedForKey = needsFetch ? __ORBIT_LIB_CACHE__[viewKey] : undefined;
+
+  const [fetchedState, setFetchedState] = useState<{ key: string; items: Track[] }>(() => ({
+    key: viewKey,
+    items: cachedForKey ?? [],
+  }));
+  const [isLoading, setIsLoading] = useState<boolean>(needsFetch && !cachedForKey);
+  const reqSeqRef = useRef<number>(0);
 
   const activePlaylist = useMemo(
     () => (tab === 'playlist' && playlistId ? playlists.find((p) => p.id === playlistId) || null : null),
@@ -89,11 +103,13 @@ export const LibraryView = memo(({
         if (tab === 'history') {
           const list = await bridgeApi.getHistory(100, historySort);
           if (mySeq !== reqSeqRef.current) return;
-          setFetchedTracks(list);
+          setLibCache(viewKey, list);
+          setFetchedState({ key: viewKey, items: list });
         } else if (tab === 'playlist' && playlistId) {
           const list = await bridgeApi.getPlaylistTracks(playlistId);
           if (mySeq !== reqSeqRef.current) return;
-          setFetchedTracks(list);
+          setLibCache(viewKey, list);
+          setFetchedState({ key: viewKey, items: list });
         }
       } catch (err) {
         console.error('LibraryView loadData failed:', err);
@@ -103,18 +119,28 @@ export const LibraryView = memo(({
         }
       }
     },
-    [needsFetch, tab, playlistId, historySort]
+    [needsFetch, tab, playlistId, historySort, viewKey]
   );
 
   useEffect(() => {
-    const viewChanged = prevViewKeyRef.current !== viewKey;
-    prevViewKeyRef.current = viewKey;
-    if (needsFetch && viewChanged) {
-      setFetchedTracks([]);
-      setIsLoading(true);
+    if (!needsFetch) {
+      setIsLoading(false);
+      return;
     }
-    void loadData(needsFetch && viewChanged);
+    const cached = __ORBIT_LIB_CACHE__[viewKey];
+    if (cached) {
+      setFetchedState({ key: viewKey, items: cached });
+      setIsLoading(false);
+      void loadData(false);
+    } else {
+      setFetchedState({ key: viewKey, items: [] });
+      setIsLoading(true);
+      void loadData(true);
+    }
   }, [loadData, libraryVersion, needsFetch, viewKey]);
+
+  const fetchedTracks =
+    fetchedState.key === viewKey ? fetchedState.items : (cachedForKey ?? []);
 
   const tracks: Track[] =
     tab === 'liked' || tab === 'library'
@@ -198,7 +224,7 @@ export const LibraryView = memo(({
 
   return (
     <div
-      key={`${tab}-${playlistId || ''}`}
+      style={{ contain: 'layout style' }}
       className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel eh-page-in rounded-[26px] my-1"
     >
       <div className="flex-none p-5 sm:p-6 border-b border-white/[0.08] bg-white/[0.02] space-y-4">
@@ -232,7 +258,34 @@ export const LibraryView = memo(({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 flex-none">
+          <div className="flex items-center gap-2 flex-wrap flex-none">
+            {tab === 'history' && (
+              <div className="flex items-center gap-1 p-0.5 rounded-full bg-white/[0.05] border border-white/[0.09] mr-1">
+                <button
+                  onClick={() => setHistorySort('recent')}
+                  className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                    historySort === 'recent'
+                      ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                      : 'text-[#B4BEDB] hover:text-white'
+                  }`}
+                >
+                  <Clock size={12} />
+                  <span>Recent</span>
+                </button>
+                <button
+                  onClick={() => setHistorySort('most_played')}
+                  className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                    historySort === 'most_played'
+                      ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                      : 'text-[#B4BEDB] hover:text-white'
+                  }`}
+                >
+                  <TrendingUp size={12} />
+                  <span>Most Played</span>
+                </button>
+              </div>
+            )}
+
             {tracks.length > 0 && (
               <>
                 <button
@@ -272,38 +325,12 @@ export const LibraryView = memo(({
             )}
           </div>
         </div>
-
-        {tab === 'history' && (
-          <div className="flex items-center gap-2 pt-1">
-            <button
-              onClick={() => setHistorySort('recent')}
-              className={`px-3.5 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-all ${
-                historySort === 'recent'
-                  ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
-                  : 'ios-liquid-pill text-[#B4BEDB] hover:text-white'
-              }`}
-            >
-              <Clock size={13} />
-              <span>Recently Played</span>
-            </button>
-            <button
-              onClick={() => setHistorySort('most_played')}
-              className={`px-3.5 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-all ${
-                historySort === 'most_played'
-                  ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
-                  : 'ios-liquid-pill text-[#B4BEDB] hover:text-white'
-              }`}
-            >
-              <TrendingUp size={13} />
-              <span>Most Played</span>
-            </button>
-          </div>
-        )}
       </div>
 
       <TrackList
         tracks={tracks}
         loading={needsFetch && isLoading}
+        scrollKey={viewKey}
         currentTrackId={currentTrackId}
         isPlaying={isPlaying}
         downloads={downloads}

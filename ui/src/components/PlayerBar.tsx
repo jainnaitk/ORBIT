@@ -432,10 +432,12 @@ export const PlayerBar = ({
 
           <button
             onClick={onTogglePlay}
-            title={isPlayingOrBuffering ? 'Pause' : 'Play'}
-            className="w-8 h-8 sm:w-9 sm:h-9 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+            title={playback?.state === 'buffering' ? 'Buffering...' : isPlayingOrBuffering ? 'Pause' : 'Play'}
+            className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
           >
-            {isPlayingOrBuffering ? (
+            {playback?.state === 'buffering' ? (
+              <Loader2 size={15} className="eh-buffer-ring" />
+            ) : isPlayingOrBuffering ? (
               <Pause size={15} className="fill-current" />
             ) : (
               <Play size={15} className="fill-current ml-0.5" />

@@ -80,7 +80,7 @@ export const LyricsDrawer = ({
       };
     } else {
       setVisible(false);
-      const t = window.setTimeout(() => setRendered(false), 280);
+      const t = window.setTimeout(() => setRendered(false), 210);
       return () => clearTimeout(t);
     }
   }, [isOpen]);
@@ -524,19 +524,15 @@ export const LyricsDrawer = ({
                     style={{
                       opacity,
                       transform: isActive
-                        ? 'translate3d(6px, 0, 0) scale(1.04)'
-                        : 'translate3d(0, 0, 0) scale(1)',
+                        ? 'translate3d(6px, 0, 0) scale(1.06)'
+                        : 'translate3d(0, 0, 0) scale(0.94)',
                       transformOrigin: 'left center',
                       transition:
-                        'transform 400ms cubic-bezier(0.22, 1, 0.36, 1), opacity 340ms ease, text-shadow 340ms ease',
-                      textShadow: isActive
-                        ? '0 0 18px rgba(var(--dynamic-accent-rgb), 0.35)'
-                        : 'none',
+                        'transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease',
+                      willChange: isActive || dist <= 2 ? 'transform, opacity' : 'auto',
                     }}
-                    className={`block w-full text-left rounded-xl px-2 py-1 leading-snug hover:!opacity-100 ${
-                      isActive
-                        ? 'text-2xl sm:text-[26px] font-bold text-white tracking-[-0.015em]'
-                        : 'text-lg sm:text-[19px] font-semibold text-[#D6DDF5]'
+                    className={`block w-full text-left rounded-xl px-2 py-1 leading-snug text-xl sm:text-[23px] font-bold tracking-[-0.015em] hover:!opacity-100 ${
+                      isActive ? 'text-white' : 'text-[#D6DDF5]'
                     }`}
                   >
                     {line.text || '♪'}

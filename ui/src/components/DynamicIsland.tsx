@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play,
   Pause,
+  Loader2,
   SkipBack,
   SkipForward,
   Heart,
@@ -12,6 +13,7 @@ import { OrbitLogo } from './OrbitLogo';
 import {
   bridgeSocket,
   resizeDynamicIslandWindow,
+  waitForNextPaint,
 } from '../api/client';
 import type { PlaybackTick, QueueData, Track } from '../api/types';
 
@@ -28,7 +30,6 @@ interface DynamicIslandProps {
 }
 
 const AUTO_COLLAPSE_MS = 5000;
-const MORPH_MS = 230;
 
 async function startNativeWindowDrag(): Promise<void> {
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
@@ -73,7 +74,8 @@ export const DynamicIsland = ({
   const lastDisplayedSecRef = useRef<number>(-1);
 
   const currentTrack = playback?.current_track || queue?.current_track || null;
-  const isPlaying = playback?.state === 'playing' || playback?.state === 'buffering';
+  const isBuffering = playback?.state === 'buffering';
+  const isPlaying = playback?.state === 'playing' || isBuffering;
   const duration = playback?.duration || currentTrack?.duration_s || 0;
   const durationRef = useRef<number>(duration);
   durationRef.current = duration;
@@ -152,9 +154,11 @@ export const DynamicIsland = ({
     };
   }, [clearCollapseTimer, clearMorphTimer]);
 
-  // Smooth in-place Pill <-> Circle morph without hiding the window:
-  // - Collapsing: CSS-morph down to 58x58 inside 380x142 first, then shrink HWND to 78x78 for click-through.
-  // - Expanding: grow HWND to 380x142 first (top-centered circle stays pinned in place), then CSS-morph out to Pill.
+  // Zero-clip GPU morph between Pill and Circle:
+  // - Collapsing: smooth scale/fade out Pill (130ms) -> render Circle -> wait 2 rAFs -> shrink HWND around centered Circle.
+  // - Expanding: grow HWND to 380x142 first -> wait until window.innerWidth >= 350 -> render Pill with smooth spring-in.
+  const [morphPhase, setMorphPhase] = useState<'idle' | 'collapsing'>('idle');
+
   const transitionMode = useCallback(
     async (toCircle: boolean) => {
       if (switchingRef.current || !mountedRef.current) return;
@@ -163,20 +167,33 @@ export const DynamicIsland = ({
       clearMorphTimer();
       try {
         if (toCircle) {
-          setIsCircle(true);
+          setMorphPhase('collapsing');
           await new Promise<void>((resolve) => {
             morphTimerRef.current = window.setTimeout(() => {
               morphTimerRef.current = null;
               resolve();
-            }, MORPH_MS + 15);
+            }, 135);
           });
+          if (!mountedRef.current) return;
+          setIsCircle(true);
+          setMorphPhase('idle');
+          await waitForNextPaint();
           if (!mountedRef.current) return;
           await resizeDynamicIslandWindow(false);
         } else {
           await resizeDynamicIslandWindow(true);
           if (!mountedRef.current) return;
+          // Wait until WebView2 actually commits the expanded >=350px viewport before rendering the 364px Pill
           await new Promise<void>((resolve) => {
-            requestAnimationFrame(() => resolve());
+            const deadline = performance.now() + 110;
+            const check = () => {
+              if (!mountedRef.current || window.innerWidth >= 350 || performance.now() >= deadline) {
+                requestAnimationFrame(() => resolve());
+                return;
+              }
+              requestAnimationFrame(check);
+            };
+            requestAnimationFrame(check);
           });
           if (!mountedRef.current) return;
           setIsCircle(false);
@@ -286,9 +303,12 @@ export const DynamicIsland = ({
           width: isCircle ? 58 : 364,
           height: isCircle ? 58 : 126,
           borderRadius: isCircle ? 9999 : 28,
+          transformOrigin: 'top center',
+          transform: morphPhase === 'collapsing' ? 'scale3d(0.72, 0.72, 1)' : 'scale3d(1, 1, 1)',
+          opacity: morphPhase === 'collapsing' ? 0 : 1,
           transition:
-            'width 230ms cubic-bezier(0.22, 1, 0.36, 1), height 230ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 230ms cubic-bezier(0.22, 1, 0.36, 1)',
-          willChange: 'width, height, border-radius',
+            'transform 130ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease',
+          willChange: 'transform, opacity',
           ...(isCircle
             ? {
                 background: isPlaying
@@ -299,8 +319,8 @@ export const DynamicIsland = ({
         }}
         className={
           isCircle
-            ? 'relative p-[2.5px] flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 overflow-hidden'
-            : 'ios-liquid-island relative overflow-hidden flex flex-col justify-between px-3.5 py-2.5 titlebar-drag'
+            ? 'relative p-[2.5px] flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 overflow-hidden eh-island-circle-in'
+            : 'ios-liquid-island eh-island-in relative overflow-hidden flex flex-col justify-between px-3.5 py-2.5 titlebar-drag'
         }
       >
         {isCircle ? (
@@ -441,10 +461,12 @@ export const DynamicIsland = ({
                 </button>
                 <button
                   onClick={onTogglePlay}
-                  title={isPlaying ? 'Pause' : 'Play'}
+                  title={isBuffering ? 'Buffering...' : isPlaying ? 'Pause' : 'Play'}
                   className="w-8 h-8 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
                 >
-                  {isPlaying ? (
+                  {isBuffering ? (
+                    <Loader2 size={14} className="eh-buffer-ring" />
+                  ) : isPlaying ? (
                     <Pause size={14} className="fill-current" />
                   ) : (
                     <Play size={14} className="fill-current ml-0.5" />

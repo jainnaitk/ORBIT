@@ -54,7 +54,7 @@ export const QueueDrawer = memo(({
       };
     } else {
       setVisible(false);
-      const t = window.setTimeout(() => setRendered(false), 280);
+      const t = window.setTimeout(() => setRendered(false), 210);
       return () => clearTimeout(t);
     }
   }, [isOpen]);

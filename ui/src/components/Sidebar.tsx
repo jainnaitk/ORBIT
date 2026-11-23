@@ -113,7 +113,7 @@ export const Sidebar = memo(({
     <aside
       className={`${
         collapsed ? 'w-[58px] sm:w-[76px]' : 'w-[184px] sm:w-[222px]'
-      } flex-none ios-liquid-rail rounded-[20px] sm:rounded-[24px] flex flex-col p-1.5 sm:p-2 gap-1.5 sm:gap-2 select-none overflow-hidden transition-[width] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] my-1`}
+      } flex-none ios-liquid-rail rounded-[20px] sm:rounded-[24px] flex flex-col p-1.5 sm:p-2 gap-1.5 sm:gap-2 select-none overflow-hidden transition-[width] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] my-1`}
     >
       {/* Primary Orbital Destinations */}
       <nav className="space-y-1">
