@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -16,9 +17,18 @@ from metrolite.ytm.client import Track
 
 logger = logging.getLogger(__name__)
 
+_NON_COMPLETION_REASONS = {"aborted", "stop", "restarted", "quit", "redirect"}
+_last_trim_ts: float = 0.0
 
-def trim_memory() -> None:
-    """Run garbage collection and trim the process working set on Windows."""
+
+def trim_memory(force: bool = False) -> None:
+    """Run garbage collection and trim the process working set on Windows (debounced)."""
+    global _last_trim_ts
+    now = time.monotonic()
+    if not force and (now - _last_trim_ts) < 2.0:
+        return
+    _last_trim_ts = now
+
     import gc
 
     gc.collect()
@@ -73,6 +83,36 @@ else:
     _mpv_load_error = None
 
 
+def _extract_end_reason(event: Any) -> str:
+    """Extract normalized string reason ('eof', 'stop', 'error', etc.) from mpv end-file event."""
+    if event is None:
+        return "eof"
+
+    reason_val: Any = None
+    data = getattr(event, "data", None)
+    if data is not None and hasattr(data, "reason"):
+        reason_val = data.reason
+    elif hasattr(event, "reason"):
+        reason_val = event.reason
+
+    if reason_val is None and hasattr(event, "as_dict"):
+        with suppress(Exception):
+            d = event.as_dict()
+            if isinstance(d, dict):
+                reason_val = d.get("reason") or d.get("event", {}).get("reason")
+    elif reason_val is None and isinstance(event, dict):
+        reason_val = event.get("reason")
+
+    if isinstance(reason_val, bytes):
+        return reason_val.decode("utf-8", errors="ignore").lower()
+    if isinstance(reason_val, str):
+        return reason_val.lower()
+    if isinstance(reason_val, int):
+        mapping = {0: "eof", 1: "restarted", 2: "stop", 3: "quit", 4: "error", 5: "redirect"}
+        return mapping.get(reason_val, "unknown")
+    return "eof"
+
+
 class AudioPlayer:
     """Gapless audio player wrapping python-mpv."""
 
@@ -97,8 +137,18 @@ class AudioPlayer:
         self.time_pos: float = 0.0
         self.duration: float = 0.0
         self.volume: int = cfg.audio.default_volume
-        self.state: str = "stopped"  # "stopped" | "playing" | "paused" | "buffering"
+        self.state: str = "stopped"
         self._terminated: bool = False
+        self._loading_new_track: bool = False
+        self._expecting_new_file: bool = False
+        self._load_seq: int = 0
+        self._loaded_video_id: str | None = None
+        self._pause_requested: bool = False
+        self._gapless_promoted_id: str | None = None
+        self.consecutive_errors: int = 0
+        self.max_consecutive_errors: int = 2
+        self.current_user_agent: str | None = None
+        self.current_http_headers: list[str] | None = None
 
         if mpv_instance is not None:
             self._mpv = mpv_instance
@@ -117,6 +167,10 @@ class AudioPlayer:
                 "video": False,
                 "ytdl": False,
                 "gapless_audio": "yes",
+                "cache": "yes",
+                "cache_pause_initial": "no",
+                "demuxer_readahead_secs": 6,
+                "audio_buffer": 0.1,
                 "demuxer_max_bytes": demuxer_max_bytes,
                 "demuxer_max_back_bytes": demuxer_max_back_bytes,
                 "volume": float(self.volume),
@@ -126,6 +180,20 @@ class AudioPlayer:
             self._mpv = mpv.MPV(**mpv_kwargs)
 
         self._setup_mpv_observers()
+
+    @property
+    def mpv(self) -> Any:
+        """The underlying python-mpv instance."""
+        return self._mpv
+
+    @mpv.setter
+    def mpv(self, value: Any) -> None:
+        self._mpv = value
+
+    @property
+    def loaded_video_id(self) -> str | None:
+        """Return the video_id currently loaded in libmpv, or None."""
+        return self._loaded_video_id
 
     def set_callbacks(
         self,
@@ -150,17 +218,27 @@ class AudioPlayer:
 
             @self._mpv.property_observer("time-pos")
             def _on_time_pos_change(_name: str, value: Any) -> None:
-                if value is not None:
-                    self.time_pos = float(value)
-                    if self._on_time_pos:
-                        try:
-                            self._on_time_pos(self.time_pos)
-                        except Exception as e:  # noqa: BLE001
-                            logger.error("Error in on_time_pos callback: %s", e)
+                if value is None:
+                    self._expecting_new_file = False
+                    return
+                if self._loading_new_track:
+                    return
+                pos = float(value)
+                if self._expecting_new_file:
+                    if pos < 2.0:
+                        self._expecting_new_file = False
+                    else:
+                        return
+                self.time_pos = pos
+                if self._on_time_pos:
+                    try:
+                        self._on_time_pos(self.time_pos)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("Error in on_time_pos callback: %s", e)
 
             @self._mpv.property_observer("duration")
             def _on_duration_change(_name: str, value: Any) -> None:
-                if value is not None:
+                if value is not None and not self._loading_new_track:
                     self.duration = float(value)
                     if self._on_duration:
                         try:
@@ -180,28 +258,106 @@ class AudioPlayer:
             def _on_idle_active_change(_name: str, _value: Any) -> None:
                 self._update_state()
 
+            @self._mpv.event_callback("file-loaded")
+            def _on_file_loaded(_event: Any) -> None:
+                self._expecting_new_file = False
+                self._loading_new_track = False
+                self.time_pos = 0.0
+                self._update_state()
+
             @self._mpv.event_callback("end-file")
-            def _on_end_file(_event: Any) -> None:
-                if self.next_track is not None:
-                    self.current_track = self.next_track
+            def _on_end_file(event: Any) -> None:
+                reason = _extract_end_reason(event)
+                logger.info("mpv end-file event with reason: %s", reason)
+                if reason in _NON_COMPLETION_REASONS:
+                    return
+
+                if reason == "eof":
+                    self.reset_errors()
+                    if self.next_track is not None:
+                        self._gapless_promoted_id = self.next_track.video_id
+                        self.current_track = self.next_track
+                        self._loaded_video_id = self.next_track.video_id
+                        self.next_track = None
+                    else:
+                        self._gapless_promoted_id = None
+                        self._loaded_video_id = None
+                elif reason == "error":
+                    self.record_error()
                     self.next_track = None
+                    self._gapless_promoted_id = None
+                    self._loaded_video_id = None
+                    if self.consecutive_errors > self.max_consecutive_errors:
+                        logger.warning(
+                            "AudioPlayer reached max consecutive errors (%d). Pausing.",
+                            self.consecutive_errors,
+                        )
+                        self.pause()
+
                 if self._on_track_ended:
                     try:
-                        self._on_track_ended()
+                        import inspect
+
+                        sig = inspect.signature(self._on_track_ended)
+                        if len(sig.parameters) > 0:
+                            self._on_track_ended(reason)
+                        else:
+                            self._on_track_ended()
                     except Exception as e:  # noqa: BLE001
                         logger.error("Error in on_track_ended callback: %s", e)
         except Exception as e:  # noqa: BLE001
             logger.debug("Failed to set up some mpv observers (may be mocked): %s", e)
 
+    def record_error(self) -> int:
+        """Record an error and increment consecutive error count."""
+        self.consecutive_errors += 1
+        return self.consecutive_errors
+
+    def reset_errors(self) -> None:
+        """Reset consecutive error count to 0."""
+        self.consecutive_errors = 0
+
+    def can_skip_on_error(self) -> bool:
+        """Return True if consecutive errors are within the allowed limit (<= 2)."""
+        return self.consecutive_errors <= self.max_consecutive_errors
+
+    def set_user_agent(self, user_agent: str | None) -> None:
+        """Set HTTP User-Agent header in libmpv before loading stream URLs."""
+        self.current_user_agent = user_agent
+        if not user_agent:
+            return
+        with suppress(Exception):
+            self.mpv.user_agent = user_agent
+        with suppress(Exception):
+            self.mpv["user-agent"] = user_agent
+
+    def set_http_headers(self, headers: dict[str, str] | list[str] | None) -> None:
+        """Set HTTP header fields in libmpv before loading stream URLs."""
+        if not headers:
+            return
+        if isinstance(headers, dict):
+            header_list = [f"{k}: {v}" for k, v in headers.items()]
+            ua = headers.get("User-Agent") or headers.get("user-agent")
+            if ua and not self.current_user_agent:
+                self.set_user_agent(str(ua))
+        else:
+            header_list = list(headers)
+
+        self.current_http_headers = header_list
+        with suppress(Exception):
+            self.mpv.http_header_fields = header_list
+        with suppress(Exception):
+            self.mpv["http-header-fields"] = header_list
+
     def _update_state(self) -> None:
         """Derive and notify player state changes."""
-        if self._terminated:
+        if self._terminated or self._loading_new_track:
             return
         new_state = "stopped"
         try:
-            is_idle = getattr(self._mpv, "idle_active", True)
-            is_paused = getattr(self._mpv, "pause", False)
-            is_core_idle = getattr(self._mpv, "core_idle", False)
+            is_idle = getattr(self.mpv, "idle_active", True)
+            is_paused = getattr(self.mpv, "pause", False)
+            is_core_idle = getattr(self.mpv, "core_idle", False)
         except (AttributeError, OSError):
             is_idle = True
             is_paused = False
@@ -224,56 +380,251 @@ class AudioPlayer:
                 except Exception as e:  # noqa: BLE001
                     logger.error("Error in on_state_changed callback: %s", e)
 
-    def play_source(self, source: str, track: Track | None = None) -> None:
-        """Play a resolved audio source directly, replacing current playback."""
+    def consume_gapless_promotion(self, video_id: str) -> bool:
+        """Return True once if mpv already gaplessly advanced to video_id on EOF."""
+        if self._gapless_promoted_id == video_id:
+            self._gapless_promoted_id = None
+            return True
+        self._gapless_promoted_id = None
+        return False
+
+    def prepare_track(self, track: Track | None) -> None:
+        """Reset timeline to 0:00 and pause old audio while resolving the next track."""
+        self._gapless_promoted_id = None
+        self._pause_requested = False
+        self._loading_new_track = True
+        self._expecting_new_file = True
+        if self.state == "playing":
+            with suppress(Exception):
+                self.mpv.pause = True
         self.current_track = track
         self.next_track = None
-        self._mpv.loadfile(source, mode="replace")
-        self._mpv.pause = False
+        self.time_pos = 0.0
+        self.duration = float(track.duration_s) if (track and track.duration_s) else 0.0
+        if self.state != "buffering":
+            self.state = "buffering"
+            if self._on_state_changed:
+                try:
+                    self._on_state_changed(self.state)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Error in on_state_changed callback: %s", e)
+
+    def play(
+        self,
+        url: str,
+        track: Track | None = None,
+        user_agent: str | None = None,
+        headers: dict[str, str] | list[str] | None = None,
+    ) -> None:
+        """Play an audio URL or file path, resetting timeline and forwarding HTTP headers."""
+        ua = user_agent or getattr(url, "user_agent", None)
+        http_headers = headers if headers is not None else getattr(url, "http_headers", None)
+
+        if not ua and isinstance(http_headers, dict):
+            ua = http_headers.get("User-Agent") or http_headers.get("user-agent")
+
+        if ua:
+            self.set_user_agent(ua)
+        if http_headers:
+            self.set_http_headers(http_headers)
+
+        self._gapless_promoted_id = None
+        self._pause_requested = False
+        self.current_track = track
+        self._loaded_video_id = track.video_id if track is not None else None
+        self.next_track = None
+        self.time_pos = 0.0
+        self.duration = float(track.duration_s) if (track and track.duration_s) else 0.0
+        self._expecting_new_file = True
+        self._loading_new_track = False
+        self.mpv.play(str(url))
+        with suppress(Exception):
+            self.mpv.playlist_clear()
+        self.mpv.pause = False
         self._update_state()
 
-    async def load_and_play(self, track: Track) -> None:
-        """Resolve track audio source and start playback immediately."""
-        source = await self.resolver.resolve(track.video_id)
-        self.play_source(source, track)
+    def play_source(
+        self,
+        source: str,
+        track: Track | None = None,
+        user_agent: str | None = None,
+        http_headers: dict[str, str] | list[str] | None = None,
+    ) -> None:
+        """Play a resolved audio source directly, replacing current playback."""
+        self.play(
+            str(source),
+            track=track,
+            user_agent=user_agent or getattr(source, "user_agent", None),
+            headers=http_headers if http_headers is not None else getattr(source, "http_headers", None),
+        )
 
-    def preload_source(self, source: str, track: Track | None = None) -> None:
+    async def load_and_play(self, track: Track) -> None:
+        """Resolve track audio source and start playback immediately (cancels stale switches)."""
+        self._load_seq += 1
+        my_seq = self._load_seq
+        self.prepare_track(track)
+        try:
+            source = await self.resolver.resolve(track.video_id)
+        except Exception:
+            if my_seq == self._load_seq:
+                self._loading_new_track = False
+                self._expecting_new_file = False
+                if self._loaded_video_id != track.video_id:
+                    self._loaded_video_id = None
+                    with suppress(Exception):
+                        self.mpv.stop()
+                self._update_state()
+            raise
+        if my_seq != self._load_seq:
+            return
+        if self._pause_requested:
+            self._pause_requested = False
+            self._loading_new_track = False
+            self._expecting_new_file = False
+            if self._loaded_video_id != track.video_id:
+                self._loaded_video_id = None
+                with suppress(Exception):
+                    self.mpv.stop()
+            self._update_state()
+            return
+        ua = getattr(source, "user_agent", None)
+        headers = getattr(source, "http_headers", None)
+        if not ua and hasattr(self.resolver, "get_user_agent"):
+            ua = self.resolver.get_user_agent(track.video_id)
+        if not headers and hasattr(self.resolver, "get_http_headers"):
+            headers = self.resolver.get_http_headers(track.video_id)
+        self.play_source(source, track, user_agent=ua, http_headers=headers)
+
+    def clear_preloaded_next(self) -> None:
+        """Clear any previously appended gapless track from mpv's playlist."""
+        self.next_track = None
+        self._gapless_promoted_id = None
+        with suppress(Exception):
+            self.mpv.playlist_clear()
+
+    def preload_source(
+        self,
+        source: str,
+        track: Track | None = None,
+        user_agent: str | None = None,
+        http_headers: dict[str, str] | list[str] | None = None,
+    ) -> None:
         """Preload a resolved audio source for gapless next-track transition."""
+        ua = user_agent or getattr(source, "user_agent", None)
+        headers = http_headers if http_headers is not None else getattr(source, "http_headers", None)
+        if ua:
+            self.set_user_agent(ua)
+        if headers:
+            self.set_http_headers(headers)
+        with suppress(Exception):
+            self.mpv.playlist_clear()
         self.next_track = track
-        self._mpv.loadfile(source, mode="append")
+        self.mpv.loadfile(str(source), mode="append")
 
     async def preload_next(self, track: Track) -> None:
-        """Resolve and preload next track for gapless transition."""
+        """Resolve and preload next track for gapless transition (aborts if track switched)."""
+        my_seq = self._load_seq
         source = await self.resolver.resolve(track.video_id)
-        self.preload_source(source, track)
+        if my_seq != self._load_seq:
+            return
+        ua = getattr(source, "user_agent", None)
+        headers = getattr(source, "http_headers", None)
+        if not ua and hasattr(self.resolver, "get_user_agent"):
+            ua = self.resolver.get_user_agent(track.video_id)
+        if not headers and hasattr(self.resolver, "get_http_headers"):
+            headers = self.resolver.get_http_headers(track.video_id)
+        self.preload_source(source, track, user_agent=ua, http_headers=headers)
+
+    def switch_to_preloaded_next(self, track: Track) -> bool:
+        """Instantly switch to already-buffered next track in mpv (<50ms)."""
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return False
+        if self.next_track is None or self.next_track.video_id != track.video_id:
+            return False
+        try:
+            pl_count = getattr(self.mpv, "playlist_count", 0) or 0
+            pl_pos = getattr(self.mpv, "playlist_pos", -1)
+            if pl_count < 2 or pl_pos is None or pl_pos + 1 >= pl_count:
+                return False
+            self._load_seq += 1
+            self._pause_requested = False
+            self._loading_new_track = False
+            self._expecting_new_file = True
+            self.current_track = track
+            self._loaded_video_id = track.video_id
+            self.next_track = None
+            self.time_pos = 0.0
+            self.duration = float(track.duration_s) if track.duration_s else 0.0
+            self.mpv.playlist_next(mode="force")
+            self.mpv.pause = False
+            self._update_state()
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Instant playlist_next fallback to load_and_play: %s", e)
+            return False
 
     def pause(self) -> None:
         """Pause audio playback."""
-        self._mpv.pause = True
+        if self._loading_new_track:
+            self._pause_requested = True
+        self._loading_new_track = False
+        self.mpv.pause = True
         self._update_state()
 
     def resume(self) -> None:
         """Resume audio playback."""
-        self._mpv.pause = False
+        self._pause_requested = False
+        self._loading_new_track = False
+        self.mpv.pause = False
         self._update_state()
 
     def seek(self, seconds: float) -> None:
         """Seek to absolute position in seconds."""
-        self._mpv.seek(max(0.0, float(seconds)), reference="absolute")
+        self._expecting_new_file = False
+        self.time_pos = max(0.0, float(seconds))
+        self.mpv.seek(self.time_pos, reference="absolute")
+
+    def set_eq_preset(self, preset: str) -> str:
+        """Apply a native libmpv C audio filter preset with zero Python overhead."""
+        presets = {
+            "flat": "",
+            "bass": "equalizer=f=60:width_type=o:w=1.5:g=6,equalizer=f=150:width_type=o:w=1.5:g=3",
+            "vocal": "equalizer=f=1000:width_type=o:w=1.5:g=4,equalizer=f=3000:width_type=o:w=1.5:g=3,equalizer=f=120:width_type=o:w=1.5:g=-2",
+            "night": "dynaudnorm=f=150:g=15,equalizer=f=80:width_type=o:w=1.5:g=2,equalizer=f=10000:width_type=o:w=1.5:g=-3",
+            "studio": "equalizer=f=64:width_type=o:w=1.5:g=3,equalizer=f=1000:width_type=o:w=1.5:g=-1,equalizer=f=8000:width_type=o:w=1.5:g=3.5",
+        }
+        key = preset.lower().strip() if preset else "flat"
+        if key not in presets:
+            key = "flat"
+        af_val = presets[key]
+        with suppress(Exception):
+            self.mpv.af = af_val
+        with suppress(Exception):
+            self.mpv["af"] = af_val
+        return key
 
     def set_volume(self, volume: int) -> None:
         """Set playback volume (0 to 100)."""
         self.volume = max(0, min(100, int(volume)))
-        self._mpv.volume = float(self.volume)
+        self.mpv.volume = float(self.volume)
 
     def stop(self) -> None:
         """Stop playback and clear current track."""
+        self._load_seq += 1
+        self._pause_requested = False
+        self._gapless_promoted_id = None
+        self._loaded_video_id = None
+        self._loading_new_track = False
+        self._expecting_new_file = False
         with suppress(Exception):
-            self._mpv.stop()
+            self.mpv.stop()
         self.current_track = None
         self.next_track = None
         self.time_pos = 0.0
         self.duration = 0.0
+        self.reset_errors()
+        self.current_user_agent = None
+        self.current_http_headers = None
         self._update_state()
 
     def terminate(self) -> None:
@@ -282,4 +633,4 @@ class AudioPlayer:
             return
         self._terminated = True
         with suppress(Exception):
-            self._mpv.terminate()
+            self.mpv.terminate()

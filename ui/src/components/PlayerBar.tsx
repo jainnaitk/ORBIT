@@ -10,19 +10,38 @@ import {
   Heart,
   Download,
   CheckCircle2,
+  Loader2,
   ListMusic,
   Volume2,
   VolumeX,
-  Music,
+  AlignLeft,
+  SlidersHorizontal,
 } from 'lucide-react';
-import type { PlaybackTick, QueueData, Track, DownloadProgress } from '../api/types';
+import { TrackImage } from './TrackImage';
+import { bridgeSocket } from '../api/client';
+import type { PlaybackTick, QueueData, Track, DownloadProgress, EqPreset } from '../api/types';
+
+const EQ_OPTIONS: { id: EqPreset; label: string; desc: string }[] = [
+  { id: 'flat', label: 'Flat', desc: 'Original studio mix' },
+  { id: 'bass', label: 'Deep Bass', desc: 'Rich sub-bass punch' },
+  { id: 'vocal', label: 'Vocal Boost', desc: 'Crisp lyrics & mids' },
+  { id: 'night', label: 'Late Night', desc: 'Balanced low-volume dynamics' },
+  { id: 'studio', label: 'Studio', desc: 'Subtle V-curve clarity' },
+];
 
 interface PlayerBarProps {
   playback: PlaybackTick | null;
   queue: QueueData | null;
   downloads?: Record<string, DownloadProgress>;
+  likedIds?: Set<string>;
+  downloadedIds?: Set<string>;
+  eqPreset: EqPreset;
   isQueueOpen: boolean;
+  isLyricsOpen: boolean;
+  transitionKey: number;
+  onChangeEqPreset: (preset: EqPreset) => void;
   onToggleQueue: () => void;
+  onToggleLyrics: () => void;
   onTogglePlay: () => void;
   onNext: () => void;
   onPrev: () => void;
@@ -34,12 +53,26 @@ interface PlayerBarProps {
   onDownload: (track: Track) => void;
 }
 
+function formatTime(secs?: number): string {
+  if (!secs || isNaN(secs) || secs < 0) return '0:00';
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
 export const PlayerBar = ({
   playback,
   queue,
   downloads = {},
+  likedIds,
+  downloadedIds,
+  eqPreset,
   isQueueOpen,
+  isLyricsOpen,
+  transitionKey,
+  onChangeEqPreset,
   onToggleQueue,
+  onToggleLyrics,
   onTogglePlay,
   onNext,
   onPrev,
@@ -51,106 +84,197 @@ export const PlayerBar = ({
   onDownload,
 }: PlayerBarProps) => {
   const currentTrack = playback?.current_track || queue?.current_track || null;
-  const isPlaying = playback?.state === 'playing';
+  const currentVideoId = currentTrack?.video_id ?? null;
+
+  const isPlayingOrBuffering =
+    playback?.state === 'playing' || playback?.state === 'buffering';
+  const isActuallyPlaying = playback?.state === 'playing';
   const duration = playback?.duration || currentTrack?.duration_s || 0;
 
-  // Local 60fps interpolated position between 250ms server ticks
-  const [displayPos, setDisplayPos] = useState<number>(0);
   const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
-  const [scrubPos, setScrubPos] = useState<number>(0);
+  const [hoverInfo, setHoverInfo] = useState<{ pct: number; sec: number } | null>(null);
+  const [isEqOpen, setIsEqOpen] = useState<boolean>(false);
 
   const lastServerPosRef = useRef<number>(0);
   const lastTickTimeRef = useRef<number>(performance.now());
-  const isPlayingRef = useRef<boolean>(false);
   const durationRef = useRef<number>(0);
-
-  isPlayingRef.current = isPlaying;
-  durationRef.current = duration;
-
-  // Sync when a new server tick arrives
-  useEffect(() => {
-    if (playback?.time_pos !== undefined) {
-      lastServerPosRef.current = playback.time_pos;
-      lastTickTimeRef.current = performance.now();
-      if (!isScrubbing) {
-        setDisplayPos(playback.time_pos);
-      }
-    }
-  }, [playback?.time_pos, isScrubbing]);
-
-  // RequestAnimationFrame 60fps interpolation loop
-  useEffect(() => {
-    let animId: number;
-    const updateInterpolation = () => {
-      if (isPlayingRef.current && !isScrubbing) {
-        const elapsed = (performance.now() - lastTickTimeRef.current) / 1000;
-        const currentEstimated = Math.min(
-          durationRef.current > 0 ? durationRef.current : Infinity,
-          lastServerPosRef.current + elapsed
-        );
-        setDisplayPos(currentEstimated);
-      }
-      animId = requestAnimationFrame(updateInterpolation);
-    };
-    animId = requestAnimationFrame(updateInterpolation);
-    return () => cancelAnimationFrame(animId);
-  }, [isScrubbing]);
+  const lastDisplayedSecRef = useRef<number>(-1);
+  const scrubCleanupRef = useRef<(() => void) | null>(null);
 
   const progressBarRef = useRef<HTMLDivElement>(null);
+  const mobileProgressFillRef = useRef<HTMLDivElement>(null);
+  const scrubberFillRef = useRef<HTMLDivElement>(null);
+  const scrubberKnobTrackRef = useRef<HTMLDivElement>(null);
+  const elapsedTextRef = useRef<HTMLSpanElement>(null);
+
+  durationRef.current = duration;
+
+  // Pure GPU-composited scaleX + translate3d updater: zero layout/reflow or backdrop re-blur thrash
+  const paintProgress = useCallback((posSec: number, durSec: number) => {
+    const ratio = durSec > 0 ? Math.min(1, Math.max(0, posSec / durSec)) : 0;
+    const scaleCss = `scaleX(${ratio.toFixed(4)})`;
+    if (mobileProgressFillRef.current) mobileProgressFillRef.current.style.transform = scaleCss;
+    if (scrubberFillRef.current) scrubberFillRef.current.style.transform = scaleCss;
+    if (scrubberKnobTrackRef.current) {
+      scrubberKnobTrackRef.current.style.transform = `translate3d(${((ratio - 1) * 100).toFixed(3)}%, 0, 0)`;
+    }
+    const wholeSec = Math.floor(Math.max(0, posSec));
+    if (wholeSec !== lastDisplayedSecRef.current) {
+      lastDisplayedSecRef.current = wholeSec;
+      if (elapsedTextRef.current) {
+        elapsedTextRef.current.textContent = formatTime(wholeSec);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const startPos =
+      currentVideoId && bridgeSocket.latestTrackId === currentVideoId
+        ? bridgeSocket.latestTimePos
+        : 0;
+    lastServerPosRef.current = startPos;
+    lastTickTimeRef.current = performance.now();
+    lastDisplayedSecRef.current = -1;
+    paintProgress(startPos, durationRef.current);
+  }, [currentVideoId, paintProgress]);
+
+  const isScrubbingRef = useRef<boolean>(false);
+  isScrubbingRef.current = isScrubbing;
+
+  useEffect(() => {
+    if (playback?.time_pos !== undefined) {
+      const syncedPos =
+        currentVideoId && bridgeSocket.latestTrackId === currentVideoId
+          ? bridgeSocket.latestTimePos
+          : playback.time_pos;
+      lastServerPosRef.current = syncedPos;
+      lastTickTimeRef.current = performance.now();
+      if (!isScrubbing) {
+        paintProgress(syncedPos, duration);
+      }
+    }
+  }, [playback?.time_pos, currentVideoId, duration, isScrubbing, paintProgress]);
+
+  // Direct WebSocket time_pos sync so 250ms ticks never force full-app React re-renders
+  useEffect(() => {
+    return bridgeSocket.on('playback_tick', (tick) => {
+      if (typeof tick.time_pos === 'number') {
+        lastServerPosRef.current = tick.time_pos;
+        lastTickTimeRef.current = performance.now();
+        if (!isScrubbingRef.current) {
+          paintProgress(tick.time_pos, tick.duration || durationRef.current);
+        }
+      }
+    });
+  }, [paintProgress]);
+
+  // Native 60fps GPU-composited interpolation (zero React re-renders, pauses when unfocused/hidden)
+  useEffect(() => {
+    if (!isActuallyPlaying || isScrubbing) return;
+    let rafId = 0;
+
+    const frame = (now: number) => {
+      if (document.hidden || !document.hasFocus()) {
+        rafId = 0;
+        return;
+      }
+      rafId = requestAnimationFrame(frame);
+      const elapsed = (now - lastTickTimeRef.current) / 1000;
+      const dur = durationRef.current;
+      const estimated = Math.min(dur > 0 ? dur : Infinity, lastServerPosRef.current + elapsed);
+      paintProgress(estimated, dur);
+    };
+
+    const syncLoop = () => {
+      if (document.hidden || !document.hasFocus()) {
+        if (rafId !== 0) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+      } else if (rafId === 0) {
+        rafId = requestAnimationFrame(frame);
+      }
+    };
+
+    syncLoop();
+    window.addEventListener('focus', syncLoop);
+    window.addEventListener('blur', syncLoop);
+    document.addEventListener('visibilitychange', syncLoop);
+    return () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener('focus', syncLoop);
+      window.removeEventListener('blur', syncLoop);
+      document.removeEventListener('visibilitychange', syncLoop);
+    };
+  }, [isActuallyPlaying, isScrubbing, paintProgress]);
+
+  useEffect(() => {
+    return () => {
+      scrubCleanupRef.current?.();
+      scrubCleanupRef.current = null;
+    };
+  }, []);
 
   const handleSeekFromPointer = useCallback(
     (e: React.PointerEvent | MouseEvent) => {
       if (!progressBarRef.current || duration <= 0) return;
       const rect = progressBarRef.current.getBoundingClientRect();
       const clickX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-      const percentage = clickX / rect.width;
-      const targetSec = percentage * duration;
-      setScrubPos(targetSec);
-      setDisplayPos(targetSec);
+      const targetSec = (clickX / rect.width) * duration;
+      paintProgress(targetSec, duration);
     },
-    [duration]
+    [duration, paintProgress]
   );
 
   const onPointerDown = (e: React.PointerEvent) => {
+    scrubCleanupRef.current?.();
     setIsScrubbing(true);
     handleSeekFromPointer(e);
-    const onPointerMove = (moveEvent: MouseEvent) => {
-      handleSeekFromPointer(moveEvent);
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      scrubCleanupRef.current = null;
     };
-    const onPointerUp = (upEvent: MouseEvent) => {
+    const onPointerMove = (moveEvent: PointerEvent) => handleSeekFromPointer(moveEvent);
+    const onPointerUp = (upEvent: PointerEvent) => {
       if (progressBarRef.current && duration > 0) {
         const rect = progressBarRef.current.getBoundingClientRect();
         const clickX = Math.max(0, Math.min(rect.width, upEvent.clientX - rect.left));
         const finalSec = (clickX / rect.width) * duration;
         onSeek(finalSec);
-        setDisplayPos(finalSec);
+        lastServerPosRef.current = finalSec;
+        lastTickTimeRef.current = performance.now();
+        paintProgress(finalSec, duration);
       }
       setIsScrubbing(false);
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
+      cleanup();
     };
+    const onPointerCancel = () => {
+      setIsScrubbing(false);
+      paintProgress(lastServerPosRef.current, duration);
+      cleanup();
+    };
+
+    scrubCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
   };
 
-  const formatTime = (secs?: number): string => {
-    if (!secs || isNaN(secs) || secs < 0) return '0:00';
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  const handleBarHover = (e: React.MouseEvent) => {
+    if (!progressBarRef.current || duration <= 0) return;
+    const rect = progressBarRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    setHoverInfo({ pct: (x / rect.width) * 100, sec: (x / rect.width) * duration });
   };
 
-  const currentPos = isScrubbing ? scrubPos : displayPos;
-  const progressPct = duration > 0 ? Math.min(100, Math.max(0, (currentPos / duration) * 100)) : 0;
-
-  // Volume handling
   const [volume, setVolume] = useState<number>(playback?.volume ?? 80);
   const [prevVolume, setPrevVolume] = useState<number>(80);
 
   useEffect(() => {
-    if (playback?.volume !== undefined) {
-      setVolume(playback.volume);
-    }
+    if (playback?.volume !== undefined) setVolume(playback.volume);
   }, [playback?.volume]);
 
   const handleVolumeChange = (newVol: number) => {
@@ -167,170 +291,334 @@ export const PlayerBar = ({
     }
   };
 
+  const isLiked = currentTrack
+    ? likedIds
+      ? likedIds.has(currentTrack.video_id)
+      : !!currentTrack.is_liked
+    : false;
+
+  const dlState = currentTrack ? downloads[currentTrack.video_id] : undefined;
+  const isDownloading =
+    dlState?.status === 'downloading' ||
+    dlState?.status === 'queued' ||
+    dlState?.status === 'tagging';
   const isDownloaded =
-    currentTrack &&
-    (currentTrack.download_status === 'completed' ||
-      downloads[currentTrack.video_id]?.status === 'completed' ||
+    !!currentTrack &&
+    (downloadedIds?.has(currentTrack.video_id) ||
+      currentTrack.download_status === 'completed' ||
+      dlState?.status === 'completed' ||
       !!currentTrack.local_path);
 
   const queueCount = queue?.items?.length || 0;
 
-  // Disciplined 300x300 artwork
-  const formatCover = (url?: string | null): string | undefined => {
-    if (!url) return undefined;
-    if (url.includes('googleusercontent.com') || url.includes('ggpht.com')) {
-      return url.replace(/=w\d+-h\d+/, '=w300-h300');
-    }
-    return url;
-  };
-
   return (
-    <footer className="h-[76px] flex-none bg-bg-player border-t border-border-subtle px-4 flex items-center justify-between z-50 select-none">
-      {/* Left: Track Info & Offline Indicator */}
-      <div className="flex items-center gap-3 w-64 min-w-0">
-        <div className="w-12 h-12 rounded bg-bg-surface flex-none overflow-hidden border border-border-subtle flex items-center justify-center">
-          {currentTrack?.thumbnail_url ? (
-            <img
-              src={formatCover(currentTrack.thumbnail_url)}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <Music size={20} className="text-text-2 opacity-50" />
-          )}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-semibold text-text-1 truncate">
-            {currentTrack?.title || 'Ready'}
-          </div>
-          <div className="text-[11px] text-text-2 truncate flex items-center gap-1.5">
-            <span>{currentTrack?.artist || 'MetroLite Desktop'}</span>
-            {isDownloaded && (
-              <span className="text-[9px] uppercase font-bold text-downloaded bg-downloaded/10 px-1 py-0.2 rounded border border-downloaded/20">
-                Offline
-              </span>
-            )}
-          </div>
-        </div>
-
-        {currentTrack && (
-          <button
-            onClick={() => onToggleLike(currentTrack)}
-            title={currentTrack.is_liked ? 'Unlike' : 'Like'}
-            className="p-1.5 text-text-2 hover:text-liked transition-colors flex-none"
-          >
-            <Heart
-              size={16}
-              className={currentTrack.is_liked ? 'fill-liked text-liked' : 'text-text-2'}
-            />
-          </button>
-        )}
+    <footer className="w-full max-w-[1120px] mx-auto h-[68px] sm:h-[80px] flex-none ios-liquid-glass rounded-[22px] sm:rounded-[26px] px-2.5 sm:px-3.5 lg:px-4 flex items-center justify-between gap-2 lg:gap-3 z-50 select-none relative overflow-visible">
+      {/* Compact mobile-only progress bar (hidden on >=sm where the center scrubber is shown) */}
+      <div className="sm:hidden pointer-events-none absolute top-0 left-5 right-5 h-[2px] overflow-hidden rounded-full opacity-90">
+        <div
+          ref={mobileProgressFillRef}
+          className="w-full h-full origin-left will-change-transform"
+          style={{
+            transform: 'scaleX(0)',
+            background:
+              'linear-gradient(90deg, transparent, rgba(var(--dynamic-secondary-rgb),0.75), var(--dynamic-accent))',
+          }}
+        />
       </div>
 
-      {/* Center: Controls + 60fps Scrubber */}
-      <div className="flex flex-col items-center gap-1.5 flex-1 max-w-xl px-4">
-        {/* Buttons */}
-        <div className="flex items-center gap-4">
+      {/* Left: Spinning Album Art + Rising Track Meta + Heart */}
+      <div className="flex-1 sm:flex-none sm:w-[175px] md:w-[225px] lg:w-[270px] min-w-0 h-full flex items-center overflow-hidden">
+        <div
+          key={`${currentVideoId || 'empty'}-${transitionKey}`}
+          className={`flex items-center gap-2.5 sm:gap-3 w-full min-w-0 ${
+            transitionKey > 0 ? 'eh-rise-card' : ''
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => currentTrack && onToggleLyrics()}
+            title={currentTrack ? 'Show Album Art & Synced Lyrics' : 'Ready'}
+            className="group relative w-10 h-10 sm:w-[50px] sm:h-[50px] rounded-full p-[2px] flex-none transition-transform hover:scale-105"
+            style={{
+              background: isPlayingOrBuffering
+                ? 'conic-gradient(from 0deg, rgba(var(--dynamic-accent-rgb), 0.9), rgba(255,255,255,0.28), rgba(var(--dynamic-secondary-rgb), 0.75), rgba(var(--dynamic-accent-rgb), 0.9))'
+                : 'rgba(255,255,255,0.16)',
+            }}
+          >
+            <div className="w-full h-full rounded-full overflow-hidden bg-black relative">
+              <div className={`w-full h-full eh-spin-vinyl ${isPlayingOrBuffering ? '' : 'eh-paused'}`}>
+                <TrackImage
+                  src={currentTrack?.thumbnail_url}
+                  videoId={currentTrack?.video_id}
+                  size="sm"
+                  iconSize={16}
+                  eager
+                />
+              </div>
+              <span className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-inset ring-white/25" />
+            </div>
+          </button>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <div
+                onClick={() => currentTrack && onToggleLyrics()}
+                title={currentTrack?.title}
+                className="text-xs sm:text-[13px] font-semibold text-[#F4F6FF] truncate hover:underline cursor-pointer"
+              >
+                {currentTrack?.title || 'Ready to orbit'}
+              </div>
+              {isActuallyPlaying && (
+                <div className="hidden sm:flex items-end gap-[2px] h-2.5 flex-none">
+                  <span
+                    className="w-[2px] h-full rounded-full eh-eq-bar"
+                    style={{ background: 'var(--dynamic-accent)' }}
+                  />
+                  <span
+                    className="w-[2px] h-full rounded-full eh-eq-bar"
+                    style={{ background: 'var(--dynamic-accent)', animationDelay: '180ms' }}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="text-[10px] sm:text-[11px] text-[#9BA4C4] truncate flex items-center gap-1 mt-0.5">
+              {isDownloaded && (
+                <span
+                  title="Downloaded offline"
+                  className="inline-flex items-center text-[#34D399] flex-none"
+                >
+                  <CheckCircle2 size={11} />
+                </span>
+              )}
+              <span title={currentTrack?.artist} className="truncate">
+                {currentTrack?.artist || 'ORBIT Desktop'}
+              </span>
+            </div>
+          </div>
+
+          {currentTrack && (
+            <button
+              onClick={() => onToggleLike(currentTrack)}
+              title={isLiked ? 'Unlike' : 'Like'}
+              className="hidden md:flex w-8 h-8 rounded-full items-center justify-center text-[#9BA4C4] hover:text-[#FF4D8D] hover:bg-white/[0.08] transition-colors flex-none"
+            >
+              <Heart size={15} className={isLiked ? 'fill-[#FF4D8D] text-[#FF4D8D]' : ''} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Center: Sculpted Liquid Glass Transport Pill + Precision Orbital Scrubber */}
+      <div className="flex flex-col items-center gap-1.5 flex-none sm:flex-1 sm:max-w-[440px]">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1 rounded-full ios-liquid-pill">
           <button
             onClick={onToggleShuffle}
             title={queue?.shuffle ? 'Shuffle On' : 'Shuffle Off'}
-            className={`p-1.5 rounded transition-colors ${
-              queue?.shuffle ? 'text-accent' : 'text-text-2 hover:text-text-1'
+            className={`hidden sm:flex w-7 h-7 rounded-full items-center justify-center transition-colors ${
+              queue?.shuffle ? 'bg-white/12' : 'text-[#9BA4C4] hover:text-white'
             }`}
+            style={queue?.shuffle ? { color: 'var(--dynamic-accent)' } : undefined}
           >
-            <Shuffle size={14} />
+            <Shuffle size={13} />
           </button>
 
           <button
             onClick={onPrev}
             title="Previous Track"
-            className="p-1.5 text-text-2 hover:text-text-1 transition-colors"
+            className="w-7 h-7 rounded-full flex items-center justify-center text-[#D4DCFA] hover:text-white hover:bg-white/10 transition-colors"
           >
-            <SkipBack size={17} />
+            <SkipBack size={14} />
           </button>
 
-          {/* 40px Solid Circle Play/Pause Button */}
           <button
             onClick={onTogglePlay}
-            title={isPlaying ? 'Pause' : 'Play'}
-            className="w-10 h-10 rounded-full bg-text-1 text-bg-base flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+            title={isPlayingOrBuffering ? 'Pause' : 'Play'}
+            className="w-8 h-8 sm:w-9 sm:h-9 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
           >
-            {isPlaying ? (
-              <Pause size={18} className="fill-current" />
+            {isPlayingOrBuffering ? (
+              <Pause size={15} className="fill-current" />
             ) : (
-              <Play size={18} className="fill-current ml-0.5" />
+              <Play size={15} className="fill-current ml-0.5" />
             )}
           </button>
 
           <button
             onClick={onNext}
             title="Next Track"
-            className="p-1.5 text-text-2 hover:text-text-1 transition-colors"
+            className="w-7 h-7 rounded-full flex items-center justify-center text-[#D4DCFA] hover:text-white hover:bg-white/10 transition-colors"
           >
-            <SkipForward size={17} />
+            <SkipForward size={14} />
           </button>
 
           <button
             onClick={onCycleRepeat}
             title={`Repeat: ${queue?.repeat_mode || 'off'}`}
-            className={`p-1.5 rounded transition-colors ${
+            className={`hidden sm:flex w-7 h-7 rounded-full items-center justify-center transition-colors ${
               queue?.repeat_mode && queue.repeat_mode !== 'off'
-                ? 'text-accent'
-                : 'text-text-2 hover:text-text-1'
+                ? 'bg-white/12'
+                : 'text-[#9BA4C4] hover:text-white'
             }`}
+            style={
+              queue?.repeat_mode && queue.repeat_mode !== 'off'
+                ? { color: 'var(--dynamic-accent)' }
+                : undefined
+            }
           >
-            {queue?.repeat_mode === 'one' ? <Repeat1 size={15} /> : <Repeat size={14} />}
+            {queue?.repeat_mode === 'one' ? <Repeat1 size={14} /> : <Repeat size={13} />}
           </button>
         </div>
 
-        {/* 60fps Scrubber Progress Bar */}
-        <div className="w-full flex items-center gap-2.5 text-[11px] font-mono text-text-2">
-          <span className="w-9 text-right flex-none">{formatTime(currentPos)}</span>
+        {/* GPU-Composited Orbital Scrubber */}
+        <div className="hidden sm:flex w-full items-center gap-2 text-[10px] font-mono tabular-nums text-[#9BA4C4]">
+          <span ref={elapsedTextRef} className="w-8 text-right flex-none">
+            0:00
+          </span>
 
           <div
             ref={progressBarRef}
             onPointerDown={onPointerDown}
-            className="flex-1 h-3 flex items-center cursor-pointer group py-1"
+            onMouseMove={handleBarHover}
+            onMouseLeave={() => setHoverInfo(null)}
+            className="flex-1 h-3.5 flex items-center cursor-pointer group relative"
           >
-            <div className="w-full h-1 bg-white/[0.08] rounded-full overflow-hidden relative group-hover:h-1.5 transition-all">
+            {hoverInfo && duration > 0 && (
               <div
-                className="h-full bg-accent rounded-full transition-[width] duration-75"
-                style={{ width: `${progressPct}%` }}
-              />
+                style={{ left: `${Math.max(6, Math.min(94, hoverInfo.pct))}%` }}
+                className="pointer-events-none absolute -top-7 -translate-x-1/2 px-2 py-0.5 rounded-full ios-liquid-popover text-[10px] font-mono tabular-nums text-[#F4F6FF]"
+              >
+                {formatTime(hoverInfo.sec)}
+              </div>
+            )}
+
+            <div className="w-full h-[3.5px] bg-white/[0.15] rounded-full relative group-hover:h-[5px] transition-[height] duration-150">
+              <div className="absolute inset-0 rounded-full overflow-hidden">
+                <div
+                  ref={scrubberFillRef}
+                  className="w-full h-full origin-left will-change-transform"
+                  style={{
+                    transform: 'scaleX(0)',
+                    background:
+                      'linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF)',
+                  }}
+                />
+              </div>
+              <div className="pointer-events-none absolute inset-0">
+                <div
+                  ref={scrubberKnobTrackRef}
+                  className="w-full h-full relative will-change-transform"
+                  style={{ transform: 'translate3d(-100%, 0, 0)' }}
+                >
+                  <span
+                    className="w-3 h-3 rounded-full bg-white absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ boxShadow: '0 0 12px var(--dynamic-accent)' }}
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
-          <span className="w-9 text-left flex-none">{formatTime(duration)}</span>
+          <span className="w-8 text-left flex-none">{formatTime(duration)}</span>
         </div>
       </div>
 
-      {/* Right: Actions, Volume & Queue Drawer Toggle */}
-      <div className="flex items-center gap-3 w-64 justify-end">
+      {/* Right: Utility Cluster (Lyrics, EQ, Download, Volume, Queue) */}
+      <div className="flex items-center gap-1 lg:gap-1.5 w-auto md:w-[235px] lg:w-[275px] justify-end relative flex-none">
+        <button
+          onClick={onToggleLyrics}
+          title="Toggle Lyrics Drawer"
+          className={`w-8 h-8 rounded-full flex items-center justify-center transition-all border ${
+            isLyricsOpen
+              ? 'ios-liquid-pill border-[rgba(var(--dynamic-accent-rgb),0.55)]'
+              : 'border-transparent text-[#9AA5C4] hover:text-white hover:bg-white/[0.08]'
+          }`}
+          style={isLyricsOpen ? { color: 'var(--dynamic-accent)' } : undefined}
+        >
+          <AlignLeft size={14} />
+        </button>
+
+        <div className="relative hidden sm:block">
+          <button
+            onClick={() => setIsEqOpen((o) => !o)}
+            title={`Audio EQ: ${eqPreset}`}
+            className={`h-8 px-2 rounded-full flex items-center gap-1 transition-all border ${
+              isEqOpen || eqPreset !== 'flat'
+                ? 'ios-liquid-pill border-[rgba(var(--dynamic-accent-rgb),0.45)]'
+                : 'border-transparent text-[#9AA5C4] hover:text-white hover:bg-white/[0.08]'
+            }`}
+            style={eqPreset !== 'flat' ? { color: 'var(--dynamic-accent)' } : undefined}
+          >
+            <SlidersHorizontal size={13} />
+            {eqPreset !== 'flat' && (
+              <span className="hidden lg:inline text-[9px] font-mono uppercase">{eqPreset}</span>
+            )}
+          </button>
+
+          {isEqOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setIsEqOpen(false)} />
+              <div className="absolute bottom-12 right-0 w-52 rounded-2xl ios-liquid-popover eh-popover-in p-2 z-50 space-y-1">
+                <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#9AA5C4]">
+                  Audio EQ Preset
+                </div>
+                {EQ_OPTIONS.map((opt) => {
+                  const active = eqPreset === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={() => {
+                        onChangeEqPreset(opt.id);
+                        setIsEqOpen(false);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-xl transition-colors ${
+                        active
+                          ? 'bg-white/12 text-[#F1F4FA]'
+                          : 'text-[#9AA5C4] hover:bg-white/[0.07] hover:text-white'
+                      }`}
+                    >
+                      <div
+                        className="text-xs font-semibold"
+                        style={active ? { color: 'var(--dynamic-accent)' } : undefined}
+                      >
+                        {opt.label}
+                      </div>
+                      <div className="text-[10px] text-[#7A84A6]">{opt.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
         {currentTrack && (
           <button
-            onClick={() => onDownload(currentTrack)}
-            title={isDownloaded ? 'Downloaded' : 'Download track'}
-            className="p-1.5 text-text-2 hover:text-downloaded transition-colors"
+            onClick={() => !isDownloading && onDownload(currentTrack)}
+            title={
+              isDownloaded
+                ? 'Downloaded offline (+ .lrc lyrics)'
+                : isDownloading
+                ? 'Downloading...'
+                : 'Download track & cache synced lyrics'
+            }
+            className="hidden md:flex w-8 h-8 rounded-full items-center justify-center text-[#9AA5C4] hover:text-[#34D399] hover:bg-white/[0.08] transition-colors"
           >
             {isDownloaded ? (
-              <CheckCircle2 size={16} className="text-downloaded" />
+              <CheckCircle2 size={15} className="text-[#34D399]" />
+            ) : isDownloading ? (
+              <Loader2 size={15} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
             ) : (
-              <Download size={16} />
+              <Download size={14} />
             )}
           </button>
         )}
 
-        {/* Volume Mute & Slider */}
-        <div className="flex items-center gap-1.5">
+        <div className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/[0.06] border border-white/[0.10]">
           <button
             onClick={toggleMute}
             title={volume === 0 ? 'Unmute' : 'Mute'}
-            className="p-1 text-text-2 hover:text-text-1 transition-colors"
+            className="p-0.5 text-[#9AA5C4] hover:text-white transition-colors"
           >
-            {volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            {volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
           </button>
           <input
             type="range"
@@ -338,23 +626,23 @@ export const PlayerBar = ({
             max="100"
             value={volume}
             onChange={(e) => handleVolumeChange(Number(e.target.value))}
-            className="w-18 h-1 accent-accent bg-white/[0.12] rounded-lg cursor-pointer"
+            aria-label="Volume"
+            className="orbit-slider w-12 lg:w-16 cursor-pointer"
           />
         </div>
 
-        {/* Right Queue Drawer Toggle Button */}
         <button
           onClick={onToggleQueue}
           title="Toggle Queue Drawer"
-          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs transition-colors border ${
+          className={`flex items-center gap-1.5 h-8 px-2 sm:px-2.5 rounded-full text-xs transition-all border ${
             isQueueOpen
-              ? 'bg-bg-hover text-accent border-accent/40 font-semibold'
-              : 'text-text-2 hover:text-text-1 hover:bg-bg-hover border-border-subtle'
+              ? 'ios-liquid-pill text-[#F1F4FA] border-[rgba(var(--dynamic-accent-rgb),0.55)] font-semibold'
+              : 'bg-white/[0.06] text-[#9AA5C4] hover:text-white hover:bg-white/[0.10] border-white/[0.10]'
           }`}
         >
-          <ListMusic size={15} />
+          <ListMusic size={14} style={isQueueOpen ? { color: 'var(--dynamic-accent)' } : undefined} />
           {queueCount > 0 && (
-            <span className="text-[10px] font-mono ml-0.5">{queueCount}</span>
+            <span className="hidden sm:inline text-[10px] font-mono tabular-nums">{queueCount}</span>
           )}
         </button>
       </div>

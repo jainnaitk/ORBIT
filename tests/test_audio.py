@@ -44,6 +44,10 @@ async def test_resolver_offline_local_path(mock_db_with_local_track: tuple[Path,
     with patch("yt_dlp.YoutubeDL") as mock_ydl:
         resolved = await resolver.resolve("song123")
         assert resolved == str(audio_file.resolve())
+        # Test unpacking works on offline local track as well
+        local_path, headers = resolved
+        assert local_path == str(audio_file.resolve())
+        assert headers == {}
         # yt-dlp should NOT be called when local file exists
         mock_ydl.assert_not_called()
 
@@ -115,7 +119,7 @@ async def test_player_load_and_preload() -> None:
 
     # Load and play track1
     await player.load_and_play(track1)
-    mock_mpv.loadfile.assert_called_with("https://mock-stream/vid1", mode="replace")
+    mock_mpv.play.assert_called_with("https://mock-stream/vid1")
     assert player.current_track == track1
     assert mock_mpv.pause is False
 
@@ -183,3 +187,382 @@ def test_player_callbacks() -> None:
     player.pause()
     assert player.state == "paused"
     assert "paused" in state_captured
+
+
+@pytest.mark.asyncio
+async def test_resolver_extractor_args_and_cookies(tmp_path: Path) -> None:
+    """Test that StreamResolver includes cookies, extractor_args and js_runtimes."""
+    cookies_path = tmp_path / "mock_cookies.txt"
+    cookies_path.write_text("# Netscape HTTP Cookie File\n")
+    resolver = StreamResolver(
+        db_path=tmp_path / "empty.db",
+        cookies_file=cookies_path,
+        cookies_from_browser="firefox",
+    )
+
+    captured_opts: dict = {}
+
+    def fake_ydl_init(opts):
+        captured_opts.update(opts)
+        mock = MagicMock()
+        mock.extract_info.return_value = {
+            "url": "https://stream.googlevideo.com/audio1",
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 AndroidVR",
+                "Accept": "*/*",
+            },
+        }
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl_init):
+        res = await resolver.resolve("test_extractor_vid")
+        assert res == "https://stream.googlevideo.com/audio1"
+        assert getattr(res, "user_agent", None) == "Mozilla/5.0 AndroidVR"
+        assert getattr(res, "http_headers", {}) == {
+            "User-Agent": "Mozilla/5.0 AndroidVR",
+            "Accept": "*/*",
+        }
+        assert resolver.get_user_agent("test_extractor_vid") == "Mozilla/5.0 AndroidVR"
+        assert resolver.get_http_headers("test_extractor_vid") == {
+            "User-Agent": "Mozilla/5.0 AndroidVR",
+            "Accept": "*/*",
+        }
+
+        # Test tuple unpacking
+        stream_url, headers = res
+        assert stream_url == "https://stream.googlevideo.com/audio1"
+        assert headers == {
+            "User-Agent": "Mozilla/5.0 AndroidVR",
+            "Accept": "*/*",
+        }
+
+        assert captured_opts["cookiefile"] == str(cookies_path)
+        assert captured_opts["cookiesfrombrowser"] == ("firefox",)
+        assert captured_opts["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert captured_opts["js_runtimes"] == {"node": {}}
+        assert (
+            captured_opts["format"]
+            == "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolver_player_client_without_cookies(tmp_path: Path) -> None:
+    """Test that StreamResolver configures default -tv_samsung and node js_runtimes without cookies."""
+    resolver = StreamResolver(db_path=tmp_path / "empty.db")
+
+    captured_opts: dict = {}
+
+    def fake_ydl_init(opts):
+        captured_opts.update(opts)
+        mock = MagicMock()
+        mock.extract_info.return_value = {
+            "url": "https://stream.googlevideo.com/audio_nocookies",
+        }
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl_init):
+        res = await resolver.resolve("test_nocookies_vid")
+        assert res == "https://stream.googlevideo.com/audio_nocookies"
+        assert captured_opts["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert captured_opts["js_runtimes"] == {"node": {}}
+        assert (
+            captured_opts["format"]
+            == "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolver_retry_on_format_not_available(tmp_path: Path) -> None:
+    """Test that StreamResolver retries once with bestaudio*/best if format is not available."""
+    from yt_dlp.utils import DownloadError as YtDlpDownloadError
+
+    resolver = StreamResolver(db_path=tmp_path / "empty.db", format_selector="custom_format")
+    opts_history: list[dict] = []
+    call_count = 0
+
+    def fake_ydl_init(opts):
+        nonlocal call_count
+        call_count += 1
+        opts_history.append(dict(opts))
+        mock = MagicMock()
+        if call_count == 1:
+            mock.extract_info.side_effect = YtDlpDownloadError(
+                "ERROR: [youtube] test_retry_vid: Requested format is not available. Use --list-formats"
+            )
+        else:
+            mock.extract_info.return_value = {
+                "url": "https://stream.googlevideo.com/fallback_audio",
+            }
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl_init):
+        res = await resolver.resolve("test_retry_vid")
+        assert res == "https://stream.googlevideo.com/fallback_audio"
+        assert len(opts_history) == 2
+        # First attempt: custom format and player_client
+        assert opts_history[0]["format"] == "custom_format"
+        assert opts_history[0]["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert opts_history[0]["js_runtimes"] == {"node": {}}
+        # Second attempt: bestaudio*/best format and player_client
+        assert opts_history[1]["format"] == "bestaudio*/best"
+        assert opts_history[1]["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert opts_history[1]["js_runtimes"] == {"node": {}}
+
+
+@pytest.mark.asyncio
+async def test_player_user_agent_before_load() -> None:
+    """Test that AudioPlayer injects User-Agent and http_header_fields into libmpv before calling play(url)."""
+    call_order: list[str] = []
+    mock_mpv = MagicMock()
+
+    def set_ua(val):
+        call_order.append(f"set_ua:{val}")
+
+    def set_headers(val):
+        call_order.append(f"set_headers:{val}")
+
+    def play(source):
+        call_order.append(f"play:{source}")
+
+    type(mock_mpv).user_agent = property(
+        fget=lambda self: getattr(self, "_ua", None),
+        fset=lambda self, val: [setattr(self, "_ua", val), set_ua(val)],
+    )
+    type(mock_mpv).http_header_fields = property(
+        fget=lambda self: getattr(self, "_headers", None),
+        fset=lambda self, val: [setattr(self, "_headers", val), set_headers(val)],
+    )
+    mock_mpv.play.side_effect = play
+
+    from metrolite.audio.resolver import ResolvedSource
+
+    mock_resolver = MagicMock()
+    mock_resolver.resolve = pytest.importorskip("unittest.mock").AsyncMock(
+        return_value=ResolvedSource(
+            "https://googlevideo.com/stream",
+            user_agent="Custom-AndroidVR-UA",
+            http_headers={"User-Agent": "Custom-AndroidVR-UA", "Accept": "*/*"},
+        )
+    )
+
+    player = AudioPlayer(resolver=mock_resolver, mpv_instance=mock_mpv)
+    track = Track(video_id="ua_vid", title="UA Track")
+
+    await player.load_and_play(track)
+
+    assert "set_ua:Custom-AndroidVR-UA" in call_order
+    assert any("set_headers:" in call for call in call_order)
+    assert "play:https://googlevideo.com/stream" in call_order
+    # User-Agent and headers were set BEFORE play
+    ua_idx = call_order.index("set_ua:Custom-AndroidVR-UA")
+    headers_idx = next(i for i, c in enumerate(call_order) if "set_headers:" in c)
+    play_idx = call_order.index("play:https://googlevideo.com/stream")
+    assert ua_idx < play_idx
+    assert headers_idx < play_idx
+    assert player.current_user_agent == "Custom-AndroidVR-UA"
+    assert mock_mpv.user_agent == "Custom-AndroidVR-UA"
+    assert "User-Agent: Custom-AndroidVR-UA" in mock_mpv.http_header_fields
+    assert "Accept: */*" in mock_mpv.http_header_fields
+
+
+def test_player_consecutive_errors_and_end_file() -> None:
+    """Test AudioPlayer consecutive error tracking and max 2 errors limit on end-file."""
+    mock_mpv = MagicMock()
+    player = AudioPlayer(resolver=MagicMock(), mpv_instance=mock_mpv)
+    assert player.consecutive_errors == 0
+    assert player.can_skip_on_error() is True
+
+    # Error 1
+    player.record_error()
+    assert player.consecutive_errors == 1
+    assert player.can_skip_on_error() is True
+
+    # Error 2
+    player.record_error()
+    assert player.consecutive_errors == 2
+    assert player.can_skip_on_error() is True
+
+    # Error 3: limit exceeded
+    player.record_error()
+    assert player.consecutive_errors == 3
+    assert player.can_skip_on_error() is False
+
+    # Reset
+    player.reset_errors()
+    assert player.consecutive_errors == 0
+    assert player.can_skip_on_error() is True
+
+
+def test_downloader_extractor_args_and_cookies(tmp_path: Path) -> None:
+    """Test that _download_worker includes cookies, extractor_args, and js_runtimes."""
+    from metrolite.library.downloader import _download_worker
+
+    captured_opts: dict = {}
+
+    def fake_ydl(opts):
+        captured_opts.update(opts)
+        mock = MagicMock()
+        fake_file = tmp_path / "dl_vid.opus"
+        fake_file.write_bytes(b"audio data")
+        mock.extract_info.return_value = {
+            "title": "Downloaded Song",
+            "artist": "DL Artist",
+            "duration": 200,
+        }
+        mock.__enter__.return_value = mock
+        return mock
+
+    cookies_file = tmp_path / "dl_cookies.txt"
+    cookies_file.write_text("# Netscape HTTP Cookie File\n")
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl):
+        target, _meta = _download_worker(
+            video_id="dl_vid",
+            downloads_dir=tmp_path,
+            preferred_ext="opus",
+            format_selector="bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best",
+            embed_metadata=False,
+            embed_thumbnail=False,
+            meta={},
+            progress_cb=lambda pct, st: None,
+            cookies_file=cookies_file,
+            cookies_from_browser="chrome",
+        )
+        assert target.is_file()
+        assert captured_opts["cookiefile"] == str(cookies_file)
+        assert captured_opts["cookiesfrombrowser"] == ("chrome",)
+        assert captured_opts["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert captured_opts["js_runtimes"] == {"node": {}}
+        assert (
+            captured_opts["format"]
+            == "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
+        )
+
+
+def test_downloader_player_client_without_cookies(tmp_path: Path) -> None:
+    """Test that _download_worker uses player_client: ['default', '-tv_samsung'] and js_runtimes."""
+    from metrolite.library.downloader import _download_worker
+
+    captured_opts: dict = {}
+
+    def fake_ydl(opts):
+        captured_opts.update(opts)
+        mock = MagicMock()
+        fake_file = tmp_path / "dl_nocookies.opus"
+        fake_file.write_bytes(b"audio data")
+        mock.extract_info.return_value = {
+            "title": "Song",
+            "artist": "Artist",
+            "duration": 150,
+        }
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl):
+        target, _meta = _download_worker(
+            video_id="dl_nocookies",
+            downloads_dir=tmp_path,
+            preferred_ext="opus",
+            format_selector="bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best",
+            embed_metadata=False,
+            embed_thumbnail=False,
+            meta={},
+            progress_cb=lambda pct, st: None,
+        )
+        assert target.is_file()
+        assert captured_opts["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert captured_opts["js_runtimes"] == {"node": {}}
+        assert (
+            captured_opts["format"]
+            == "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
+        )
+
+
+def test_downloader_retry_on_format_not_available(tmp_path: Path) -> None:
+    """Test that _download_worker retries with bestaudio*/best if format is not available."""
+    from yt_dlp.utils import DownloadError as YtDlpDownloadError
+
+    from metrolite.library.downloader import _download_worker
+
+    opts_history: list[dict] = []
+    call_count = 0
+
+    def fake_ydl(opts):
+        nonlocal call_count
+        call_count += 1
+        opts_history.append(dict(opts))
+        mock = MagicMock()
+        if call_count == 1:
+            mock.extract_info.side_effect = YtDlpDownloadError(
+                "ERROR: [youtube] dl_retry_vid: Requested format is not available. Use --list-formats"
+            )
+        else:
+            fake_file = tmp_path / "dl_retry_vid.opus"
+            fake_file.write_bytes(b"fallback audio data")
+            mock.extract_info.return_value = {
+                "title": "Fallback Song",
+                "artist": "Artist",
+                "duration": 180,
+            }
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl):
+        target, _meta = _download_worker(
+            video_id="dl_retry_vid",
+            downloads_dir=tmp_path,
+            preferred_ext="opus",
+            format_selector="custom_format",
+            embed_metadata=False,
+            embed_thumbnail=False,
+            meta={},
+            progress_cb=lambda pct, st: None,
+        )
+        assert target.is_file()
+        assert len(opts_history) == 2
+        assert opts_history[0]["format"] == "custom_format"
+        assert opts_history[0]["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert opts_history[0]["js_runtimes"] == {"node": {}}
+        assert opts_history[1]["format"] == "bestaudio*/best"
+        assert opts_history[1]["extractor_args"] == {
+            "youtube": {"player_client": ["android"]}
+        }
+        assert opts_history[1]["js_runtimes"] == {"node": {}}
+
+
+def test_player_direct_play_sets_headers_and_calls_mpv_play() -> None:
+    """Test that player.play(url, headers=...) sets self.mpv.user_agent and self.mpv.http_header_fields then calls self.mpv.play(url)."""
+    mock_mpv = MagicMock()
+    player = AudioPlayer(resolver=MagicMock(), mpv_instance=mock_mpv)
+
+    headers = {
+        "User-Agent": "Custom-Test-UA/1.0",
+        "Referer": "https://www.youtube.com/",
+        "Accept": "*/*",
+    }
+    player.play("https://stream.googlevideo.com/videoplayback?id=123", headers=headers)
+
+    assert mock_mpv.user_agent == "Custom-Test-UA/1.0"
+    assert "User-Agent: Custom-Test-UA/1.0" in mock_mpv.http_header_fields
+    assert "Referer: https://www.youtube.com/" in mock_mpv.http_header_fields
+    assert "Accept: */*" in mock_mpv.http_header_fields
+    mock_mpv.play.assert_called_once_with("https://stream.googlevideo.com/videoplayback?id=123")
+

@@ -1,0 +1,151 @@
+# Technical Audit Report: ORBIT / MetroLite
+
+---
+
+## 1. Architecture Summary
+
+* **Tech Stack:**
+  * **Desktop Window & Shell:** Tauri 2.2 (`ui/src-tauri`, Rust 2021) with frameless custom titlebar, Win32 atomic geometry adjustments (`SetWindowPos` / `ShowWindow`), and working set trimming via Win32 `SetProcessWorkingSetSize`.
+  * **Frontend UI:** React 18, TypeScript, Tailwind CSS, Vite 6, `@fontsource/inter`, `@tanstack/react-virtual` for virtualized row rendering. Zero per-row `backdrop-filter: blur()` to protect iGPU frame rates.
+  * **Backend Daemon:** Python 3.11 (`uv`), FastAPI, Uvicorn, WebSockets bound strictly to `127.0.0.1`, secured by a per-run random cryptographic token written to `%LOCALAPPDATA%\metrolite\bridge.json`.
+  * **Audio & Stream Engine:** `python-mpv` (`libmpv-2.dll`) configured with low demuxer cache (`mpv_demuxer_max_mb: 15`), native gapless audio transitions (`loadfile(..., mode="append")`), `yt-dlp` for format resolution and background downloads, and `ytmusicapi` for search, recommendations, and playlists.
+  * **Persistence:** SQLite (`aiosqlite` & `sqlite3`) in WAL mode (`%LOCALAPPDATA%\metrolite\metrolite.db`) with tables for tracks, playlists, queue state, and settings. Offline time-synced lyrics cached as sidecar `.lrc` files alongside downloaded `.opus` / `.m4a` files.
+
+* **Entry Points:**
+  * **Backend CLI:** [src/metrolite/main.py](file:///c:/ai_work/ORBIT/src/metrolite/main.py#L97) (`metrolite run`, `metrolite play <query>`).
+  * **Bridge Server:** [src/metrolite/bridge/server.py](file:///c:/ai_work/ORBIT/src/metrolite/bridge/server.py#L1514) (`BridgeServer`).
+  * **Tauri App:** [ui/src-tauri/src/main.rs](file:///c:/ai_work/ORBIT/ui/src-tauri/src/main.rs#L405) (`tauri::Builder`).
+  * **React Frontend:** [ui/src/main.tsx](file:///c:/ai_work/ORBIT/ui/src/main.tsx#L1) & [ui/src/App.tsx](file:///c:/ai_work/ORBIT/ui/src/App.tsx#L37).
+
+* **Data & Control Flow:**
+  1. Frontend boots, retrieves localhost bridge credentials via Tauri IPC (`get_bridge_config`), and connects to REST and WebSocket at `ws://127.0.0.1:8766/ws?token=...`.
+  2. User actions (search, play, queue reorder, like, offline download) call typed REST endpoints.
+  3. `BridgeController` coordinates `QueueManager`, `AudioPlayer`, `StreamResolver`, `LibraryManager`, and `DownloadManager`.
+  4. Audio state transitions and position ticks (`playback_tick` every 250ms during playback) are broadcast via WebSocket to the React UI for 60fps interpolation.
+
+---
+
+## 2. Findings & Proposed Fixes
+
+### Group A: Critical Bugs
+
+#### [F1] Search View Replaces Queue with Single Track Instead of Full Search Results
+* **Exact File Path & Function:** [ui/src/views/SearchView.tsx](file:///c:/ai_work/ORBIT/ui/src/views/SearchView.tsx#L146) (`SearchView`, `TrackList.onPlay`)
+* **Root Cause:** In `SearchView.tsx`, `<TrackList tracks={results} onPlay={(track) => onPlay(track, 0, [track])} />` ignores the `index` emitted by `TrackList` and wraps only the clicked track in a single-item array `[track]`. Clicking any song in a 30-result search wipes out the search queue rather than playing the selected track within the search playlist context.
+* **Exact Change Planned:** Pass the clicked index and the full `results` list to `onPlay`:
+  ```tsx
+  onPlay={(track, index) => onPlay(track, index, results)}
+  ```
+* **Risk Level:** **Low**
+
+---
+
+#### [F2] Gapless Preload Skipped for Second-to-Last Track When Radio Refill Adds 0 Tracks
+* **Exact File Path & Function:** [src/metrolite/bridge/server.py](file:///c:/ai_work/ORBIT/src/metrolite/bridge/server.py#L599-L609) (`BridgeController._after_play_started`)
+* **Root Cause:** When `self.queue.autoplay_radio` is enabled and `remaining < 3`, `_refill()` invokes `await self.queue.refill_radio()`. If `added == 0` (e.g., offline mode, network timeout, or no new recommendations), `self.player.preload_next(nxt_preview)` is never called because it is nested exclusively inside `if added > 0:`. As a result, the upcoming song already in the queue is never preloaded, breaking gapless playback on queue tail.
+* **Exact Change Planned:** In `BridgeController._after_play_started._refill`, call `await self.player.preload_next(nxt_preview)` unconditionally whenever `nxt_preview` exists:
+  ```python
+  added = await self.queue.refill_radio(limit=20)
+  if added > 0:
+      await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
+  nxt_preview = self.queue.next_track_preview
+  if nxt_preview:
+      with suppress(Exception):
+          await self.player.preload_next(nxt_preview)
+  ```
+* **Risk Level:** **Low**
+
+---
+
+#### [F3] Out-of-Bounds `current_index` Unchecked When Loading Queue from SQLite
+* **Exact File Path & Function:** [src/metrolite/audio/queue.py](file:///c:/ai_work/ORBIT/src/metrolite/audio/queue.py#L405) & [src/metrolite/audio/queue.py](file:///c:/ai_work/ORBIT/src/metrolite/audio/queue.py#L427) (`QueueManager.load_from_db` & `load_from_db_sync`)
+* **Root Cause:** `self.current_index = row["current_index"]` is assigned directly from the database without verifying that `current_index < len(self.items)`. If tracks were removed or cleared outside the session, `self.current_track` evaluates to `None` despite items existing in the queue.
+* **Exact Change Planned:** Clamp `current_index` defensively in both methods:
+  ```python
+  self.current_index = max(0, min(row["current_index"], len(self.items) - 1)) if self.items else 0
+  ```
+* **Risk Level:** **Low**
+
+---
+
+### Group B: Security & Data Risks
+
+#### [F4] Background Download Fallback Can Select `.lrc` File as Downloaded Audio
+* **Exact File Path & Function:** [src/metrolite/library/downloader.py](file:///c:/ai_work/ORBIT/src/metrolite/library/downloader.py#L255-L265) (`_download_worker`)
+* **Root Cause:** When locating downloaded audio files, the fallback glob excludes temporary files using `.endswith((".part", ".ytdl", ...))`, but does not exclude `.lrc`. If offline lyrics were already cached or written as `<video_id>.lrc`, the fallback can select the text `.lrc` file as the audio file, corrupting the track's `local_path` in SQLite.
+* **Exact Change Planned:** Add `".lrc"` to the exclusion tuples in `_download_worker`:
+  ```python
+  and not f.name.endswith((".part", ".ytdl", ".temp", ".webp", ".jpg", ".jpeg", ".png", ".json", ".aria2", ".lrc"))
+  ```
+* **Risk Level:** **Low**
+
+---
+
+#### [F5] Fire-and-Forget `asyncio.create_task` Instances Subject to Premature Python GC
+* **Exact File Path & Function:** [src/metrolite/bridge/server.py](file:///c:/ai_work/ORBIT/src/metrolite/bridge/server.py#L592) (`_after_play_started`), [line 1041](file:///c:/ai_work/ORBIT/src/metrolite/bridge/server.py#L1041) (`lifespan`), and [line 1266](file:///c:/ai_work/ORBIT/src/metrolite/bridge/server.py#L1266) (`player_preload`)
+* **Root Cause:** Python 3.11+ retains only weak references to `asyncio.Task` objects. Frequent calls to `trim_memory()` (which trigger `gc.collect()`) can garbage-collect active background tasks (such as `_record()`, `_warm()`, and `backfill_downloaded_lyrics()`) before they finish.
+* **Exact Change Planned:** Maintain a strong reference set `self._background_tasks: set[asyncio.Task[Any]] = set()` on `BridgeController`. Add each created task to the set with `task.add_done_callback(self._background_tasks.discard)`, and cancel any remaining tasks in `shutdown()`.
+* **Risk Level:** **Low**
+
+---
+
+#### [F6] User Custom Lyrics Search Query Stripped by Hyphen/Bracket Sanitizer
+* **Exact File Path & Function:** [src/metrolite/ytm/lyrics.py](file:///c:/ai_work/ORBIT/src/metrolite/ytm/lyrics.py#L222) (`fetch_lrclib_lyrics`)
+* **Root Cause:** `clean_track_title(custom_query or title or "")` runs `title.split(" - ")[0]`, which was designed to strip artist subtitles from YTM titles. When a user explicitly enters a search query like `"Linkin Park - Numb"`, `split(" - ")[0]` truncates the query to `"Linkin Park"`, causing `_pick_best_lrclib_match` to score candidate tracks incorrectly.
+* **Exact Change Planned:** When `custom_query` is provided, use it directly without passing it through `clean_track_title`.
+* **Risk Level:** **Low**
+
+---
+
+### Group C: Performance Bottlenecks
+
+#### [F7] `AudioPlayer.prepare_track` Mutates State to `"buffering"` Without Firing Listener Callbacks
+* **Exact File Path & Function:** [src/metrolite/audio/player.py](file:///c:/ai_work/ORBIT/src/metrolite/audio/player.py#L385) (`AudioPlayer.prepare_track`)
+* **Root Cause:** `prepare_track` assigns `self.state = "buffering"` and `self._loading_new_track = True`, but does not call `self._on_state_changed("buffering")`. Furthermore, because `self._loading_new_track` is `True`, mpv's internal observers abort early (`if self._loading_new_track: return`), preventing local listeners from receiving the buffering event until playback starts seconds later.
+* **Exact Change Planned:** Dispatch `if self._on_state_changed: self._on_state_changed(self.state)` at the end of `prepare_track`.
+* **Risk Level:** **Low**
+
+---
+
+#### [F8] `expand_path` Backslash Handling in Cross-Platform Environments
+* **Exact File Path & Function:** [src/metrolite/config.py](file:///c:/ai_work/ORBIT/src/metrolite/config.py#L27) (`expand_path`)
+* **Root Cause:** When running on non-Windows test runners or sub-environments, `expanded.replace("%LOCALAPPDATA%", fallback)` leaves Windows `\` literals in the path string, which POSIX considers filename characters rather than directory delimiters.
+* **Exact Change Planned:** Replace `\\` with `os.sep` during expansion to ensure uniform path resolution:
+  ```python
+  expanded = expanded.replace("\\", os.sep)
+  ```
+* **Risk Level:** **Low**
+
+---
+
+### Group D: Dead Code & Orphaned Files
+
+#### [F9] Orphaned Root Tauri Config & Redundant Legacy Backup Folders
+* **Exact File Paths:**
+  * Root [src-tauri/tauri.conf.json](file:///c:/ai_work/ORBIT/src-tauri/tauri.conf.json) (abandoned config with `MetroLite` and `csp: null`; active Tauri project is in `ui/src-tauri/`)
+  * [GeminiSetup.exe](file:///c:/ai_work/ORBIT/GeminiSetup.exe) (13 MB binary installer committed to repo root)
+  * [metrolite_code.txt](file:///c:/ai_work/ORBIT/metrolite_code.txt) (453 KB code dump)
+  * [update_orbit.py](file:///c:/ai_work/ORBIT/update_orbit.py) (2,200 lines containing hardcoded string duplicates of old files)
+  * [err.txt](file:///c:/ai_work/ORBIT/err.txt), [tauri_err.log](file:///c:/ai_work/ORBIT/tauri_err.log), [tauri_out.log](file:///c:/ai_work/ORBIT/tauri_out.log) (empty 0-byte logs)
+  * Multiple backup folders: `.backup_before_cosmic/`, `.backup_before_fixes/`, `.backup_before_orbit/`, `.backup_before_upgrade/`, `.backup_orbit/`
+* **Root Cause:** Artifacts from past migration scripts.
+* **Exact Change Planned:** Remove orphaned files and cleanup root directory.
+* **Risk Level:** **Low**
+
+---
+
+#### [F10] `metrolite play` CLI Command Is a Stub
+* **Exact File Path & Function:** [src/metrolite/main.py](file:///c:/ai_work/ORBIT/src/metrolite/main.py#L90-L94) (`play_command`)
+* **Root Cause:** `play_command` only executes `print(f"[{cfg.app.name}] Playing query: {args.query}")` and returns 0 without initializing the database, querying YouTube Music, or playing audio.
+* **Exact Change Planned:** Wire `play_command` to initialize the database, search via `YTMusicClient`, resolve the stream, and play the track (as in `scripts/try_play.py`).
+* **Risk Level:** **Low**
+
+---
+
+## 3. Decision Required
+
+**STOPPING HERE** as required by Phase 1 instructions. No files have been created or modified.
+
+Please indicate:
+1. **Which Fix IDs you would like me to apply** (e.g., `F1 through F8`, `All F1-F10`, or specific IDs)?
+2. **Would you also like `CONTEXT.md`, `AUDIT_REPORT.md`, and `PLAN.md` generated and saved to the project directory** during Phase 2?

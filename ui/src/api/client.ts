@@ -1,6 +1,5 @@
 /**
- * Typed REST & WebSocket client with auto-reconnect for MetroLite Bridge.
- * Adheres strictly to security rules: never logs or echoes auth tokens.
+ * Typed REST, WebSocket & Tauri Window client for ORBIT Bridge.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -8,7 +7,10 @@ import type {
   BridgeConfig,
   BridgeEventMap,
   DownloadProgress,
+  EqPreset,
   HomeSection,
+  LyricsResponse,
+  PersonalizedHomeResponse,
   PlaybackTick,
   Playlist,
   QueueData,
@@ -21,54 +23,43 @@ export const isTauri = (): boolean => {
 
 let cachedConfig: BridgeConfig | null = null;
 
-export async function fetchBridgeConfig(): Promise<BridgeConfig> {
-  if (cachedConfig) {
-    return cachedConfig;
-  }
+export async function fetchBridgeConfig(forceRefresh: boolean = false): Promise<BridgeConfig> {
+  if (!forceRefresh && cachedConfig && cachedConfig.token) return cachedConfig;
 
   if (isTauri()) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const cfg = await invoke<BridgeConfig>('get_bridge_config');
-      cachedConfig = cfg;
+      if (cfg && cfg.token) {
+        cachedConfig = cfg;
+      }
       return cfg;
     } catch {
-      // Fallback if invoke fails
+      // Fallback
     }
   }
 
-  // Fallback for Vite browser dev server / non-tauri mode
   try {
-    const res = await fetch('/__bridge_config');
+    const res = await fetch('/__bridge_config', { cache: 'no-store' });
     if (res.ok) {
       const cfg = (await res.json()) as BridgeConfig;
-      if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-        cfg.host = 'localhost';
+      if (cfg && cfg.token) {
+        cachedConfig = cfg;
       }
-      cachedConfig = cfg;
       return cfg;
     }
   } catch {
-    // Ignore dev fallback error
+    // Ignore
   }
 
-  const fallbackHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '127.0.0.1';
-  const fallback: BridgeConfig = {
-    host: fallbackHost,
-    port: 8766,
-    token: '',
-  };
-  cachedConfig = fallback;
-  return fallback;
+  const fallbackHost =
+    typeof window !== 'undefined' && window.location.hostname
+      ? window.location.hostname
+      : '127.0.0.1';
+  // Do NOT cache empty-token fallback so subsequent retries pick up bridge.json once ready
+  return { host: fallbackHost, port: 8766, token: '' };
 }
 
-export function setCachedBridgeConfig(config: BridgeConfig): void {
-  cachedConfig = config;
-}
-
-/**
- * Window caption action handlers (Tauri or browser fallback)
- */
 export async function minimizeWindow(): Promise<void> {
   if (isTauri()) {
     try {
@@ -102,53 +93,170 @@ export async function closeWindow(): Promise<void> {
   }
 }
 
-/**
- * REST API client targeting local FastAPI bridge.
- */
+export interface SavedWindowBounds {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  wasMaximized: boolean;
+}
+
+export function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let raf1 = 0;
+    let raf2 = 0;
+    let timer = 0;
+
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (raf1) cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+
+    // Fallback timeout guarantees hidden Win32 WebView2 windows never stall rAF indefinitely
+    timer = window.setTimeout(done, 50);
+    raf1 = requestAnimationFrame(() => {
+      raf1 = 0;
+      raf2 = requestAnimationFrame(() => {
+        raf2 = 0;
+        done();
+      });
+    });
+  });
+}
+
+export async function showMainWindow(focus: boolean = true): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('show_main_window', { focus });
+  } catch {
+    // Fallback
+  }
+}
+
+export async function trimProcessMemory(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('trim_process_memory');
+  } catch {
+    // Ignore
+  }
+}
+
+export async function enterDynamicIslandWindow(): Promise<SavedWindowBounds | null> {
+  if (!isTauri()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<SavedWindowBounds>('enter_dynamic_island');
+  } catch (err) {
+    console.error('enterDynamicIslandWindow failed:', err);
+    return null;
+  }
+}
+
+export async function resizeDynamicIslandWindow(expanded: boolean): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('resize_dynamic_island', { expanded });
+  } catch {
+    // Ignore
+  }
+}
+
+export async function exitDynamicIslandWindow(saved: SavedWindowBounds | null): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('exit_dynamic_island', { saved });
+  } catch (err) {
+    console.error('exitDynamicIslandWindow failed:', err);
+  }
+}
+
 export class BridgeApiClient {
   private config: BridgeConfig | null = null;
+  private preloadedIds: Set<string> = new Set();
 
   constructor(config?: BridgeConfig) {
-    if (config) {
-      this.config = config;
-    }
+    if (config) this.config = config;
   }
 
   public setConfig(config: BridgeConfig): void {
     this.config = config;
   }
 
-  private async getBaseUrl(): Promise<{ base: string; token: string }> {
-    if (!this.config) {
-      this.config = await fetchBridgeConfig();
+  private async getBaseUrl(forceRefresh: boolean = false): Promise<{ base: string; token: string }> {
+    if (forceRefresh || !this.config || !this.config.token) {
+      this.config = await fetchBridgeConfig(forceRefresh);
     }
     const host = this.config.host || '127.0.0.1';
     const port = this.config.port || 8766;
-    return {
-      base: `http://${host}:${port}`,
-      token: this.config.token || '',
-    };
+    return { base: `http://${host}:${port}`, token: this.config.token || '' };
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
-    const { base, token } = await this.getBaseUrl();
+  private async request<T>(path: string, options: RequestInit = {}, retried: boolean = false): Promise<T> {
+    const { base, token } = await this.getBaseUrl(retried);
     const url = `${base}${path.startsWith('/') ? path : '/' + path}`;
     const headers = new Headers(options.headers || {});
-    if (token) {
-      headers.set('X-Bridge-Token', token);
-    }
+    if (token) headers.set('X-Bridge-Token', token);
     headers.set('Content-Type', 'application/json');
 
-    const res = await fetch(url, {
-      ...options,
-      headers,
-    });
-
-    if (!res.ok) {
-      throw new Error(`Bridge API HTTP ${res.status}: ${res.statusText}`);
+    const res = await fetch(url, { ...options, headers });
+    if (res.status === 401 && !retried) {
+      this.config = null;
+      return this.request<T>(path, options, true);
     }
-
+    if (!res.ok) throw new Error(`Bridge API HTTP ${res.status}: ${res.statusText}`);
     return (await res.json()) as T;
+  }
+
+  public async getLyrics(
+    videoId: string,
+    title?: string,
+    artist?: string,
+    duration?: number,
+    customQuery?: string
+  ): Promise<LyricsResponse> {
+    const params = new URLSearchParams();
+    if (title) params.set('title', title);
+    if (artist) params.set('artist', artist);
+    if (duration && duration > 0) params.set('duration', String(Math.round(duration)));
+    if (customQuery && customQuery.trim()) params.set('q', customQuery.trim());
+    const qs = params.toString();
+    return this.request<LyricsResponse>(
+      `/lyrics/${encodeURIComponent(videoId)}${qs ? '?' + qs : ''}`
+    );
+  }
+
+  public async preloadTrack(videoId: string): Promise<void> {
+    if (!videoId || this.preloadedIds.has(videoId)) return;
+    this.preloadedIds.add(videoId);
+    if (this.preloadedIds.size > 60) {
+      const first = this.preloadedIds.values().next().value;
+      if (first) this.preloadedIds.delete(first);
+    }
+    try {
+      await this.request('/player/preload', {
+        method: 'POST',
+        body: JSON.stringify({ video_id: videoId }),
+      });
+    } catch {
+      this.preloadedIds.delete(videoId);
+    }
+  }
+
+  public async setEqPreset(preset: EqPreset): Promise<{ preset: EqPreset }> {
+    return this.request('/player/eq', {
+      method: 'POST',
+      body: JSON.stringify({ preset }),
+    });
   }
 
   public async getHealth(): Promise<{ status: string; app: string; version: string; state: string }> {
@@ -157,15 +265,21 @@ export class BridgeApiClient {
 
   public async getHome(): Promise<HomeSection[]> {
     const res = await this.request<any>('/home');
-    if (Array.isArray(res)) return res;
-    return res.sections || [];
+    return Array.isArray(res) ? res : res.sections || [];
+  }
+
+  public async getPersonalizedHome(
+    mood: string = 'for_you',
+    refresh: boolean = false
+  ): Promise<PersonalizedHomeResponse> {
+    const params = new URLSearchParams({ mood, refresh: refresh ? 'true' : 'false' });
+    return this.request<PersonalizedHomeResponse>(`/home/personalized?${params.toString()}`);
   }
 
   public async search(query: string, filterType: string = 'songs', limit: number = 25): Promise<Track[]> {
     const params = new URLSearchParams({ q: query, filter: filterType, limit: String(limit) });
     const res = await this.request<any>(`/search?${params.toString()}`);
-    if (Array.isArray(res)) return res;
-    return res.results || [];
+    return Array.isArray(res) ? res : res.results || [];
   }
 
   public async play(track?: Track, videoId?: string): Promise<{ status: string }> {
@@ -173,6 +287,7 @@ export class BridgeApiClient {
       method: 'POST',
       body: JSON.stringify({
         video_id: videoId || track?.video_id,
+        track: track,
         track_meta: track,
       }),
     });
@@ -182,7 +297,7 @@ export class BridgeApiClient {
     return this.request('/player/pause', { method: 'POST' });
   }
 
-  public async resume(): Promise<{ status: string }> {
+  public async resume(): Promise<PlaybackTick & { status?: string; error?: string }> {
     return this.request('/player/play', { method: 'POST' });
   }
 
@@ -232,26 +347,23 @@ export class BridgeApiClient {
   }
 
   public async setQueue(items: Track[], startIndex: number = 0, autoPlay: boolean = true): Promise<QueueData> {
-    return this.updateQueue({
-      action: 'set',
-      items,
-      start_index: startIndex,
-      auto_play: autoPlay,
-    });
+    return this.updateQueue({ action: 'set', items, start_index: startIndex, auto_play: autoPlay });
+  }
+
+  public async jumpQueue(index: number, autoPlay: boolean = true): Promise<QueueData> {
+    return this.updateQueue({ action: 'jump', index, auto_play: autoPlay });
   }
 
   public async appendQueue(itemOrItems: Track | Track[]): Promise<QueueData> {
-    if (Array.isArray(itemOrItems)) {
-      return this.updateQueue({ action: 'append', items: itemOrItems });
-    }
-    return this.updateQueue({ action: 'append', item: itemOrItems });
+    return Array.isArray(itemOrItems)
+      ? this.updateQueue({ action: 'append', items: itemOrItems })
+      : this.updateQueue({ action: 'append', item: itemOrItems });
   }
 
   public async addNextQueue(itemOrItems: Track | Track[]): Promise<QueueData> {
-    if (Array.isArray(itemOrItems)) {
-      return this.updateQueue({ action: 'add_next', items: itemOrItems });
-    }
-    return this.updateQueue({ action: 'add_next', item: itemOrItems });
+    return Array.isArray(itemOrItems)
+      ? this.updateQueue({ action: 'add_next', items: itemOrItems })
+      : this.updateQueue({ action: 'add_next', item: itemOrItems });
   }
 
   public async removeQueue(index: number): Promise<QueueData> {
@@ -288,14 +400,21 @@ export class BridgeApiClient {
   public async getLiked(searchQuery?: string): Promise<Track[]> {
     const q = searchQuery ? `?q=${encodeURIComponent(searchQuery)}` : '';
     const res = await this.request<any>(`/liked${q}`);
-    if (Array.isArray(res)) return res;
-    return res.tracks || [];
+    return Array.isArray(res) ? res : res.tracks || [];
+  }
+
+  public async getHistory(
+    limit: number = 100,
+    sort: 'recent' | 'most_played' = 'recent'
+  ): Promise<Track[]> {
+    const params = new URLSearchParams({ limit: String(limit), sort });
+    const res = await this.request<any>(`/history?${params.toString()}`);
+    return Array.isArray(res) ? res : res.tracks || [];
   }
 
   public async getPlaylists(): Promise<Playlist[]> {
     const res = await this.request<any>('/playlists');
-    if (Array.isArray(res)) return res;
-    return res.playlists || [];
+    return Array.isArray(res) ? res : res.playlists || [];
   }
 
   public async createPlaylist(name: string, description: string = ''): Promise<Playlist> {
@@ -311,8 +430,7 @@ export class BridgeApiClient {
 
   public async getPlaylistTracks(id: string): Promise<Track[]> {
     const res = await this.request<any>(`/playlists/${encodeURIComponent(id)}/tracks`);
-    if (Array.isArray(res)) return res;
-    return res.tracks || [];
+    return Array.isArray(res) ? res : res.tracks || [];
   }
 
   public async addPlaylistTracks(id: string, tracks: Track[]): Promise<{ status: string }> {
@@ -337,15 +455,12 @@ export class BridgeApiClient {
   }
 
   public async deleteDownload(videoId: string): Promise<{ status: string }> {
-    return this.request(`/downloads/${encodeURIComponent(videoId)}`, {
-      method: 'DELETE',
-    });
+    return this.request(`/downloads/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
   }
 
   public async getDownloads(): Promise<Track[]> {
     const res = await this.request<any>('/downloads');
-    if (Array.isArray(res)) return res;
-    return res.downloads || [];
+    return Array.isArray(res) ? res : res.downloads || [];
   }
 
   public async getSettings(): Promise<Record<string, unknown>> {
@@ -362,9 +477,6 @@ export class BridgeApiClient {
 
 export const bridgeApi = new BridgeApiClient();
 
-/**
- * WebSocket event listener manager with automatic reconnection.
- */
 export type EventListener<K extends keyof BridgeEventMap> = (data: BridgeEventMap[K]) => void;
 
 export class BridgeSocketClient {
@@ -377,6 +489,9 @@ export class BridgeSocketClient {
   private statusListeners: Set<(connected: boolean) => void> = new Set();
 
   public isConnected = false;
+  public latestTimePos = 0;
+  public latestDuration = 0;
+  public latestTrackId: string | null = null;
 
   public onStatusChange(callback: (connected: boolean) => void): () => void {
     this.statusListeners.add(callback);
@@ -398,10 +513,13 @@ export class BridgeSocketClient {
     }
 
     try {
-      this.config = await fetchBridgeConfig();
+      this.config = await fetchBridgeConfig(this.retryAttempt > 0);
       const host = this.config.host || '127.0.0.1';
       const port = this.config.port || 8766;
       const token = this.config.token || '';
+      if (token) {
+        bridgeApi.setConfig(this.config);
+      }
 
       const query = token ? `?token=${encodeURIComponent(token)}` : '';
       const wsUrl = `ws://${host}:${port}/ws${query}`;
@@ -417,14 +535,26 @@ export class BridgeSocketClient {
       socket.onmessage = (event) => {
         try {
           const parsed = JSON.parse(event.data) as { event: keyof BridgeEventMap; data: any };
-          if (parsed && parsed.event && this.listeners[parsed.event]) {
-            const handlers = this.listeners[parsed.event];
-            if (handlers) {
-              handlers.forEach((handler) => (handler as any)(parsed.data));
+          if (parsed && parsed.event) {
+            if (parsed.event === 'playback_tick' && parsed.data) {
+              if (typeof parsed.data.time_pos === 'number') this.latestTimePos = parsed.data.time_pos;
+              if (typeof parsed.data.duration === 'number') this.latestDuration = parsed.data.duration;
+              this.latestTrackId = parsed.data.current_track?.video_id ?? null;
+            } else if (parsed.event === 'track_changed' && parsed.data) {
+              this.latestTimePos = typeof parsed.data.time_pos === 'number' ? parsed.data.time_pos : 0;
+              const trk =
+                parsed.data.current_track !== undefined ? parsed.data.current_track : parsed.data.track ?? null;
+              this.latestDuration =
+                typeof parsed.data.duration === 'number' ? parsed.data.duration : trk?.duration_s ?? 0;
+              this.latestTrackId = trk?.video_id ?? null;
+            }
+            if (this.listeners[parsed.event]) {
+              const handlers = this.listeners[parsed.event];
+              if (handlers) handlers.forEach((handler) => (handler as any)(parsed.data));
             }
           }
         } catch {
-          // Ignore invalid frames silently
+          // Ignore invalid frames
         }
       };
 
@@ -436,9 +566,7 @@ export class BridgeSocketClient {
 
       socket.onerror = () => {
         this.notifyStatus(false);
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.close();
-        }
+        if (socket.readyState === WebSocket.OPEN) socket.close();
       };
     } catch {
       this.notifyStatus(false);
@@ -449,7 +577,6 @@ export class BridgeSocketClient {
   private scheduleReconnect() {
     if (this.isDestroyed || this.reconnectTimer !== null) return;
     this.retryAttempt++;
-    // Exponential backoff capped at 4000ms
     const delay = Math.min(1000 * Math.pow(1.5, this.retryAttempt - 1), 4000);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -458,11 +585,8 @@ export class BridgeSocketClient {
   }
 
   public on<K extends keyof BridgeEventMap>(event: K, listener: EventListener<K>): () => void {
-    if (!this.listeners[event]) {
-      this.listeners[event] = new Set() as any;
-    }
+    if (!this.listeners[event]) this.listeners[event] = new Set() as any;
     (this.listeners[event] as Set<EventListener<K>>).add(listener);
-
     return () => {
       this.listeners[event]?.delete(listener);
     };
@@ -484,9 +608,6 @@ export class BridgeSocketClient {
 
 export const bridgeSocket = new BridgeSocketClient();
 
-/**
- * React hook to access real-time MetroLite bridge connection and playback state.
- */
 export function useBridge() {
   const [config, setConfig] = useState<BridgeConfig | null>(cachedConfig);
   const [isConnected, setIsConnected] = useState<boolean>(bridgeSocket.isConnected);
@@ -509,64 +630,70 @@ export function useBridge() {
         bridgeApi.getHealth(),
       ]);
 
-      if (qData.status === 'fulfilled' && mountedRef.current) {
-        setQueue(qData.value);
-      }
-      if (healthData.status === 'fulfilled' && mountedRef.current) {
-        setLastError(null);
-      }
+      if (qData.status === 'fulfilled' && mountedRef.current) setQueue(qData.value);
+      if (healthData.status === 'fulfilled' && mountedRef.current) setLastError(null);
     } catch (err: any) {
-      if (mountedRef.current) {
-        setLastError(err?.message || 'Failed connecting to MetroLite bridge');
-      }
+      if (mountedRef.current) setLastError(err?.message || 'Failed connecting to ORBIT bridge');
     }
   }, []);
 
   useEffect(() => {
     mountedRef.current = true;
-
     syncInitialState();
     bridgeSocket.connect();
 
     const unsubStatus = bridgeSocket.onStatusChange((connected) => {
       if (mountedRef.current) {
         setIsConnected(connected);
-        if (connected) {
-          syncInitialState();
-        }
+        if (connected) syncInitialState();
       }
     });
 
     const unsubPlayback = bridgeSocket.on('playback_tick', (tick) => {
       if (mountedRef.current) {
-        setPlayback(tick);
+        if (tick.state === 'playing') setLastError(null);
+        setPlayback((prev) => {
+          if (
+            prev &&
+            prev.state === tick.state &&
+            prev.volume === tick.volume &&
+            Math.round(prev.duration) === Math.round(tick.duration) &&
+            (prev.current_track?.video_id ?? null) === (tick.current_track?.video_id ?? null) &&
+            (prev.current_track?.title ?? null) === (tick.current_track?.title ?? null)
+          ) {
+            return prev;
+          }
+          return tick;
+        });
       }
     });
 
     const unsubTrackChanged = bridgeSocket.on('track_changed', (evt) => {
       if (mountedRef.current) {
+        const nextTrack = evt.current_track !== undefined ? evt.current_track : evt.track ?? null;
         setPlayback((prev) => ({
-          time_pos: evt.time_pos,
-          duration: evt.duration,
-          state: evt.state,
+          time_pos: evt.time_pos ?? 0,
+          duration: evt.duration ?? nextTrack?.duration_s ?? 0,
+          state: evt.state ?? (nextTrack ? 'playing' : 'stopped'),
           volume: prev ? prev.volume : 80,
-          current_track: evt.current_track,
+          current_track: nextTrack,
         }));
       }
     });
 
     const unsubQueue = bridgeSocket.on('queue_changed', (qData) => {
-      if (mountedRef.current) {
-        setQueue(qData);
-      }
+      if (mountedRef.current) setQueue(qData);
     });
 
     const unsubDownload = bridgeSocket.on('download_progress', (p) => {
       if (mountedRef.current) {
-        setDownloads((prev) => ({
-          ...prev,
-          [p.video_id]: p,
-        }));
+        setDownloads((prev) => ({ ...prev, [p.video_id]: p }));
+      }
+    });
+
+    const unsubError = bridgeSocket.on('error', (errEvt) => {
+      if (mountedRef.current && errEvt?.message) {
+        setLastError(errEvt.message);
       }
     });
 
@@ -577,6 +704,7 @@ export function useBridge() {
       unsubTrackChanged();
       unsubQueue();
       unsubDownload();
+      unsubError();
     };
   }, [syncInitialState]);
 

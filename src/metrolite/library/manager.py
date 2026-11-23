@@ -63,7 +63,6 @@ class LibraryManager:
         self.history_limit = cfg.queue.history_limit
 
     async def ensure_db(self) -> None:
-        """Ensure database tables are created."""
         await init_db(self.db_path)
 
     async def _upsert_track(
@@ -72,7 +71,6 @@ class LibraryManager:
         video_id: str,
         track_meta: Track | dict[str, Any] | None = None,
     ) -> None:
-        """Insert track or update non-empty metadata in the tracks table."""
         meta = _normalize_track_dict(video_id, track_meta)
         await conn.execute(
             """
@@ -97,14 +95,9 @@ class LibraryManager:
             meta,
         )
 
-    # -------------------------------------------------------------------------
-    # Liked Songs
-    # -------------------------------------------------------------------------
-
     async def toggle_like(
         self, video_id: str, track_meta: Track | dict[str, Any] | None = None
     ) -> bool:
-        """Toggle like status for a track. Returns True if now liked, False if unliked."""
         async with get_connection(self.db_path) as conn:
             await self._upsert_track(conn, video_id, track_meta)
 
@@ -130,7 +123,6 @@ class LibraryManager:
             return new_liked_state
 
     async def is_liked(self, video_id: str) -> bool:
-        """Return True if the track is marked as liked."""
         async with get_connection(self.db_path) as conn:
             cursor = await conn.execute(
                 "SELECT is_liked FROM tracks WHERE video_id = ?;", (video_id,)
@@ -139,7 +131,6 @@ class LibraryManager:
             return bool(row["is_liked"]) if row else False
 
     async def list_liked(self, search_query: str | None = None) -> list[dict[str, Any]]:
-        """List all liked songs, ordered by liked_at descending, with optional search filter."""
         query = """
             SELECT video_id, title, artist, album, duration_s, thumbnail_url,
                    is_liked, liked_at, local_path, file_size_bytes, downloaded_at,
@@ -150,8 +141,14 @@ class LibraryManager:
         params: list[Any] = []
 
         if search_query and search_query.strip():
-            q_clean = f"%{search_query.strip()}%"
-            query += " AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)"
+            escaped = (
+                search_query.strip()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            q_clean = f"%{escaped}%"
+            query += " AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\' OR album LIKE ? ESCAPE '\\')"
             params.extend([q_clean, q_clean, q_clean])
 
         query += " ORDER BY liked_at DESC;"
@@ -161,12 +158,7 @@ class LibraryManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # -------------------------------------------------------------------------
-    # Playlists
-    # -------------------------------------------------------------------------
-
     async def create_playlist(self, name: str, description: str = "") -> dict[str, Any]:
-        """Create a new playlist and return its record."""
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Playlist name cannot be empty")
@@ -197,7 +189,6 @@ class LibraryManager:
     async def rename_playlist(
         self, playlist_id: str, name: str, description: str | None = None
     ) -> bool:
-        """Update a playlist's name and optional description."""
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Playlist name cannot be empty")
@@ -226,7 +217,6 @@ class LibraryManager:
             return cursor.rowcount > 0
 
     async def delete_playlist(self, playlist_id: str) -> bool:
-        """Delete a playlist and its associated track associations."""
         async with get_connection(self.db_path) as conn:
             cursor = await conn.execute("DELETE FROM playlists WHERE id = ?;", (playlist_id,))
             await conn.commit()
@@ -236,7 +226,6 @@ class LibraryManager:
             return deleted
 
     async def list_playlists(self) -> list[dict[str, Any]]:
-        """List all playlists with their track counts ordered by updated_at descending."""
         query = """
             SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
                    COUNT(pt.video_id) AS track_count
@@ -251,7 +240,6 @@ class LibraryManager:
             return [dict(row) for row in rows]
 
     async def get_playlist(self, playlist_id: str) -> dict[str, Any] | None:
-        """Get playlist details by id."""
         query = """
             SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
                    COUNT(pt.video_id) AS track_count
@@ -270,18 +258,15 @@ class LibraryManager:
         playlist_id: str,
         tracks: list[Track | dict[str, Any] | str] | Track | dict[str, Any] | str,
     ) -> int:
-        """Add one or more tracks to a playlist, preserving sequence order."""
         track_list = tracks if isinstance(tracks, list) else [tracks]
         if not track_list:
             return 0
 
         async with get_connection(self.db_path) as conn:
-            # Check playlist exists
             cursor = await conn.execute("SELECT id FROM playlists WHERE id = ?;", (playlist_id,))
             if not await cursor.fetchone():
                 raise ValueError(f"Playlist {playlist_id} does not exist")
 
-            # Determine next position
             pos_cursor = await conn.execute(
                 "SELECT COALESCE(MAX(position), -1) AS max_pos FROM playlist_tracks WHERE playlist_id = ?;",
                 (playlist_id,),
@@ -310,7 +295,6 @@ class LibraryManager:
 
                 await self._upsert_track(conn, v_id, t_meta)
 
-                # Add to playlist_tracks if not already in playlist
                 ins_cursor = await conn.execute(
                     """
                     INSERT INTO playlist_tracks (playlist_id, video_id, position, added_at)
@@ -333,7 +317,6 @@ class LibraryManager:
             return added_count
 
     async def remove_from_playlist(self, playlist_id: str, video_id: str) -> bool:
-        """Remove a track from a playlist and recompact sequence positions."""
         async with get_connection(self.db_path) as conn:
             cursor = await conn.execute(
                 "DELETE FROM playlist_tracks WHERE playlist_id = ? AND video_id = ?;",
@@ -341,7 +324,6 @@ class LibraryManager:
             )
             removed = cursor.rowcount > 0
             if removed:
-                # Recompact positions: 0, 1, 2...
                 pos_cursor = await conn.execute(
                     "SELECT video_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC;",
                     (playlist_id,),
@@ -367,7 +349,6 @@ class LibraryManager:
         new_position: int | None = None,
         ordered_video_ids: list[str] | None = None,
     ) -> bool:
-        """Reorder tracks in a playlist either by specifying new position or full ordered list."""
         async with get_connection(self.db_path) as conn:
             pos_cursor = await conn.execute(
                 "SELECT video_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC;",
@@ -381,7 +362,6 @@ class LibraryManager:
 
             if ordered_video_ids is not None:
                 new_order = [v for v in ordered_video_ids if v in current_ids]
-                # Keep any omitted tracks at the end in their previous relative order
                 for v in current_ids:
                     if v not in new_order:
                         new_order.append(v)
@@ -407,7 +387,6 @@ class LibraryManager:
             return True
 
     async def get_playlist_tracks(self, playlist_id: str) -> list[dict[str, Any]]:
-        """Get all tracks for a given playlist ordered by position ascending."""
         query = """
             SELECT t.video_id, t.title, t.artist, t.album, t.duration_s, t.thumbnail_url,
                    t.is_liked, t.liked_at, t.local_path, t.file_size_bytes, t.downloaded_at,
@@ -422,14 +401,9 @@ class LibraryManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # -------------------------------------------------------------------------
-    # History & Play Counts
-    # -------------------------------------------------------------------------
-
     async def record_play(
         self, video_id: str, track_meta: Track | dict[str, Any] | None = None
     ) -> None:
-        """Increment play count and update last_played_at timestamp."""
         now = _utc_now_iso()
         async with get_connection(self.db_path) as conn:
             await self._upsert_track(conn, video_id, track_meta)
@@ -446,7 +420,6 @@ class LibraryManager:
             logger.debug("Recorded play for track %s", video_id)
 
     async def get_history(self, limit: int | None = None) -> list[dict[str, Any]]:
-        """List recently played tracks ordered by last_played_at descending."""
         lim = limit or self.history_limit
         query = """
             SELECT video_id, title, artist, album, duration_s, thumbnail_url,
@@ -462,8 +435,24 @@ class LibraryManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_most_played(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """List user's most played tracks ranked by play_count descending."""
+        lim = limit or self.history_limit
+        query = """
+            SELECT video_id, title, artist, album, duration_s, thumbnail_url,
+                   is_liked, liked_at, local_path, file_size_bytes, downloaded_at,
+                   play_count, last_played_at
+            FROM tracks
+            WHERE play_count > 0
+            ORDER BY play_count DESC, last_played_at DESC
+            LIMIT ?;
+        """
+        async with get_connection(self.db_path) as conn:
+            cursor = await conn.execute(query, (lim,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
     async def get_track(self, video_id: str) -> dict[str, Any] | None:
-        """Fetch track metadata by video_id."""
         query = """
             SELECT video_id, title, artist, album, duration_s, thumbnail_url,
                    is_liked, liked_at, local_path, file_size_bytes, downloaded_at,

@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS tracks (
 
 CREATE INDEX IF NOT EXISTS idx_tracks_is_liked ON tracks(is_liked);
 CREATE INDEX IF NOT EXISTS idx_tracks_local_path ON tracks(local_path);
+CREATE INDEX IF NOT EXISTS idx_tracks_play_history ON tracks(play_count DESC, last_played_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_last_played ON tracks(last_played_at DESC);
 
 CREATE TABLE IF NOT EXISTS playlists (
     id TEXT PRIMARY KEY,
@@ -83,8 +85,9 @@ def init_db_sync(db_path: Path | str | None = None) -> Path:
     """Initialize database tables synchronously."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=5.0)
     try:
+        conn.execute("PRAGMA busy_timeout = 5000;")
         with conn:
             conn.executescript(SCHEMA_SQL)
     finally:
@@ -96,7 +99,8 @@ async def init_db(db_path: Path | str | None = None) -> Path:
     """Initialize database tables asynchronously using aiosqlite."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(str(path)) as conn:
+    async with aiosqlite.connect(str(path), timeout=5.0) as conn:
+        await conn.execute("PRAGMA busy_timeout = 5000;")
         await conn.executescript(SCHEMA_SQL)
         await conn.commit()
     return path
@@ -104,26 +108,26 @@ async def init_db(db_path: Path | str | None = None) -> Path:
 
 @asynccontextmanager
 async def get_connection(db_path: Path | str | None = None) -> AsyncIterator[aiosqlite.Connection]:
-    """Yield an async SQLite connection configured with WAL and foreign keys."""
+    """Yield an async SQLite connection configured with busy_timeout and foreign keys."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(str(path)) as conn:
+    async with aiosqlite.connect(str(path), timeout=5.0) as conn:
         conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout = 5000;")
         await conn.execute("PRAGMA foreign_keys = ON;")
-        await conn.execute("PRAGMA journal_mode = WAL;")
         yield conn
 
 
 @contextmanager
 def get_sync_connection(db_path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
-    """Yield a synchronous SQLite connection configured with WAL and foreign keys."""
+    """Yield a synchronous SQLite connection configured with busy_timeout and foreign keys."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=5.0)
     try:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
         yield conn
     finally:
         conn.close()

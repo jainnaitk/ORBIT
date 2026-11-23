@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
 import sqlite3
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
@@ -49,6 +51,23 @@ class QueueManager:
         self.current_index: int = 0
         self.shuffle: bool = False
         self.repeat_mode: RepeatMode = "off"
+        self.consecutive_errors: int = 0
+        self.max_consecutive_errors: int = 2
+        self._persist_task: asyncio.Task[None] | None = None
+        self._persist_dirty: bool = False
+
+    def record_error(self) -> int:
+        """Record a playback or resolution error and increment consecutive error count."""
+        self.consecutive_errors += 1
+        return self.consecutive_errors
+
+    def reset_errors(self) -> None:
+        """Reset consecutive error count to 0."""
+        self.consecutive_errors = 0
+
+    def can_skip_on_error(self) -> bool:
+        """Return True if consecutive errors are within the allowed limit (<= 2)."""
+        return self.consecutive_errors <= self.max_consecutive_errors
 
     @property
     def current_track(self) -> Track | None:
@@ -70,13 +89,37 @@ class QueueManager:
             return self.items[0]
         return None
 
+    def _schedule_async_persist(self) -> None:
+        """Coalesce and offload queue persistence off the asyncio event loop."""
+        self._persist_dirty = True
+        if self._persist_task is not None and not self._persist_task.done():
+            return
+
+        async def _flush() -> None:
+            while self._persist_dirty:
+                self._persist_dirty = False
+                try:
+                    await self.save_to_db()
+                except (sqlite3.Error, OSError) as e:
+                    logger.warning("Failed to auto-persist queue state: %s", e)
+                except asyncio.CancelledError:
+                    break
+
+        with suppress(RuntimeError):
+            self._persist_task = asyncio.get_running_loop().create_task(_flush())
+
     def _notify(self) -> None:
         """Trigger queue changed callback and auto-persistence."""
         if self.auto_persist and self._db_path and self._db_path.is_file():
             try:
-                self.save_to_db_sync()
-            except (sqlite3.Error, OSError) as e:
-                logger.warning("Failed to auto-persist queue state: %s", e)
+                asyncio.get_running_loop()
+            except RuntimeError:
+                try:
+                    self.save_to_db_sync()
+                except (sqlite3.Error, OSError) as e:
+                    logger.warning("Failed to auto-persist queue state: %s", e)
+            else:
+                self._schedule_async_persist()
         if self._on_queue_changed:
             try:
                 self._on_queue_changed()
@@ -85,6 +128,7 @@ class QueueManager:
 
     def set_queue(self, tracks: list[Track], start_index: int = 0) -> None:
         """Replace the entire queue with new tracks."""
+        self.consecutive_errors = 0
         self.items = list(tracks)
         self._original_items = list(tracks)
         self.current_index = max(0, min(start_index, len(self.items) - 1)) if self.items else 0
@@ -155,6 +199,7 @@ class QueueManager:
 
     def clear(self) -> None:
         """Clear all tracks from the queue."""
+        self.consecutive_errors = 0
         self.items.clear()
         self._original_items.clear()
         self.current_index = 0
@@ -239,8 +284,23 @@ class QueueManager:
             return len(new_tracks)
         return 0
 
-    async def next_track(self) -> Track | None:
-        """Advance queue index and return next Track, or None if queue ends."""
+    async def next_track(self, is_error: bool = False) -> Track | None:
+        """Advance queue index and return next Track, or None if queue ends.
+
+        If is_error is True, verifies consecutive errors do not exceed
+        max_consecutive_errors (2) before allowing advance.
+        If is_error is False, resets consecutive errors.
+        """
+        if is_error:
+            if not self.can_skip_on_error():
+                logger.warning(
+                    "QueueManager: consecutive error limit (%d) reached. Halting auto-advance.",
+                    self.max_consecutive_errors,
+                )
+                return None
+        else:
+            self.consecutive_errors = 0
+
         if not self.items:
             return None
 
@@ -328,6 +388,34 @@ class QueueManager:
             )
             await conn.commit()
 
+    def flush_sync(self) -> None:
+        """Cancel pending async persistence task and flush dirty queue state synchronously."""
+        if self._persist_task is not None and not self._persist_task.done():
+            self._persist_task.cancel()
+        self._persist_task = None
+        if self.auto_persist and self._persist_dirty:
+            self._persist_dirty = False
+            try:
+                self.save_to_db_sync()
+            except (sqlite3.Error, OSError) as e:
+                logger.warning("Failed to flush queue state on shutdown: %s", e)
+
+    def _parse_persisted_items(self, raw_json: str | None) -> list[Track]:
+        """Parse persisted items_json defensively, skipping malformed entries."""
+        raw_items = json.loads(raw_json or "[]")
+        if not isinstance(raw_items, list):
+            return []
+        parsed: list[Track] = []
+        for idx, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                logger.warning("Skipping non-dict persisted queue entry at index %d", idx)
+                continue
+            try:
+                parsed.append(Track(**item))
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning("Skipping malformed persisted queue entry at index %d: %s", idx, e)
+        return parsed
+
     def load_from_db_sync(self, db_path: Path | str | None = None) -> bool:
         """Synchronously load queue state from SQLite queue_state table."""
         path = Path(db_path) if db_path is not None else self._db_path
@@ -339,14 +427,15 @@ class QueueManager:
                 row = cursor.fetchone()
                 if not row:
                     return False
-                raw_items = json.loads(row["items_json"] or "[]")
-                self.items = [Track(**item) for item in raw_items]
+                self.items = self._parse_persisted_items(row["items_json"])
                 self._original_items = list(self.items)
-                self.current_index = row["current_index"]
+                raw_idx = int(row["current_index"] or 0)
+                self.current_index = max(0, min(raw_idx, len(self.items) - 1)) if self.items else 0
                 self.shuffle = bool(row["shuffle"])
-                self.repeat_mode = row["repeat_mode"] or "off"
+                raw_repeat = row["repeat_mode"] or "off"
+                self.repeat_mode = raw_repeat if raw_repeat in VALID_REPEAT_MODES else "off"  # type: ignore[assignment]
                 return True
-        except (sqlite3.Error, json.JSONDecodeError, KeyError) as e:
+        except (sqlite3.Error, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             logger.warning("Failed to load queue state from database: %s", e)
             return False
 
@@ -361,13 +450,14 @@ class QueueManager:
                 row = await cursor.fetchone()
                 if not row:
                     return False
-                raw_items = json.loads(row["items_json"] or "[]")
-                self.items = [Track(**item) for item in raw_items]
+                self.items = self._parse_persisted_items(row["items_json"])
                 self._original_items = list(self.items)
-                self.current_index = row["current_index"]
+                raw_idx = int(row["current_index"] or 0)
+                self.current_index = max(0, min(raw_idx, len(self.items) - 1)) if self.items else 0
                 self.shuffle = bool(row["shuffle"])
-                self.repeat_mode = row["repeat_mode"] or "off"
+                raw_repeat = row["repeat_mode"] or "off"
+                self.repeat_mode = raw_repeat if raw_repeat in VALID_REPEAT_MODES else "off"  # type: ignore[assignment]
                 return True
-        except (sqlite3.Error, json.JSONDecodeError, KeyError) as e:
+        except (sqlite3.Error, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             logger.warning("Failed to load queue state from database: %s", e)
             return False

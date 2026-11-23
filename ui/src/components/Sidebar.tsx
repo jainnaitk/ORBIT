@@ -1,12 +1,14 @@
+import { memo } from 'react';
 import {
   Home,
   Search,
-  Library,
   Heart,
   Download,
   Clock,
   Plus,
   ListMusic,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import type { Playlist } from '../api/types';
 
@@ -18,162 +20,198 @@ interface SidebarProps {
   playlists: Playlist[];
   likedCount: number;
   downloadCount: number;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
   onSelectTab: (tab: NavTab, playlistId?: string) => void;
   onOpenCreatePlaylist: () => void;
 }
 
-export const Sidebar = ({
+export const Sidebar = memo(({
   activeTab,
   activePlaylistId,
   playlists,
   likedCount,
   downloadCount,
+  collapsed,
+  onToggleCollapse,
   onSelectTab,
   onOpenCreatePlaylist,
 }: SidebarProps) => {
+  const railItem = (
+    tab: NavTab,
+    label: string,
+    icon: React.ReactNode,
+    badge?: number,
+    activeColor?: string
+  ) => {
+    const active = activeTab === tab;
+    const accent = activeColor || 'var(--dynamic-accent)';
+
+    if (collapsed) {
+      return (
+        <button
+          key={tab}
+          onClick={() => onSelectTab(tab)}
+          aria-label={label}
+          title={label}
+          className={`relative w-full py-2 sm:py-2.5 rounded-xl sm:rounded-2xl flex flex-col items-center justify-center gap-1 transition-all duration-200 ${
+            active
+              ? 'bg-white/[0.11] text-[#F1F4FA] shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
+              : 'text-[#8E99BA] hover:text-white hover:bg-white/[0.06]'
+          }`}
+        >
+          {active && (
+            <span
+              className="absolute left-0.5 top-2.5 bottom-2.5 sm:top-3 sm:bottom-3 w-[3px] rounded-full"
+              style={{ background: accent }}
+            />
+          )}
+          <div style={active ? { color: accent } : undefined}>{icon}</div>
+          <span className="hidden sm:inline text-[9px] font-medium tracking-wide leading-none">
+            {label}
+          </span>
+          {badge !== undefined && badge > 0 && (
+            <span className="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 text-[8px] font-mono tabular-nums bg-[#06080F]/95 text-[#E6ECF8] border border-white/15 px-1 sm:px-1.5 rounded-full leading-tight">
+              {badge}
+            </span>
+          )}
+        </button>
+      );
+    }
+
+    return (
+      <button
+        key={tab}
+        onClick={() => onSelectTab(tab)}
+        aria-label={label}
+        className={`relative w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-medium transition-all duration-200 ${
+          active
+            ? 'bg-white/[0.11] text-[#F1F4FA] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
+            : 'text-[#8E99BA] hover:bg-white/[0.06] hover:text-white'
+        }`}
+      >
+        {active && (
+          <span
+            className="absolute left-0.5 top-2.5 bottom-2.5 w-[3px] rounded-full"
+            style={{ background: accent }}
+          />
+        )}
+        <div className="flex items-center gap-3">
+          <span style={active ? { color: accent } : undefined}>{icon}</span>
+          <span>{label}</span>
+        </div>
+        {badge !== undefined && badge > 0 && (
+          <span className="text-[10px] font-mono tabular-nums text-[#9AA5C4] bg-white/[0.08] px-1.5 py-0.5 rounded-full">
+            {badge}
+          </span>
+        )}
+      </button>
+    );
+  };
+
   return (
-    <aside className="w-[220px] flex-none bg-bg-sidebar border-r border-border-subtle flex flex-col p-3 gap-4 select-none overflow-hidden">
-      {/* Primary Navigation */}
+    <aside
+      className={`${
+        collapsed ? 'w-[58px] sm:w-[76px]' : 'w-[184px] sm:w-[222px]'
+      } flex-none ios-liquid-rail rounded-[20px] sm:rounded-[24px] flex flex-col p-1.5 sm:p-2 gap-1.5 sm:gap-2 select-none overflow-hidden transition-[width] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] my-1`}
+    >
+      {/* Primary Orbital Destinations */}
       <nav className="space-y-1">
-        <button
-          onClick={() => onSelectTab('home')}
-          className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-            activeTab === 'home'
-              ? 'bg-bg-hover text-accent font-semibold'
-              : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-          }`}
-        >
-          <Home size={16} />
-          <span>Home</span>
-        </button>
-
-        <button
-          onClick={() => onSelectTab('search')}
-          className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-            activeTab === 'search'
-              ? 'bg-bg-hover text-accent font-semibold'
-              : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-          }`}
-        >
-          <Search size={16} />
-          <span>Search</span>
-        </button>
-
-        <button
-          onClick={() => onSelectTab('library')}
-          className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-            activeTab === 'library'
-              ? 'bg-bg-hover text-accent font-semibold'
-              : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-          }`}
-        >
-          <Library size={16} />
-          <span>Library</span>
-        </button>
+        {railItem('home', 'Home', <Home size={17} />)}
+        {railItem('search', 'Search', <Search size={17} />)}
+        {railItem(
+          'liked',
+          'Liked',
+          <Heart size={16} className={activeTab === 'liked' ? 'fill-[#FF4D8D]' : ''} />,
+          likedCount,
+          '#FF4D8D'
+        )}
+        {railItem('downloads', 'Offline', <Download size={16} />, downloadCount, '#34D399')}
+        {railItem('history', 'History', <Clock size={16} />)}
       </nav>
 
-      {/* Library Section */}
-      <div className="pt-2 border-t border-border-subtle">
-        <div className="text-[11px] font-semibold text-text-2 uppercase tracking-wider px-3 mb-1.5">
-          My Collection
-        </div>
-        <div className="space-y-1">
-          <button
-            onClick={() => onSelectTab('liked')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-              activeTab === 'liked'
-                ? 'bg-bg-hover text-liked font-semibold'
-                : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              <Heart
-                size={16}
-                className={activeTab === 'liked' ? 'fill-liked text-liked' : ''}
-              />
-              <span>Liked Songs</span>
-            </div>
-            {likedCount > 0 && (
-              <span className="text-[10px] font-mono text-text-2 bg-bg-surface px-1.5 py-0.2 rounded border border-border-subtle">
-                {likedCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => onSelectTab('downloads')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-              activeTab === 'downloads'
-                ? 'bg-bg-hover text-downloaded font-semibold'
-                : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              <Download size={16} />
-              <span>Downloads</span>
-            </div>
-            {downloadCount > 0 && (
-              <span className="text-[10px] font-mono text-downloaded bg-downloaded/10 px-1.5 py-0.2 rounded border border-downloaded/20">
-                {downloadCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => onSelectTab('history')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-colors ${
-              activeTab === 'history'
-                ? 'bg-bg-hover text-accent font-semibold'
-                : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
-            }`}
-          >
-            <Clock size={16} />
-            <span>History</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Playlists Section */}
-      <div className="flex-1 min-h-0 flex flex-col pt-2 border-t border-border-subtle">
-        <div className="flex items-center justify-between px-3 mb-1.5">
-          <span className="text-[11px] font-semibold text-text-2 uppercase tracking-wider">
-            Playlists
-          </span>
+      {/* Playlists Section with Crisp Divider */}
+      <div className="pt-2.5 mt-0.5 border-t border-white/[0.10] flex-1 min-h-0 flex flex-col">
+        <div
+          className={`flex items-center ${
+            collapsed ? 'justify-center' : 'justify-between px-3'
+          } mb-2`}
+        >
+          {!collapsed && (
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7A84A6]">
+              Playlists
+            </span>
+          )}
           <button
             onClick={onOpenCreatePlaylist}
-            title="Create New Playlist"
-            className="w-5 h-5 flex items-center justify-center text-text-2 hover:text-text-1 hover:bg-bg-hover rounded transition-colors"
+            title="New Playlist"
+            aria-label="New Playlist"
+            className="w-7 h-7 flex items-center justify-center rounded-full bg-white/[0.06] border border-white/[0.10] text-[#B2BCD9] hover:text-white hover:bg-white/[0.14] hover:border-white/20 transition-all"
           >
             <Plus size={14} />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
-          {playlists.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-text-2/60 italic">
-              No playlists yet. Click + to create one.
-            </div>
-          ) : (
-            playlists.map((pl: Playlist) => {
-              const isActive = activeTab === 'playlist' && activePlaylistId === pl.id;
+        <div className="flex-1 overflow-y-auto no-scrollbar space-y-1.5">
+          {playlists.length === 0 && !collapsed && (
+            <button
+              onClick={onOpenCreatePlaylist}
+              className="w-full px-3 py-2 rounded-xl text-[11px] text-[#6D7796] hover:text-[#9AA5C4] hover:bg-white/[0.05] text-left transition-colors"
+            >
+              + Create your first playlist
+            </button>
+          )}
+          {playlists.map((pl: Playlist) => {
+            const isActive = activeTab === 'playlist' && activePlaylistId === pl.id;
+            if (collapsed) {
               return (
                 <button
                   key={pl.id}
                   onClick={() => onSelectTab('playlist', pl.id)}
-                  className={`w-full flex items-center gap-2.5 px-3 py-1.5 rounded-md text-xs truncate text-left transition-colors ${
+                  title={pl.name}
+                  className={`w-8 h-8 sm:w-10 sm:h-10 mx-auto rounded-full flex items-center justify-center text-[10px] sm:text-xs font-bold border transition-all ${
                     isActive
-                      ? 'bg-bg-hover text-accent font-semibold'
-                      : 'text-text-2 hover:bg-bg-hover hover:text-text-1'
+                      ? 'bg-white/[0.16] text-white border-[rgba(var(--dynamic-accent-rgb),0.6)]'
+                      : 'bg-white/[0.05] text-[#9BA4C4] border-white/10 hover:text-white hover:bg-white/[0.12]'
                   }`}
                 >
-                  <ListMusic size={14} className="flex-none" />
-                  <span className="truncate">{pl.name}</span>
+                  {pl.name.slice(0, 2).toUpperCase()}
                 </button>
               );
-            })
-          )}
+            }
+            return (
+              <button
+                key={pl.id}
+                onClick={() => onSelectTab('playlist', pl.id)}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs truncate text-left transition-colors ${
+                  isActive
+                    ? 'bg-white/[0.11] text-white font-semibold'
+                    : 'text-[#9BA4C4] hover:bg-white/[0.06] hover:text-white'
+                }`}
+              >
+                <ListMusic
+                  size={14}
+                  className="flex-none"
+                  style={isActive ? { color: 'var(--dynamic-accent)' } : undefined}
+                />
+                <span className="truncate">{pl.name}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* Bottom Expand / Collapse Toggle */}
+      <button
+        onClick={onToggleCollapse}
+        title={collapsed ? 'Expand Rail' : 'Collapse Rail'}
+        className={`w-full py-2 rounded-xl flex items-center ${
+          collapsed ? 'justify-center' : 'justify-between px-3'
+        } text-[#9BA4C4] hover:text-white hover:bg-white/[0.07] transition-colors border-t border-white/[0.08]`}
+      >
+        {!collapsed && <span className="text-[11px]">Compact Rail</span>}
+        {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+      </button>
     </aside>
   );
-};
+});

@@ -1,29 +1,33 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MetroLite",
+  "productName": "ORBIT",
   "version": "0.1.0",
-  "identifier": "com.metrolite.desktop",
+  "identifier": "com.orbit.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "MetroLite",
-        "width": 1060,
-        "height": 680,
-        "minWidth": 840,
-        "minHeight": 560,
+        "label": "main",
+        "title": "ORBIT",
+        "width": 1120,
+        "height": 700,
+        "minWidth": 380,
+        "minHeight": 320,
         "resizable": true,
         "decorations": false,
-        "transparent": false
+        "transparent": true,
+        "shadow": false,
+        "dragDropEnabled": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,Translate,SpareRendererForSitePerProcess,msEdgeShopping,msEdgeSidebar,msEdgeCollections,InterestFeedContentSuggestions,AudioServiceOutOfProcess --disable-background-networking --disable-component-update --disable-extensions --disable-sync --disable-3d-apis --disk-cache-size=4194304 --media-cache-size=4194304 --renderer-process-limit=1 --js-flags=--max-old-space-size=64"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' tauri: asset:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https://*.googleusercontent.com https://*.ggpht.com https://*.ytimg.com; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* ipc: http://ipc.localhost"
     }
   },
   "bundle": {

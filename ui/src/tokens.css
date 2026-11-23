@@ -4,46 +4,46 @@
 @import "@fontsource/inter/700.css";
 
 :root {
-  --bg-base: #0B0B0F;
-  --bg-sidebar: #0E0E13;
-  --bg-surface: #14141B;
-  --bg-hover: #1C1C26;
-  --bg-player: #101016;
+  --bg-base: #06080F;
+  --bg-sidebar: #0A0D16;
+  --bg-surface: #0E121E;
+  --bg-hover: #151B2C;
+  --bg-player: #0B0F1A;
   --border: rgba(255, 255, 255, 0.08);
-  --border-light: rgba(255, 255, 255, 0.12);
-  --text-1: #F8FAFC;
-  --text-2: #94A3B8;
-  --accent: #38BDF8;
-  --liked: #FB7185;
+  --text-1: #F1F4FA;
+  --text-2: #9AA5C4;
+  --text-3: #6D7796;
+
+  --dynamic-accent: #2DD4BF;
+  --dynamic-accent-rgb: 45, 212, 191;
+  --dynamic-secondary: #6366F1;
+  --dynamic-secondary-rgb: 99, 102, 241;
+
+  --accent: var(--dynamic-accent);
+  --liked: #FF4D8D;
   --downloaded: #34D399;
+
+  --bh-scroll-opacity: 1;
+
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', Consolas, monospace;
-
-  --row-height: 56px;
-  --titlebar-height: 44px;
-  --player-height: 76px;
-  --sidebar-width: 220px;
-  --queue-width: 300px;
 }
 
-/* Optional OLED mode */
-[data-theme="oled"] {
+[data-effects="oled"] {
   --bg-base: #000000;
-  --bg-sidebar: #050507;
-  --bg-surface: #0D0D11;
-  --bg-hover: #16161D;
-  --bg-player: #08080B;
-  --border: rgba(255, 255, 255, 0.10);
+  --bg-sidebar: #050609;
+  --bg-surface: #090B10;
+  --bg-hover: #12151E;
+  --bg-player: #06080C;
   --text-1: #FFFFFF;
 }
 
-/* Global resets & typography */
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
   width: 100%;
-  background-color: var(--bg-base);
+  background: transparent !important;
   color: var(--text-1);
   font-family: var(--font-sans);
   overflow: hidden;
@@ -56,25 +56,43 @@ html, body {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  background: transparent !important;
 }
 
-/* Custom subtle scrollbar (no jank) */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(var(--dynamic-accent-rgb), 0.75);
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(var(--dynamic-accent-rgb), 0.55);
 }
 
-/* Titlebar dragging area */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 .titlebar-drag {
   -webkit-app-region: drag;
 }
@@ -82,7 +100,402 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* Strict 60fps animation rules: transform & opacity only */
-.transition-smooth {
-  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1), opacity 150ms cubic-bezier(0.2, 0, 0, 1);
+/* =========================================================================
+ * LEAN-RAM LIQUID GLASS (Backdrop blur reserved for floating dock, drawers,
+ * popovers & Dynamic Island; full-height panels/rail use refractive gradients
+ * + specular rims for zero compositor texture spikes & 60fps animations)
+ * ========================================================================= */
+.ios-liquid-panel {
+  background:
+    linear-gradient(
+      155deg,
+      rgba(var(--dynamic-accent-rgb), 0.10) 0%,
+      rgba(255, 255, 255, 0.045) 20%,
+      rgba(6, 9, 18, 0.80) 64%,
+      rgba(var(--dynamic-secondary-rgb), 0.08) 100%
+    ),
+    rgba(6, 9, 18, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  transition: border-color 450ms ease, box-shadow 450ms ease;
+}
+
+.ios-liquid-drawer {
+  background:
+    linear-gradient(
+      165deg,
+      rgba(var(--dynamic-accent-rgb), 0.11) 0%,
+      rgba(255, 255, 255, 0.05) 24%,
+      rgba(6, 9, 18, 0.64) 70%,
+      rgba(var(--dynamic-secondary-rgb), 0.10) 100%
+    ),
+    rgba(6, 9, 18, 0.60);
+  border: 1px solid rgba(var(--dynamic-accent-rgb), 0.28);
+  backdrop-filter: blur(14px) saturate(165%);
+  -webkit-backdrop-filter: blur(14px) saturate(165%);
+  box-shadow:
+    0 22px 54px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  transition: border-color 450ms ease;
+}
+
+.ios-liquid-glass {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(var(--dynamic-accent-rgb), 0.13) 0%,
+      rgba(255, 255, 255, 0.06) 26%,
+      rgba(7, 10, 20, 0.62) 72%,
+      rgba(var(--dynamic-secondary-rgb), 0.11) 100%
+    ),
+    rgba(7, 10, 20, 0.58);
+  border: 1px solid rgba(var(--dynamic-accent-rgb), 0.30);
+  backdrop-filter: blur(14px) saturate(165%);
+  -webkit-backdrop-filter: blur(14px) saturate(165%);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.68),
+    0 0 26px rgba(var(--dynamic-accent-rgb), 0.11),
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.30),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  transition: border-color 450ms ease, box-shadow 450ms ease;
+}
+
+.ios-liquid-rail {
+  background:
+    linear-gradient(
+      165deg,
+      rgba(var(--dynamic-accent-rgb), 0.09) 0%,
+      rgba(255, 255, 255, 0.045) 24%,
+      rgba(6, 9, 18, 0.80) 100%
+    ),
+    rgba(6, 9, 18, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  transition: border-color 450ms ease;
+}
+
+/* ZERO per-card backdrop-filter (keeps 60fps scrolling & low GPU RAM while keeping crisp liquid glass sheen) */
+.ios-liquid-card {
+  background:
+    linear-gradient(
+      155deg,
+      rgba(255, 255, 255, 0.08) 0%,
+      rgba(9, 13, 24, 0.60) 44%,
+      rgba(6, 9, 18, 0.72) 100%
+    );
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    0 6px 18px rgba(0, 0, 0, 0.44);
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+              border-color 220ms ease,
+              background 220ms ease,
+              box-shadow 240ms ease;
+}
+
+.ios-liquid-card:hover {
+  background:
+    linear-gradient(
+      155deg,
+      rgba(var(--dynamic-accent-rgb), 0.18) 0%,
+      rgba(13, 19, 34, 0.76) 55%,
+      rgba(8, 12, 24, 0.86) 100%
+    );
+  border-color: rgba(var(--dynamic-accent-rgb), 0.54);
+  transform: translate3d(0, -3px, 0);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 12px 28px rgba(0, 0, 0, 0.58),
+    0 0 20px rgba(var(--dynamic-accent-rgb), 0.15);
+}
+
+.ios-liquid-pill {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.12) 0%,
+      rgba(10, 14, 26, 0.56) 100%
+    ),
+    rgba(8, 12, 22, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ios-liquid-pill:hover {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(var(--dynamic-accent-rgb), 0.22) 0%,
+      rgba(14, 20, 36, 0.72) 100%
+    ),
+    rgba(12, 17, 30, 0.66);
+  border-color: rgba(var(--dynamic-accent-rgb), 0.46);
+}
+
+.ios-liquid-orb {
+  background: radial-gradient(
+    circle at 35% 30%,
+    #FFFFFF 0%,
+    #E6ECFA 70%,
+    rgba(var(--dynamic-accent-rgb), 0.44) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.90);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.52),
+    0 0 18px rgba(var(--dynamic-accent-rgb), 0.34);
+}
+
+.ios-liquid-popover {
+  background:
+    linear-gradient(
+      155deg,
+      rgba(var(--dynamic-accent-rgb), 0.11) 0%,
+      rgba(255, 255, 255, 0.04) 22%,
+      rgba(8, 12, 22, 0.78) 55%
+    ),
+    rgba(7, 10, 18, 0.76);
+  border: 1px solid rgba(var(--dynamic-accent-rgb), 0.28);
+  backdrop-filter: blur(14px) saturate(165%);
+  -webkit-backdrop-filter: blur(14px) saturate(165%);
+  box-shadow:
+    0 22px 52px rgba(0, 0, 0, 0.82),
+    inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+
+/* Dynamic Island: rich frosted liquid-obsidian glass without clipping outside window */
+.ios-liquid-island {
+  background:
+    radial-gradient(
+      ellipse 88% 92% at 16% 16%,
+      rgba(var(--dynamic-accent-rgb), 0.26) 0%,
+      transparent 58%
+    ),
+    radial-gradient(
+      ellipse 70% 80% at 88% 88%,
+      rgba(var(--dynamic-secondary-rgb), 0.18) 0%,
+      transparent 60%
+    ),
+    linear-gradient(
+      160deg,
+      rgba(255, 255, 255, 0.15) 0%,
+      rgba(255, 255, 255, 0.035) 34%,
+      rgba(6, 9, 18, 0.86) 76%,
+      rgba(6, 9, 18, 0.92) 100%
+    ),
+    rgba(5, 8, 16, 0.88);
+  border: 1px solid rgba(var(--dynamic-accent-rgb), 0.36);
+  backdrop-filter: blur(14px) saturate(165%);
+  -webkit-backdrop-filter: blur(14px) saturate(165%);
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.34),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* Off-screen shelf rendering optimization: skips layout/decode for shelves outside viewport */
+.eh-shelf-section {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 270px;
+}
+
+[data-effects="oled"] .ios-liquid-panel,
+[data-effects="oled"] .ios-liquid-drawer,
+[data-effects="oled"] .ios-liquid-rail,
+[data-effects="oled"] .ios-liquid-glass,
+[data-effects="oled"] .ios-liquid-popover,
+[data-effects="oled"] .ios-liquid-pill {
+  background: rgba(6, 7, 11, 0.96);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+[data-effects="oled"] .ios-liquid-card {
+  background: rgba(10, 12, 18, 0.96);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+[data-effects="oled"] .ios-liquid-card:hover {
+  background: rgba(17, 20, 29, 0.98);
+}
+
+/* Custom sleek dark volume range slider */
+input[type="range"].orbit-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.15);
+  height: 4px;
+  border-radius: 999px;
+  outline: none;
+}
+
+input[type="range"].orbit-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: #F1F4FA;
+  border: 1.5px solid var(--dynamic-accent);
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.22);
+}
+
+/* Smooth horizontal shelf edge masks (eliminates hard card clipping) */
+.shelf-fade-right {
+  -webkit-mask-image: linear-gradient(to right, #000000 0%, #000000 91%, transparent 100%);
+  mask-image: linear-gradient(to right, #000000 0%, #000000 91%, transparent 100%);
+}
+
+.shelf-fade-both {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0%,
+    #000000 4%,
+    #000000 91%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0%,
+    #000000 4%,
+    #000000 91%,
+    transparent 100%
+  );
+}
+
+.shelf-fade-left {
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000000 5%, #000000 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000000 5%, #000000 100%);
+}
+
+.lyrics-fade-mask {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.90) 14%,
+    #000000 26%,
+    #000000 74%,
+    rgba(0, 0, 0, 0.90) 86%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.90) 14%,
+    #000000 26%,
+    #000000 74%,
+    rgba(0, 0, 0, 0.90) 86%,
+    transparent 100%
+  );
+}
+
+/* =========================================================================
+ * FLUID iOS SPRING ENTRANCE & INTERACTION ANIMATIONS (GPU-ONLY)
+ * ========================================================================= */
+@keyframes pageEnter {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.992); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes appRestore {
+  from { opacity: 0; transform: scale(0.985); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes modalBackdropIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes modalPopIn {
+  from { opacity: 0; transform: translate3d(0, 14px, 0) scale(0.95); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes popoverPopIn {
+  from { opacity: 0; transform: translate3d(0, 8px, 0) scale(0.95); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes islandPopIn {
+  0%   { opacity: 0; transform: translate3d(0, -10px, 0) scale(0.86); }
+  70%  { opacity: 1; transform: translate3d(0, 1px, 0) scale(1.015); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes islandCirclePopIn {
+  0%   { opacity: 0; transform: scale(0.76); }
+  70%  { opacity: 1; transform: scale(1.04); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes skeletonShimmer {
+  0%   { opacity: 0.32; }
+  50%  { opacity: 0.65; }
+  100% { opacity: 0.32; }
+}
+
+@keyframes ehBlackHoleSuck {
+  0%   { transform: translate3d(0, 0, 0) scale(1) rotate(0deg); opacity: 1; }
+  28%  { transform: translate3d(14vw, -16vh, 0) scale(0.92) rotate(-10deg); opacity: 0.98; }
+  65%  { transform: translate3d(44vw, -48vh, 0) scale(0.42) rotate(-170deg); opacity: 0.82; }
+  100% { transform: translate3d(58vw, -64vh, 0) scale(0.03) rotate(-460deg); opacity: 0; }
+}
+
+@keyframes ehCardRiseBelow {
+  0%   { transform: translate3d(0, 46px, 0) scale(0.94); opacity: 0; }
+  65%  { transform: translate3d(0, -2px, 0) scale(1.01); opacity: 1; }
+  100% { transform: translate3d(0, 0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes accretionSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes vinylSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes eqBarBounce {
+  0%, 100% { transform: scaleY(0.28); }
+  50%      { transform: scaleY(1); }
+}
+
+.eh-page-in      { animation: pageEnter 280ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-app-restore  { animation: appRestore 240ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-modal-backdrop { animation: modalBackdropIn 180ms ease-out both; }
+.eh-modal-in     { animation: modalPopIn 260ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-popover-in   { animation: popoverPopIn 180ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-island-in    { animation: islandPopIn 260ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-island-circle-in { animation: islandCirclePopIn 240ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-skeleton     { animation: skeletonShimmer 1.3s ease-in-out infinite; }
+.eh-suck-card    { animation: ehBlackHoleSuck 1020ms cubic-bezier(0.45, 0.02, 0.65, 0.98) forwards; will-change: transform, opacity; }
+.eh-rise-card    { animation: ehCardRiseBelow 540ms cubic-bezier(0.22, 1, 0.36, 1) both; animation-delay: 80ms; will-change: transform, opacity; }
+.eh-accretion    { animation: accretionSpin 22s linear infinite; will-change: transform; }
+.eh-spin-vinyl   { animation: vinylSpin 16s linear infinite; will-change: transform; }
+.eh-eq-bar       { transform-origin: bottom; animation: eqBarBounce 0.72s ease-in-out infinite; }
+
+.eh-paused,
+.window-paused .eh-spin-vinyl,
+.window-paused .eh-accretion,
+.window-paused .eh-eq-bar,
+[data-effects="static"] .eh-spin-vinyl,
+[data-effects="static"] .eh-accretion,
+[data-effects="oled"] .eh-spin-vinyl,
+[data-effects="oled"] .eh-accretion {
+  animation-play-state: paused !important;
 }

@@ -29,10 +29,6 @@ class YTMNetworkError(YTMError):
     """Network connection or timeout error contacting YouTube Music."""
 
 
-class YTMParseError(YTMError):
-    """Failed to parse YouTube Music response data."""
-
-
 class Track(BaseModel):
     """Normalized metadata for a YouTube Music track."""
 
@@ -343,3 +339,20 @@ class YTMusicClient:
     async def get_watch_radio(self, video_id: str, limit: int = 25) -> list[Track]:
         """Fetch Up-Next watch radio recommendation tracks."""
         return await asyncio.to_thread(self._run_sync, self._get_watch_radio_sync, video_id, limit)
+
+    def _get_lyrics_sync(self, video_id: str) -> dict[str, str | None]:
+        watch = self._yt.get_watch_playlist(videoId=video_id, limit=1)
+        lyrics_id = watch.get("lyrics") if isinstance(watch, dict) else None
+        if not lyrics_id:
+            return {"lyrics": None, "source": None}
+        data = self._yt.get_lyrics(lyrics_id)
+        if isinstance(data, dict):
+            return {
+                "lyrics": data.get("lyrics"),
+                "source": data.get("source"),
+            }
+        return {"lyrics": None, "source": None}
+
+    async def get_lyrics(self, video_id: str) -> dict[str, str | None]:
+        """Fetch track lyrics from YouTube Music when available."""
+        return await asyncio.to_thread(self._run_sync, self._get_lyrics_sync, video_id)

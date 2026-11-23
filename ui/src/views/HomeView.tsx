@@ -1,152 +1,631 @@
-import { useEffect, useState } from 'react';
-import { Play, Sparkles, Flame, Clock, Music } from 'lucide-react';
-import type { Track, HomeSection } from '../api/types';
+import { memo, useEffect, useState, useCallback, useRef } from 'react';
+import {
+  Play,
+  Sparkles,
+  Flame,
+  RefreshCw,
+  Headphones,
+  Coffee,
+  Zap,
+  Moon,
+  Compass,
+  Heart,
+  TrendingUp,
+  ChevronLeft,
+  ChevronRight,
+  Radio,
+} from 'lucide-react';
+import { TrackImage } from '../components/TrackImage';
+import type { Track, HomeSection, PersonalizedHomeResponse } from '../api/types';
 import { bridgeApi } from '../api/client';
 
 interface HomeViewProps {
+  currentTrackId?: string | null;
+  likedIds?: Set<string>;
   onPlayTrack: (track: Track) => void;
   onPlayAll: (tracks: Track[]) => void;
+  onToggleLike: (track: Track) => void;
+  onAddNext: (track: Track) => void;
 }
 
-export const HomeView = ({ onPlayTrack, onPlayAll }: HomeViewProps) => {
-  const [sections, setSections] = useState<HomeSection[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+const MOOD_PRESETS: { id: string; label: string }[] = [
+  { id: 'for_you', label: 'For You' },
+  { id: 'trending', label: 'Trending' },
+  { id: 'bollywood', label: 'Bollywood' },
+  { id: 'chill', label: 'Chill & Lo-Fi' },
+  { id: 'focus', label: 'Focus' },
+  { id: 'workout', label: 'Workout' },
+  { id: 'latenight', label: 'Late Night' },
+];
 
-  useEffect(() => {
-    let active = true;
-    const loadHome = async () => {
-      setIsLoading(true);
-      try {
-        const data = await bridgeApi.getHome();
-        if (active && Array.isArray(data)) {
-          setSections(data);
-        }
-      } catch {
-        // Fallback or offline state
-      } finally {
-        if (active) setIsLoading(false);
-      }
-    };
-    loadHome();
-    return () => {
-      active = false;
-    };
+const cachedByMood = new Map<string, PersonalizedHomeResponse>();
+
+function getStableGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+const HorizontalShelf = ({
+  title,
+  subtitle,
+  icon,
+  tracks,
+  currentTrackId,
+  likedIds,
+  onPlayTrack,
+  onPlayAll,
+  onToggleLike,
+  onAddNext,
+}: {
+  title: string;
+  subtitle?: string;
+  icon: React.ReactNode;
+  tracks: Track[];
+  currentTrackId?: string | null;
+  likedIds?: Set<string>;
+  onPlayTrack: (t: Track) => void;
+  onPlayAll: (ts: Track[]) => void;
+  onToggleLike: (t: Track) => void;
+  onAddNext: (t: Track) => void;
+}) => {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [fadeClass, setFadeClass] = useState<string>('shelf-fade-right');
+
+  const updateEdgeMask = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    if (maxScroll <= 8) {
+      setFadeClass('');
+      return;
+    }
+    const atLeft = el.scrollLeft <= 6;
+    const atRight = el.scrollLeft >= maxScroll - 6;
+    if (atLeft && !atRight) setFadeClass('shelf-fade-right');
+    else if (!atLeft && !atRight) setFadeClass('shelf-fade-both');
+    else if (!atLeft && atRight) setFadeClass('shelf-fade-left');
+    else setFadeClass('');
   }, []);
 
-  const formatThumb = (url?: string | null): string | undefined => {
-    if (!url) return undefined;
-    if (url.includes('googleusercontent.com') || url.includes('ggpht.com')) {
-      return url.replace(/=w\d+-h\d+/, '=w180-h180');
-    }
-    return url;
-  };
+  useEffect(() => {
+    updateEdgeMask();
+    window.addEventListener('resize', updateEdgeMask);
+    return () => window.removeEventListener('resize', updateEdgeMask);
+  }, [tracks.length, updateEdgeMask]);
 
-  const getSectionIcon = (title: string) => {
-    const lower = title.toLowerCase();
-    if (lower.includes('quick') || lower.includes('pick')) {
-      return <Sparkles size={16} className="text-accent" />;
-    }
-    if (lower.includes('trend') || lower.includes('top')) {
-      return <Flame size={16} className="text-rose-400" />;
-    }
-    return <Clock size={16} className="text-emerald-400" />;
+  const scrollBy = (delta: number) => {
+    scrollerRef.current?.scrollBy({ left: delta, behavior: 'smooth' });
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-8 select-none">
-      {/* Hero Welcome banner */}
-      <div className="rounded-xl bg-gradient-to-r from-bg-surface to-bg-hover/60 border border-border-subtle p-6 flex items-center justify-between">
+    <section className="space-y-3.5 eh-shelf-section">
+      <div className="flex items-end justify-between gap-2">
         <div>
-          <span className="text-xs uppercase tracking-wider text-accent font-semibold">
-            YouTube Music • Local Bridge
-          </span>
-          <h1 className="text-2xl font-bold text-text-1 mt-1">Welcome to MetroLite</h1>
-          <p className="text-xs text-text-2 mt-1">
-            Zero-jank, gapless desktop audio with lightweight native background playback.
-          </p>
+          <div className="flex items-center gap-2">
+            {icon}
+            <h2 className="text-lg font-bold tracking-tight text-[#F4F6FF]">{title}</h2>
+          </div>
+          {subtitle && <p className="text-[11px] text-[#A6B0CF] mt-0.5">{subtitle}</p>}
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-none">
+          <button
+            onClick={() => onPlayAll(tracks)}
+            className="text-[11px] text-[#F4F6FF] font-medium px-3 py-1 rounded-full ios-liquid-pill mr-1"
+          >
+            Play All
+          </button>
+          <button
+            onClick={() => scrollBy(-460)}
+            title="Scroll Left"
+            className="w-7 h-7 rounded-full ios-liquid-pill flex items-center justify-center text-[#A6B0CF] hover:text-white"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <button
+            onClick={() => scrollBy(460)}
+            title="Scroll Right"
+            className="w-7 h-7 rounded-full ios-liquid-pill flex items-center justify-center text-[#A6B0CF] hover:text-white"
+          >
+            <ChevronRight size={14} />
+          </button>
         </div>
       </div>
 
-      {isLoading && sections.length === 0 ? (
-        <div className="space-y-6 animate-pulse">
-          <div className="h-4 bg-bg-surface rounded w-48 mb-3"></div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-44 bg-bg-surface rounded-lg"></div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        sections.map((section, sIdx) => {
-          const validTracks: Track[] = (section.contents || []).filter(
-            (c) => c && typeof c === 'object' && c.video_id
-          );
-
-          if (validTracks.length === 0) return null;
+      <div
+        ref={scrollerRef}
+        onScroll={updateEdgeMask}
+        className={`flex gap-3.5 overflow-x-auto no-scrollbar pt-1.5 pb-3 pr-8 -mt-1.5 ${fadeClass}`}
+      >
+        {tracks.slice(0, 10).map((item, idx) => {
+          const isCurrent = currentTrackId === item.video_id;
+          const isLiked = likedIds ? likedIds.has(item.video_id) : !!item.is_liked;
 
           return (
-            <section key={section.title || sIdx} className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {getSectionIcon(section.title)}
-                  <h2 className="text-base font-bold text-text-1">{section.title}</h2>
-                </div>
-                {validTracks.length > 0 && (
+            <div
+              key={`${item.video_id}-${idx}`}
+              onClick={() => onPlayTrack(item)}
+              className="group ios-liquid-card w-[168px] rounded-2xl p-2.5 flex-none cursor-pointer flex flex-col"
+              style={
+                isCurrent
+                  ? { borderColor: 'rgba(var(--dynamic-accent-rgb), 0.65)' }
+                  : undefined
+              }
+            >
+              <div className="relative aspect-square w-full rounded-xl overflow-hidden bg-[#06080F] border border-white/[0.08]">
+                <TrackImage
+                  src={item.thumbnail_url}
+                  videoId={item.video_id}
+                  size="md"
+                  iconSize={26}
+                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                />
+
+                {/* Contrast scrim so action buttons pop cleanly over light album art */}
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/55 via-transparent to-black/65 opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
+
+                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-10">
                   <button
-                    onClick={() => onPlayAll(validTracks)}
-                    className="text-xs text-accent hover:underline flex items-center gap-1 font-medium"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAddNext(item);
+                    }}
+                    title="Play Next"
+                    className="w-7 h-7 rounded-full bg-black/80 hover:bg-black text-[#F4F6FF] border border-white/25 shadow-md flex items-center justify-center transition-colors"
                   >
-                    Play All
+                    <Radio size={12} style={{ color: 'var(--dynamic-accent)' }} />
                   </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleLike(item);
+                    }}
+                    title={isLiked ? 'Unlike' : 'Like'}
+                    className="w-7 h-7 rounded-full bg-black/80 hover:bg-black text-[#F4F6FF] border border-white/25 shadow-md flex items-center justify-center transition-colors"
+                  >
+                    <Heart size={12} className={isLiked ? 'fill-[#FF4D8D] text-[#FF4D8D]' : ''} />
+                  </button>
+                </div>
+
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPlayTrack(item);
+                  }}
+                  className="absolute bottom-2 right-2 w-9 h-9 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-1.5 group-hover:translate-y-0 transition-all duration-200 z-10"
+                >
+                  <Play size={15} className="fill-current ml-0.5" />
+                </button>
+
+                {(item.play_count ?? 0) > 1 && (
+                  <span className="absolute top-2 left-2 text-[10px] font-mono tabular-nums font-semibold text-white bg-black/80 border border-white/20 px-1.5 py-0.5 rounded-full z-10">
+                    {item.play_count}x
+                  </span>
                 )}
               </div>
 
-              {/* Horizontal Scroll Shelf */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3.5">
-                {validTracks.slice(0, 12).map((item) => (
-                  <div
-                    key={item.video_id}
-                    onClick={() => onPlayTrack(item)}
-                    className="group bg-bg-surface hover:bg-bg-hover border border-border-subtle hover:border-border-light rounded-lg p-2.5 transition-all cursor-pointer flex flex-col"
-                  >
-                    <div className="relative aspect-square w-full rounded-md bg-bg-base overflow-hidden border border-border-subtle mb-2.5 flex items-center justify-center">
-                      {item.thumbnail_url ? (
-                        <img
-                          src={formatThumb(item.thumbnail_url)}
-                          alt=""
-                          loading="lazy"
-                          decoding="async"
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                        />
-                      ) : (
-                        <Music size={24} className="text-text-2 opacity-50" />
-                      )}
+              <div className="mt-2.5 px-0.5">
+                <div
+                  className="text-xs font-semibold truncate"
+                  style={isCurrent ? { color: 'var(--dynamic-accent)' } : { color: '#F4F6FF' }}
+                >
+                  {item.title}
+                </div>
+                <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">{item.artist}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+};
 
-                      {/* Play overlay circle */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onPlayTrack(item);
-                        }}
-                        className="absolute bottom-2 right-2 w-8 h-8 rounded-full bg-accent text-bg-base flex items-center justify-center shadow-lg opacity-0 group-hover:opacity-100 group-hover:translate-y-0 translate-y-1 transition-all"
+export const HomeView = memo(({
+  currentTrackId,
+  likedIds,
+  onPlayTrack,
+  onPlayAll,
+  onToggleLike,
+  onAddNext,
+}: HomeViewProps) => {
+  const [activeMood, setActiveMood] = useState<string>('for_you');
+  const [homeData, setHomeData] = useState<PersonalizedHomeResponse | null>(
+    cachedByMood.get('for_you') || null
+  );
+  const [isLoading, setIsLoading] = useState<boolean>(!cachedByMood.has('for_you'));
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [greeting] = useState<string>(() => getStableGreeting());
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const reqSeqRef = useRef<number>(0);
+
+  useEffect(() => {
+    return () => {
+      reqSeqRef.current += 1;
+    };
+  }, []);
+
+  // Subtly dim the black hole canvas as user scrolls down into shelves for crisp card readability
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--bh-scroll-opacity', '1');
+    return () => {
+      root.style.setProperty('--bh-scroll-opacity', '1');
+    };
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const progress = Math.min(1, el.scrollTop / 240);
+    const nextOpacity = (1 - progress * 0.56).toFixed(3);
+    document.documentElement.style.setProperty('--bh-scroll-opacity', nextOpacity);
+  }, []);
+
+  const loadFeed = useCallback(async (mood: string, forceRefresh: boolean) => {
+    const mySeq = ++reqSeqRef.current;
+
+    if (!forceRefresh && cachedByMood.has(mood)) {
+      setHomeData(cachedByMood.get(mood) || null);
+      setIsLoading(false);
+      setIsRefreshing(false);
+      return;
+    }
+
+    if (forceRefresh) setIsRefreshing(true);
+    else setIsLoading(true);
+
+    try {
+      const data = await bridgeApi.getPersonalizedHome(mood, forceRefresh);
+      const hasContent =
+        (data.speed_dial && data.speed_dial.length > 0) ||
+        (data.sections || []).some(
+          (sec) => Array.isArray(sec.contents) && sec.contents.length > 0
+        );
+      if (hasContent) {
+        if (cachedByMood.size >= 3 && !cachedByMood.has(mood)) {
+          const oldest = cachedByMood.keys().next().value;
+          if (oldest) cachedByMood.delete(oldest);
+        }
+        cachedByMood.set(mood, data);
+      } else {
+        cachedByMood.delete(mood);
+      }
+      if (mySeq !== reqSeqRef.current) return;
+      setHomeData(data);
+    } catch {
+      try {
+        const basic = await bridgeApi.getHome();
+        if (mySeq !== reqSeqRef.current) return;
+        setHomeData({
+          greeting: getStableGreeting(),
+          speed_dial: [],
+          sections: basic,
+          personalized: false,
+        });
+      } catch {
+        // Offline
+      }
+    } finally {
+      if (mySeq === reqSeqRef.current) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadFeed(activeMood, false);
+  }, [activeMood, loadFeed]);
+
+  const getSectionIcon = (title: string) => {
+    const lower = title.toLowerCase();
+    if (lower.includes('quick') || lower.includes('pick') || lower.includes('because')) {
+      return <Sparkles size={16} style={{ color: 'var(--dynamic-accent)' }} />;
+    }
+    if (lower.includes('most played') || lower.includes('replay')) {
+      return <TrendingUp size={16} className="text-[#34D399]" />;
+    }
+    if (lower.includes('trend') || lower.includes('top') || lower.includes('bollywood')) {
+      return <Flame size={16} className="text-[#FFB347]" />;
+    }
+    if (lower.includes('chill') || lower.includes('lofi')) {
+      return <Coffee size={16} className="text-[#FFB347]" />;
+    }
+    if (lower.includes('focus') || lower.includes('study')) {
+      return <Headphones size={16} className="text-[#7C5CFF]" />;
+    }
+    if (lower.includes('workout')) {
+      return <Zap size={16} className="text-[#4DE1FF]" />;
+    }
+    if (lower.includes('night')) {
+      return <Moon size={16} className="text-[#A6B0CF]" />;
+    }
+    return <Compass size={16} className="text-[#A6B0CF]" />;
+  };
+
+  const speedDial = homeData?.speed_dial || [];
+  const sections: HomeSection[] = homeData?.sections || [];
+
+  return (
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto select-none eh-page-in"
+    >
+      <div className="px-6 pt-3 pb-10 space-y-7 max-w-[1440px] mx-auto">
+        {/* Clean Dark Header — Top-right stays open for the subtle black hole */}
+        <div className="pt-2 pb-2 space-y-3.5 max-w-2xl">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2.5">
+              <span className="text-[10px] font-bold uppercase tracking-[0.26em] text-[#8E99BA]">
+                {homeData?.personalized ? 'Personal Orbit' : 'Event Horizon'}
+              </span>
+              <button
+                onClick={() => void loadFeed(activeMood, true)}
+                disabled={isRefreshing}
+                title="Refresh personalized picks & trends"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium ios-liquid-pill text-[#E6ECF8] disabled:opacity-50"
+              >
+                <RefreshCw
+                  size={11}
+                  className={isRefreshing ? 'animate-spin' : ''}
+                  style={{ color: 'var(--dynamic-accent)' }}
+                />
+                <span>{isRefreshing ? 'Refreshing' : 'Refresh'}</span>
+              </button>
+            </div>
+            <h1
+              className="text-3xl sm:text-4xl font-bold tracking-tight text-[#F1F4FA]"
+              style={{ textShadow: '0 2px 16px rgba(6, 8, 15, 0.85)' }}
+            >
+              {greeting}
+            </h1>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {MOOD_PRESETS.map((mood) => {
+              const isSelected = activeMood === mood.id;
+              return (
+                <button
+                  key={mood.id}
+                  onClick={() => setActiveMood(mood.id)}
+                  className={`px-3.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-all ${
+                    isSelected
+                      ? 'bg-[#F1F4FA] text-[#06080F] font-semibold shadow-sm'
+                      : 'ios-liquid-pill text-[#9AA5C4] hover:text-white'
+                  }`}
+                >
+                  {mood.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {isLoading && sections.length === 0 ? (
+          <div className="space-y-7 eh-skeleton">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-14 ios-liquid-card rounded-2xl" />
+              ))}
+            </div>
+            <div className="flex gap-3.5 overflow-hidden">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="w-[168px] h-[220px] flex-none ios-liquid-card rounded-2xl" />
+              ))}
+            </div>
+          </div>
+        ) : sections.length === 0 && speedDial.length === 0 ? (
+          <div className="ios-liquid-card rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-3 max-w-md">
+            <Compass size={28} className="text-[#6D7796]" />
+            <div>
+              <p className="text-sm font-semibold text-[#F1F4FA]">Unable to load Home feed</p>
+              <p className="text-xs text-[#9AA5C4] mt-1">
+                Check your connection or browse your Offline Downloads and Liked Songs.
+              </p>
+            </div>
+            <button
+              onClick={() => void loadFeed(activeMood, true)}
+              className="px-4 py-1.5 rounded-full text-xs font-semibold bg-[#F1F4FA] text-[#06080F] hover:opacity-90 transition-opacity"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <>
+            {activeMood === 'for_you' && speedDial.length > 0 && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-[11px] font-bold uppercase tracking-[0.22em] text-[#A6B0CF]">
+                    Jump Back In
+                  </h2>
+                  <button
+                    onClick={() => onPlayAll(speedDial)}
+                    className="text-xs text-[#F4F6FF] font-medium px-3 py-1 rounded-full ios-liquid-pill"
+                  >
+                    Play Mix
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {speedDial.slice(0, 6).map((track) => {
+                    const isCurrent = currentTrackId === track.video_id;
+                    return (
+                      <div
+                        key={`dial-${track.video_id}`}
+                        onClick={() => onPlayTrack(track)}
+                        className="group ios-liquid-card flex items-center gap-3 pr-3.5 rounded-2xl overflow-hidden cursor-pointer"
+                        style={
+                          isCurrent
+                            ? { borderColor: 'rgba(var(--dynamic-accent-rgb), 0.65)' }
+                            : undefined
+                        }
                       >
-                        <Play size={14} className="fill-current ml-0.5" />
+                        <div className="w-14 h-14 flex-none bg-black relative overflow-hidden">
+                          <TrackImage
+                            src={track.thumbnail_url}
+                            videoId={track.video_id}
+                            size="sm"
+                            iconSize={18}
+                          />
+                          <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                            <Play size={16} className="fill-white text-white ml-0.5" />
+                          </div>
+                        </div>
+                        <div className="min-w-0 flex-1 py-1.5">
+                          <div
+                            className="text-xs font-semibold truncate"
+                            style={
+                              isCurrent ? { color: 'var(--dynamic-accent)' } : { color: '#F4F6FF' }
+                            }
+                          >
+                            {track.title}
+                          </div>
+                          <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
+                            {track.artist}
+                          </div>
+                        </div>
+                        {(track.play_count ?? 0) > 1 && (
+                          <span className="text-[10px] font-mono tabular-nums text-[#C8D1EE] bg-white/[0.08] px-2 py-0.5 rounded-full flex-none">
+                            {track.play_count}x
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {sections.map((section, sIdx) => {
+              const validTracks: Track[] = (section.contents || []).filter(
+                (c) => c && typeof c === 'object' && c.video_id
+              );
+              if (validTracks.length === 0) return null;
+
+              if (section.layout === 'compact_grid') {
+                return (
+                  <section
+                    key={`${section.id || section.title}-${sIdx}`}
+                    className="space-y-3.5 eh-shelf-section"
+                  >
+                    <div className="flex items-end justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          {getSectionIcon(section.title)}
+                          <h2 className="text-lg font-bold tracking-tight text-[#F4F6FF]">
+                            {section.title}
+                          </h2>
+                        </div>
+                        {section.subtitle && (
+                          <p className="text-[11px] text-[#A6B0CF] mt-0.5">{section.subtitle}</p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => onPlayAll(validTracks)}
+                        className="text-[11px] text-[#F4F6FF] font-medium px-3 py-1 rounded-full ios-liquid-pill flex-none"
+                      >
+                        Play All
                       </button>
                     </div>
 
-                    <div className="text-xs font-semibold text-text-1 truncate group-hover:text-accent transition-colors">
-                      {item.title}
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+                      {validTracks.slice(0, 9).map((item, idx) => {
+                        const isCurrent = currentTrackId === item.video_id;
+                        const isLiked = likedIds ? likedIds.has(item.video_id) : !!item.is_liked;
+                        return (
+                          <div
+                            key={`${item.video_id}-${idx}`}
+                            onClick={() => onPlayTrack(item)}
+                            className="group ios-liquid-card flex items-center gap-3 p-2 rounded-2xl cursor-pointer"
+                            style={
+                              isCurrent
+                                ? { borderColor: 'rgba(var(--dynamic-accent-rgb), 0.6)' }
+                                : undefined
+                            }
+                          >
+                            <div className="relative w-12 h-12 rounded-xl bg-black overflow-hidden flex-none border border-white/15">
+                              <TrackImage
+                                src={item.thumbnail_url}
+                                videoId={item.video_id}
+                                size="sm"
+                                iconSize={16}
+                              />
+                              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                <Play size={14} className="fill-white text-white ml-0.5" />
+                              </div>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="text-xs font-semibold truncate"
+                                style={
+                                  isCurrent
+                                    ? { color: 'var(--dynamic-accent)' }
+                                    : { color: '#F4F6FF' }
+                                }
+                              >
+                                {item.title}
+                              </div>
+                              <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
+                                {item.artist}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-0.5 flex-none">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onAddNext(item);
+                                }}
+                                title="Play Next"
+                                className="p-1.5 text-[#A6B0CF] hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                <Radio size={13} style={{ color: 'var(--dynamic-accent)' }} />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onToggleLike(item);
+                                }}
+                                title={isLiked ? 'Unlike' : 'Like'}
+                                className="p-1.5 text-[#A6B0CF] hover:text-[#FF4D8D] opacity-0 group-hover:opacity-100 transition-opacity"
+                                style={isLiked ? { opacity: 1 } : undefined}
+                              >
+                                <Heart
+                                  size={14}
+                                  className={isLiked ? 'fill-[#FF4D8D] text-[#FF4D8D]' : ''}
+                                />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="text-[11px] text-text-2 truncate mt-0.5">
-                      {item.artist}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          );
-        })
-      )}
+                  </section>
+                );
+              }
+
+              return (
+                <HorizontalShelf
+                  key={`${section.id || section.title}-${sIdx}`}
+                  title={section.title}
+                  subtitle={section.subtitle}
+                  icon={getSectionIcon(section.title)}
+                  tracks={validTracks}
+                  currentTrackId={currentTrackId}
+                  likedIds={likedIds}
+                  onPlayTrack={onPlayTrack}
+                  onPlayAll={onPlayAll}
+                  onToggleLike={onToggleLike}
+                  onAddNext={onAddNext}
+                />
+              );
+            })}
+          </>
+        )}
+      </div>
     </div>
   );
-};
+});

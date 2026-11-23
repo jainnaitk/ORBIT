@@ -1,0 +1,206 @@
+<USER_REQUEST>
+you vs thses finding > **Note on workspace path:** `my_project/` currently contains only existing Markdown docs (`AUDIT_REPORT.md`, `CONTEXT.md`, `PLAN.md`), so this read-only audit was performed against the live **`ORBIT/`** project directory. No files have been modified or created.
+
+## Architecture Summary
+
+* **Tech Stack:**
+* **Backend (`ORBIT/src/metrolite/`):** Python 3.11–3.12 (`uv`), FastAPI + Uvicorn + WebSockets (`127.0.0.1:8766`), `ytmusicapi` (catalog/radio), `yt-dlp` (stream resolution & downloads), `python-mpv` / `libmpv-2.dll` (gapless audio playback & C-level EQ), `mutagen` (Opus/M4A tagging), `aiosqlite` / `sqlite3` (WAL-mode local DB), `httpx` (LRCLIB lyrics & cover art), `pynput` (global Windows media keys).
+* **Desktop Shell (`ORBIT/ui/src-tauri/`):** Tauri 2 (Rust), Win32 FFI (`SetWindowPos`, `ShowWindow`, `CreateToolhelp32Snapshot`, `SetProcessWorkingSetSize`) for atomic Dynamic Island window transitions and working-set trimming.
+* **Frontend (`ORBIT/ui/src/`):** React 18, TypeScript, Vite 6, Tailwind CSS, `@tanstack/react-virtual`, bundled `@fontsource/inter`, 2D-projected HTML5 Canvas cosmic background (`StarfieldBg`).
+
+
+* **Entry Points:**
+* Backend CLI/Service: `ORBIT/src/metrolite/__main__.py` → `main.py:main()` → `BridgeServer.start_sync()` (writes `%LOCALAPPDATA%\metrolite\bridge.json` with host, port, and per-run secret token).
+* Native Shell: `ORBIT/ui/src-tauri/src/main.rs:main()` (reads `bridge.json` via `get_bridge_config` IPC).
+* Web/UI Root: `ORBIT/ui/src/main.tsx` → `App.tsx` (dev launcher: `ORBIT/launch.bat`).
+
+
+* **Data & Control Flow:**
+1. `App.tsx` mounts `useBridge()` (`ui/src/api/client.ts`), discovers `bridge.json` (Tauri IPC or Vite `/__bridge_config`), opens an authenticated WebSocket (`/ws?token=...`), and issues REST calls via `X-Bridge-Token`.
+2. `BridgeController` (`bridge/server.py`) orchestrates `YTMusicClient`, `QueueManager`, `AudioPlayer`, `StreamResolver`, `LibraryManager`, `DownloadManager`, and `MediaKeysListener`.
+3. On playback, `StreamResolver` checks SQLite `tracks.local_path` first (offline-first), then caches `yt-dlp` stream URLs with in-flight deduplication; `AudioPlayer` feeds `libmpv` and preloads the next track for gapless transitions.
+4. State changes push back to React over WebSocket (`playback_tick` every 250ms while playing, `track_changed`, `queue_changed`, `download_progress`, `library_changed`, `error`).
+
+
+
+---
+
+## Findings & Proposed Fixes
+
+### Critical Bugs
+
+* **F1 — Stale Preloaded Tracks in `libmpv` Playlist Cause Audio/UI Desync**
+* **Location:** `ORBIT/src/metrolite/audio/player.py` → `AudioPlayer.preload_source`; `ORBIT/src/metrolite/bridge/server.py` → `create_app.update_queue`
+* **Root Cause:** `preload_source()` appends upcoming URLs via `self.mpv.loadfile(str(source), mode="append")` without clearing previously appended entries (`self.mpv.playlist_clear()`). If the queue is modified (`add_next`, `move`, `remove`, `shuffle`, `repeat`, or radio refill) after a preload, stale URLs remain ahead of the new next track in mpv's playlist, so gapless EOF or `switch_to_preloaded_next()` plays the wrong song.
+* **Exact Change:** Call `with suppress(Exception): self.mpv.playlist_clear()` right before `self.mpv.loadfile(str(source), mode="append")` in `AudioPlayer.preload_source()`. In `update_queue()`, when queue-mutating actions change `next_track_preview`, invalidate `ctrl.player.next_track` and reschedule `preload_next` for the updated next track.
+* **Risk:** Low
+
+
+* **F2 — `next_track` Masks Playback Failures & `toggle_play_pause` Leaves Unhandled Resolution Errors**
+* **Location:** `ORBIT/src/metrolite/bridge/server.py` → `BridgeController.next_track`, `BridgeController.toggle_play_pause`
+* **Root Cause:** When `load_and_play(nxt)` fails in `next_track()`, the `except` block logs and broadcasts `"error"` but falls through to broadcast `"track_changed"` as if playback succeeded and omits error fields from the HTTP response (inconsistent with `play()` and `prev_track()`). In `toggle_play_pause()`, `load_and_play(curr)` from the stopped state (triggered by media keys) has no `try/except`, causing unhandled background task exceptions.
+* **Exact Change:** In `next_track()`, include `"video_id": nxt.video_id` in the `"error"` broadcast, broadcast `queue_changed`, and return an error payload inside the `except` block instead of emitting `"track_changed"`. Wrap `load_and_play(curr)` in `toggle_play_pause()` with `try/except`, recording the error and broadcasting `"error"`.
+* **Risk:** Low
+
+
+* **F3 — `LibraryView` Wipes Track List & Resets Scroll on Any Background Library Event**
+* **Location:** `ORBIT/ui/src/views/LibraryView.tsx` → `LibraryView` (`loadData`, `useEffect`)
+* **Root Cause:** `LibraryView` runs `setFetchedTracks([]); setIsLoading(true);` whenever `libraryVersion` or `playlists` updates. Because `App.tsx` bumps `libraryVersion` and replaces `playlists` on *every* `library_changed` event (liking a song, download completion, EQ/theme settings), viewing History or a Playlist clears the list into loading skeletons and snaps scroll back to the top.
+* **Exact Change:** Track the active view key (`${tab}:${playlistId}:${historySort}`) in a `useRef` and only clear `fetchedTracks` / show skeletons when the view key changes—not on background `libraryVersion` refreshes. Derive `activePlaylist` via `useMemo` instead of putting `playlists` in `loadData`'s dependency array.
+* **Risk:** Low
+
+
+* **F4 — Double-Shuffle & Corrupted Unshuffle Order in `handlePlayAll**`
+* **Location:** `ORBIT/ui/src/App.tsx` → `handlePlayAll`
+* **Root Cause:** Clicking **Shuffle** pre-shuffles tracks client-side using biased `.sort(() => Math.random() - 0.5)`, calls `api.setQueue(targetList, 0, true)` (which starts playing and preloading `targetList[1]`), then calls `api.setShuffle(true)`—re-shuffling again, desyncing the preloaded track, and storing the pre-shuffled list as `_original_items` so turning shuffle off never restores original order. Clicking **Play All** (`shuffle = false`) while shuffle is on also leaves shuffle active on the backend.
+* **Exact Change:** Explicitly sync backend shuffle state (`await api.setShuffle(false)` before `setQueue`, then `await api.setShuffle(true)` only when requested, or start at a random index via `setQueue(tracks, startIndex, true)` followed by `setShuffle(true)` on the unshuffled list) so `QueueManager`'s Fisher-Yates shuffle preserves true original order in `_original_items`.
+* **Risk:** Low
+
+
+* **F5 — Leaked Window Pointer Listeners & Auto-Scroll rAF on Unmount (`DynamicIsland` & `QueueDrawer`)**
+* **Location:** `ORBIT/ui/src/components/DynamicIsland.tsx` → `handleCirclePointerDown`, `transitionMode`; `ORBIT/ui/src/components/QueueDrawer.tsx` → `handleRowPointerDown`
+* **Root Cause:** Both components attach `pointermove` / `pointerup` / `pointercancel` listeners to `window` (and `QueueDrawer` runs an `autoScrollRafRef` loop) without unmount cleanup. Exiting Dynamic Island mid-pointer-down or closing `QueueDrawer` with `Escape` mid-drag leaks listeners/rAF loops and can invoke `transitionMode` after unmount, shrinking the restored main window.
+* **Exact Change:** Store active pointer cleanup callbacks in refs and invoke them (plus cancel `autoScrollRafRef` and guard async state updates with a `mountedRef`) inside unmount `useEffect` hooks in both components.
+* **Risk:** Low
+
+
+* **F6 — Duplicate Download Race in `queue_download` & Incomplete Manual Lyrics Caching**
+* **Location:** `ORBIT/src/metrolite/library/downloader.py` → `DownloadManager.queue_download`, `DownloadManager.download_track`; `ORBIT/src/metrolite/ytm/lyrics.py` → `resolve_lyrics`
+* **Root Cause:** (a) `queue_download()` checks `self._active_tasks`, but `download_track()` awaits a SQLite query before registering in `self._active_tasks`, letting rapid duplicate calls start concurrent downloads for the same `video_id`. (b) In `resolve_lyrics()`, manual `custom_query` searches skip caching for non-downloaded tracks, return `offline: False` even after writing a `.lrc` sidecar, and bypass the 30-entry `_LYRICS_CACHE` cap.
+* **Exact Change:** (a) Register the task in `self._active_tasks` synchronously in `queue_download` / before the first `await` in `download_track` (with proper cleanup in `finally`). (b) In `resolve_lyrics()`, cache manual search results with the 30-entry cap and return `offline: True` when a local `.lrc` file is saved.
+* **Risk:** Low
+
+
+
+---
+
+### Security / Data Risks
+
+* **F7 — Unvalidated `video_id` Interpolated into YouTube URLs**
+* **Location:** `ORBIT/src/metrolite/bridge/server.py` → `player_play`, `player_preload`, `toggle_liked`; `ORBIT/src/metrolite/audio/resolver.py` → `StreamResolver._extract_url_sync`
+* **Root Cause:** `/player/play`, `/player/preload`, and `/liked/{video_id}` bypass `_require_valid_video_id()`. Crafted `video_id` strings containing query/fragment characters (`&list=`, `#`) are interpolated directly into `[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video_id}` passed to `yt-dlp`.
+* **Exact Change:** Enforce `_require_valid_video_id()` in `player_play`, `player_preload`, and `toggle_liked`, and call `validate_video_id(video_id)` at the start of `StreamResolver._extract_url_sync()`.
+* **Risk:** Low
+
+
+* **F8 — SSRF & Unbounded Memory Read in Thumbnail Embedding**
+* **Location:** `ORBIT/src/metrolite/library/downloader.py` → `_embed_metadata`
+* **Root Cause:** `POST /downloads/{video_id}` forwards client-supplied `track_meta.thumbnail_url` into `httpx.Client(follow_redirects=True).get(thumbnail_url)` and buffers the full `resp.content` in memory without checking scheme/host or size. A crafted URL could probe loopback/private addresses (SSRF) or pull an oversized payload that violates the 185 MB RAM budget.
+* **Exact Change:** Validate `thumbnail_url` uses `https://` on trusted YouTube/Google image domains (`*.googleusercontent.com`, `*.ggpht.com`, `*.ytimg.com`, `*.youtube.com`), disable cross-host redirects, and stream-read with a hard 5 MB byte cap.
+* **Risk:** Low
+
+
+* **F9 — Missing WebSocket `Origin` Check, Exposed Vite `/__bridge_config` & Weak `bridge.json` Temp Handling**
+* **Location:** `ORBIT/src/metrolite/bridge/server.py` → `websocket_endpoint`, `write_bridge_file`; `ORBIT/ui/vite.config.ts` → `bridgeConfigDevPlugin`, `server`
+* **Root Cause:** (a) Starlette's `CORSMiddleware` does not validate `Origin` on WebSocket handshakes. (b) Vite dev server does not pin `server.host: "127.0.0.1"` and serves the bridge token on `/__bridge_config` without `Cache-Control: no-store` or `Origin` filtering. (c) `write_bridge_file()` uses a fixed `.tmp` filename and default permissions.
+* **Exact Change:** (a) In `websocket_endpoint`, reject non-local `Origin` headers (when present) using `_is_allowed_local_origin()` with `WS_1008_POLICY_VIOLATION`. (b) In `vite.config.ts`, set `server.host = "127.0.0.1"`, set `Cache-Control: no-store`, and reject cross-origin `/__bridge_config` requests. (c) In `write_bridge_file()`, use a PID-scoped temp file and apply `0o600` permissions on POSIX.
+* **Risk:** Low
+
+
+* **F10 — Incomplete Production CSP in `tauri.conf.json**`
+* **Location:** `ORBIT/ui/src-tauri/tauri.conf.json` → `app.security.csp`
+* **Root Cause:** `connect-src` lists schemeless `127.0.0.1:* localhost:*` (which inherits non-HTTP Tauri schemes if changed) and `img-src` only allows `[https://i.ytimg.com](https://i.ytimg.com)`, blocking YouTube thumbnails served from other `*.ytimg.com` subdomains (e.g., `i9.ytimg.com`).
+* **Exact Change:** Add explicit `[http://127.0.0.1](http://127.0.0.1):* http://localhost:*` to `connect-src` and change `[https://i.ytimg.com](https://i.ytimg.com)` to `https://*.ytimg.com` in `img-src`.
+* **Risk:** Low
+
+
+* **F11 — Unescaped SQL `LIKE` Wildcards & Raw SQLite Connections Without `busy_timeout**`
+* **Location:** `ORBIT/src/metrolite/library/manager.py` → `LibraryManager.list_liked`; `ORBIT/src/metrolite/ytm/lyrics.py` → `_lookup_track_local_info`, `backfill_downloaded_lyrics`
+* **Root Cause:** (a) `list_liked()` does not escape `%`, `_`, or `\` in `search_query`, allowing literal wildcard characters to match unintended rows. (b) `lyrics.py` uses raw `sqlite3.connect(..., timeout=3.0)` without `PRAGMA busy_timeout = 5000`, risking `database is locked` errors during startup backfill alongside queue/library writes.
+* **Exact Change:** (a) Escape `\`, `%`, `_` in `list_liked()` and add `ESCAPE '\'` to the `LIKE` clauses. (b) Switch raw `sqlite3.connect` calls in `lyrics.py` to `metrolite.store.db.get_sync_connection`.
+* **Risk:** Low
+
+
+* **F12 — Unbounded Key/Value Writes in `PUT /settings**`
+* **Location:** `ORBIT/src/metrolite/bridge/server.py` → `create_app.update_settings`
+* **Root Cause:** `PUT /settings` accepts arbitrary numbers of keys and unbounded JSON payloads into SQLite with no size or key validation.
+* **Exact Change:** Validate non-empty keys (`<= 64` chars), cap request size (`<= 50` keys), and cap serialized `value_json` per key (`<= 8192` bytes), returning HTTP `400` otherwise.
+* **Risk:** Low
+
+
+
+---
+
+### Performance Bottlenecks
+
+* **F13 — 4x/Second Full-App React Re-Render Storm During Playback**
+* **Location:** `ORBIT/ui/src/api/client.ts` → `useBridge`; `ORBIT/ui/src/App.tsx` → `App`; `HomeView.tsx`, `SearchView.tsx`, `LibraryView.tsx`, `Sidebar.tsx`, `Titlebar.tsx`, `QueueDrawer.tsx`, `StarfieldBg.tsx`
+* **Root Cause:** `useBridge()` stores the 250ms `playback_tick` (`time_pos`) in top-level `App` state. Because child views and chrome are not memoized and receive fresh inline callbacks on each render, every 250ms tick re-renders the entire React tree (virtualized lists, Home shelves, Sidebar, Titlebar) even though only `PlayerBar`, `LyricsDrawer`, and `DynamicIsland` need `time_pos`.
+* **Exact Change:** In `useBridge()`, only call `setPlayback` when `state`, `volume`, `duration`, or `current_track?.video_id` actually changes, while keeping `PlayerBar`, `LyricsDrawer`, and `DynamicIsland` synced via a direct `bridgeSocket.on('playback_tick', ...)` subscription (or ref listener). Additionally wrap `HomeView`, `SearchView`, `LibraryView`, `Sidebar`, `Titlebar`, `QueueDrawer`, and `StarfieldBg` in `React.memo` and stabilize `App.tsx` callbacks with `useCallback`.
+* **Risk:** Medium
+
+
+* **F14 — Heavy Multi-Layer `backdrop-filter: blur(30–38px)` Over 20 FPS Canvas**
+* **Location:** `ORBIT/ui/src/tokens.css` → `.ios-liquid-panel`, `.ios-liquid-drawer`, `.ios-liquid-glass`, `.ios-liquid-rail`, `.ios-liquid-pill`, `.ios-liquid-popover`
+* **Root Cause:** Large panels use `blur(30px–38px) saturate(185–200%) brightness(...)` and 15–20+ small `.ios-liquid-pill` chips each trigger their own `blur(18px)` compositor pass on top of the 20 FPS `StarfieldBg` canvas, multiplying GPU texture memory and fill-rate on integrated graphics.
+* **Exact Change:** Remove `backdrop-filter` from repeating `.ios-liquid-pill` buttons (keeping translucent gradient glass + specular rim like `.ios-liquid-card`) and trim large chrome blur radii to `16px–22px` without redundant `brightness()` passes.
+* **Risk:** Low
+
+
+* **F15 — Unconditional 20s/25s Working-Set Trimming & Event-Loop `gc.collect()` Stalls**
+* **Location:** `ORBIT/ui/src/App.tsx` → foreground `idleInterval` (25s); `ORBIT/src/metrolite/bridge/server.py` → `BridgeController._playback_tick_loop`, `WebSocketManager.broadcast`
+* **Root Cause:** (a) `App.tsx` triggers Rust `trim_process_memory` (spawning a thread + `CreateToolhelp32Snapshot` + `SetProcessWorkingSetSize(-1, -1)` across the process tree) every 25s even while the window is focused and active, causing page-fault micro-stutters. (b) `_playback_tick_loop` runs synchronous `gc.collect()` + `SetProcessWorkingSetSize` on the asyncio event loop every 20s (`tick_count % 80 == 0`), and serializes `playback_tick` JSON 4x/sec even when zero WebSocket clients are connected.
+* **Exact Change:** (a) In `App.tsx`, only run periodic `trimProcessMemory()` when `document.hidden || !document.hasFocus()` (keeping blur/transition trims). (b) In `server.py`, short-circuit `playback_tick` generation/broadcast when `not self.ws_manager.active_connections`, slow the idle poll sleep to `1.0s` when not playing, and run periodic `trim_memory()` via `asyncio.to_thread` every ~120s instead of blocking the event loop every 20s.
+* **Risk:** Low
+
+
+* **F16 — Redundant 4-Endpoint HTTP Fan-Out on Every `library_changed` Event**
+* **Location:** `ORBIT/ui/src/App.tsx` → `refreshLibraryStats`, `library_changed` listener
+* **Root Cause:** Every `library_changed` event (including `settings_updated` or a single `liked` toggle) fires 4 parallel REST calls (`getPlaylists`, `getLiked`, `getDownloads`, `getSettings`) and increments `libraryVersion`.
+* **Exact Change:** Dispatch targeted refreshes based on `evt.type` (`liked` → liked only; `playlist_*` → playlists + `libraryVersion`; `download_*` → downloads only; `settings_updated` → settings only), reserving the full 4-way sync for initial load/reconnect.
+* **Risk:** Low
+
+
+* **F17 — Per-Frame Allocations in `StarfieldBg` & Idle 75ms Polling in `LyricsDrawer**`
+* **Location:** `ORBIT/ui/src/components/StarfieldBg.tsx` → `drawFrame`; `ORBIT/ui/src/components/LyricsDrawer.tsx` → sync `useEffect`
+* **Root Cause:** (a) `drawFrame` allocates 2 Canvas gradients and 8 RGBA strings every frame (20x/sec) even when colors and geometry haven't changed. (b) `LyricsDrawer` keeps its 75ms `setInterval` active while playback is paused (`isPlaying === false`).
+* **Exact Change:** (a) Cache `rearStyles`, `frontStyles`, `rimGrad`, and `arcGrad` in `StarfieldBg.tsx`, rebuilding only when rounded RGB or center/radius change. (b) In `LyricsDrawer.tsx`, run `updateActive()` once on state/position/offset changes and only schedule `setInterval` while `isPlaying` is `true`.
+* **Risk:** Low
+
+
+* **F18 — No-Op Python Callbacks Wired to High-Frequency `libmpv` Property Observers**
+* **Location:** `ORBIT/src/metrolite/bridge/server.py` → `BridgeController._bind_callbacks`, `_on_player_time_pos`, `_on_player_duration`
+* **Root Cause:** Empty `pass` callbacks are passed to `player.set_callbacks(...)`, causing `libmpv`'s C observer thread to invoke Python functions + `try/except` wrappers ~15–30x/sec for no effect.
+* **Exact Change:** Stop passing `on_time_pos` and `on_duration` in `_bind_callbacks` and remove the two empty methods.
+* **Risk:** Low
+
+
+
+---
+
+### Dead Code & Stale Artifacts
+
+* **F19 — Unused Legacy Component `ImmersivePlayer.tsx**`
+* **Location:** `ORBIT/ui/src/components/ImmersivePlayer.tsx` (367 lines)
+* **Root Cause:** Replaced by `LyricsDrawer.tsx` + `QueueDrawer.tsx`; never imported anywhere in `ORBIT/ui/src/` and references deleted CSS classes (`eh-solid-panel`, `eh-accretion-ring`).
+* **Exact Change:** Provide exact PowerShell `Remove-Item` command in Phase 2 (since the LocalFolder MCP toolset only exposes read/write/edit, not file deletion).
+* **Risk:** Low
+
+
+* **F20 — Dead Branches, Unused Props/Exports & Unused CSS Keyframes**
+* **Location:**
+* `ORBIT/src/metrolite/audio/resolver.py` → `StreamResolver._extract_url_sync` (`browser_cookie` parameter and `browser is None` guards are always `None`)
+* `ORBIT/src/metrolite/bridge/server.py` → `player_play` (unreachable `except StreamResolutionError` around `ctrl.play()`)
+* `ORBIT/ui/src/views/SearchView.tsx` & `ORBIT/ui/src/App.tsx` → unused `onQueryChange` prop
+* `ORBIT/ui/src/api/client.ts` → unused `setCachedBridgeConfig` export
+* `ORBIT/ui/src/tokens.css` → unused `@keyframes drawerSlideIn`, `@keyframes stageZoomIn`, `.eh-drawer-in`, `.eh-stage-in`
+
+
+* **Exact Change:** Remove these dead branches, props, exports, and unused CSS rules cleanly via `edit_file`.
+* **Risk:** Low
+
+
+* **F21 — Orphaned Root Tauri Config, Outdated Patch Script & Leftover Logs/Backups**
+* **Location:** `ORBIT/src-tauri/tauri.conf.json` (duplicate with `"csp": null`), `ORBIT/update_orbit.py` (outdated script that would downgrade CSP & remove queue virtualization if run), `ORBIT/.gitignore`, plus stale artifacts (`ORBIT/err.txt`, `ORBIT/tauri_err.log`, `ORBIT/tauri_out.log`, `ORBIT/metrolite_code.txt`, `ORBIT/GeminiSetup.exe`, `ORBIT/.backup_before_*`, `ORBIT/.backup_orbit/*`).
+* **Exact Change:** Update `ORBIT/.gitignore` via `edit_file` to ignore `.backup_*`, `*.log`, `err.txt`, `metrolite_code.txt`, and `*.exe`, and provide the exact PowerShell command in Phase 2 to remove the orphaned files/directories safely.
+* **Risk:** Low
+
+
+
+---
+
+**Phase 1 is complete.** Which Fix IDs (`F1`–`F21`, or `"all"`) would you like me to apply in Phase 2, and would you also like me to save `CONTEXT.md`, `AUDIT_REPORT.md`, and `PLAN.md` inside `ORBIT/`?
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-22T19:43:02+05:30.
+</ADDITIONAL_METADATA>

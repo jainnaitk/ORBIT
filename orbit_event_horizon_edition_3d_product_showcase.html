@@ -1,0 +1,2952 @@
+<!DOCTYPE html>
+<html lang="en" data-effects="full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ORBIT. — Event Horizon Edition | Created by Naitik Jain</title>
+
+  <!-- Fonts: Inter + JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Lenis Smooth Inertia Scroll & Three.js r128 -->
+  <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <style>
+    :root {
+      --bg-base: #03040A;
+      --bg-obsidian: #0B0E17;
+      --bg-obsidian-elevated: #111624;
+      --bg-obsidian-hover: #171E30;
+
+      --text-1: #F4F6FF;
+      --text-2: #9BA4C4;
+      --text-3: #5E6685;
+
+      /* ORBIT Dynamic Artwork Accent Tokens */
+      --dynamic-accent: #2DD4BF;
+      --dynamic-accent-rgb: 45, 212, 191;
+      --dynamic-secondary: #6366F1;
+      --dynamic-secondary-rgb: 99, 102, 241;
+
+      --liked: #FF4D8D;
+      --downloaded: #34D399;
+    }
+
+    [data-effects="oled"] {
+      --bg-base: #000000;
+      --bg-obsidian: #050609;
+      --bg-obsidian-elevated: #0A0C12;
+      --bg-obsidian-hover: #12151F;
+    }
+
+    * { box-sizing: border-box; }
+
+    /* CRITICAL: Use overflow-x: clip (never hidden) so position: sticky tracks work reliably */
+    html {
+      background-color: var(--bg-base);
+      color: var(--text-1);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      overflow-x: clip;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg-base);
+      color: var(--text-1);
+      overflow-x: clip;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 420ms ease;
+    }
+
+    html.lenis, html.lenis body { height: auto; }
+    .lenis.lenis-smooth { scroll-behavior: auto !important; }
+    .lenis.lenis-smooth [data-lenis-prevent] { overscroll-behavior: contain; }
+
+    .tabular-nums { font-variant-numeric: tabular-nums; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #03040A; }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(var(--dynamic-accent-rgb), 0.55); }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    /* Fixed 3D WebGL Background Canvas */
+    #cosmic-canvas-wrap {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+      transition: opacity 420ms ease;
+    }
+    #cosmic-canvas-wrap canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    [data-effects="oled"] #cosmic-canvas-wrap { opacity: 0; }
+
+    .cosmic-vignette {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse 75% 50% at 50% 8%, rgba(var(--dynamic-accent-rgb), 0.08) 0%, transparent 62%),
+        radial-gradient(ellipse 60% 45% at 82% 72%, rgba(var(--dynamic-secondary-rgb), 0.07) 0%, transparent 64%),
+        linear-gradient(180deg, rgba(3,4,10,0.14) 0%, rgba(3,4,10,0.44) 50%, rgba(3,4,10,0.82) 100%);
+      transition: opacity 420ms ease;
+    }
+    [data-effects="oled"] .cosmic-vignette { opacity: 0; }
+
+    /* Top Glowing Orbital Scroll-Progress Hairline */
+    #scroll-progress-track {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2.5px;
+      z-index: 90;
+      background: rgba(255, 255, 255, 0.05);
+      pointer-events: none;
+    }
+    #scroll-progress-bar {
+      height: 100%;
+      width: 100%;
+      transform-origin: left center;
+      transform: scaleX(0);
+      background: linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF);
+      box-shadow: 0 0 14px rgba(var(--dynamic-accent-rgb), 0.85);
+      will-change: transform;
+    }
+
+    /* Event Horizon Surfaces */
+    .eh-solid-panel {
+      background: rgba(11, 14, 23, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 22px 54px rgba(0, 0, 0, 0.7);
+    }
+
+    .eh-solid-card {
+      background: rgba(17, 22, 36, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 32px rgba(0, 0, 0, 0.56);
+      transition: border-color 220ms ease, background-color 220ms ease, box-shadow 260ms ease;
+    }
+    .eh-solid-card:hover {
+      background: var(--bg-obsidian-hover);
+      border-color: rgba(var(--dynamic-accent-rgb), 0.45);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 18px 40px rgba(0, 0, 0, 0.72), 0 0 24px rgba(var(--dynamic-accent-rgb), 0.14);
+    }
+
+    .eh-glass-pill {
+      background: rgba(9, 12, 22, 0.80);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), 0 0 24px rgba(var(--dynamic-accent-rgb), 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+
+    .orbit-gradient-text {
+      background: linear-gradient(135deg, #FFFFFF 0%, #E7EEFF 42%, var(--dynamic-accent) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    /* Sticky Scroll-Scrubbed Track Architecture */
+    .sticky-track {
+      position: relative;
+      overflow-x: clip;
+    }
+    .sticky-viewport {
+      position: sticky;
+      top: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: clip;
+    }
+
+    /* Hardware-accelerated 3D containers */
+    .stage-3d {
+      perspective: 1800px;
+      perspective-origin: 50% 48%;
+    }
+    .preserve-3d {
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
+
+    /* Damped Hover 3D Tilt Cards */
+    [data-tilt-3d] {
+      position: relative;
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
+    [data-tilt-3d]::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background: radial-gradient(
+        460px circle at var(--glare-x, 50%) var(--glare-y, 50%),
+        rgba(255, 255, 255, 0.08),
+        rgba(var(--dynamic-accent-rgb), 0.06) 30%,
+        transparent 62%
+      );
+      opacity: var(--glare-opacity, 0);
+      transition: opacity 260ms ease;
+      z-index: 30;
+    }
+
+    /* ORBIT Signature Keyframes */
+    @keyframes accretionRotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes vinylSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes eqBarBounce {
+      0%, 100% { transform: scaleY(0.28); }
+      50% { transform: scaleY(1); }
+    }
+    @keyframes ehBlackHoleSuck {
+      0%   { transform: translate3d(0, 0, 0) scale(1) rotate(0deg); opacity: 1; }
+      28%  { transform: translate3d(135px, -95px, 0) scale(0.92) rotate(-14deg); opacity: 0.98; }
+      66%  { transform: translate3d(340px, -235px, 0) scale(0.42) rotate(-180deg); opacity: 0.85; }
+      100% { transform: translate3d(490px, -315px, 0) scale(0.02) rotate(-470deg); opacity: 0; }
+    }
+    @keyframes ehCardRiseBelow {
+      0%   { transform: translate3d(0, 56px, 0) scale(0.9); opacity: 0; }
+      65%  { transform: translate3d(0, -3px, 0) scale(1.01); opacity: 1; }
+      100% { transform: translate3d(0, 0, 0) scale(1); opacity: 1; }
+    }
+    @keyframes bhAbsorbFlash {
+      0%   { transform: scale(0.85); opacity: 0; }
+      35%  { transform: scale(1.22); opacity: 0.92; }
+      100% { transform: scale(1.60); opacity: 0; }
+    }
+
+    .eh-accretion-ring { animation: accretionRotate 20s linear infinite; will-change: transform; }
+    .eh-spin-vinyl { animation: vinylSpin 14s linear infinite; will-change: transform; }
+    .eh-eq-bar { transform-origin: bottom; animation: eqBarBounce 0.74s ease-in-out infinite; }
+    .eh-suck-card { animation: ehBlackHoleSuck 1020ms cubic-bezier(0.45, 0.02, 0.65, 0.98) forwards; will-change: transform, opacity; }
+    .eh-rise-card { animation: ehCardRiseBelow 640ms cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: 100ms; will-change: transform, opacity; }
+    .eh-bh-absorb { animation: bhAbsorbFlash 780ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+    .eh-paused,
+    [data-effects="static"] .eh-accretion-ring,
+    [data-effects="static"] .eh-spin-vinyl,
+    [data-effects="oled"] .eh-accretion-ring {
+      animation-play-state: paused !important;
+    }
+
+    /* Dynamic Island Smooth Morphing */
+    .morph-island {
+      transition: width 260ms cubic-bezier(0.22, 1, 0.36, 1),
+                  height 260ms cubic-bezier(0.22, 1, 0.36, 1),
+                  border-radius 260ms ease,
+                  box-shadow 300ms ease;
+    }
+
+    /* Range Slider */
+    input[type="range"].orbit-range {
+      -webkit-appearance: none;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.16);
+      height: 4px;
+      border-radius: 999px;
+      outline: none;
+    }
+    input[type="range"].orbit-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      background: #FFFFFF;
+      box-shadow: 0 0 10px var(--dynamic-accent);
+      cursor: pointer;
+    }
+
+    /* Right Edge Floating Section Indicator */
+    .rail-dot {
+      transition: transform 240ms ease, background-color 240ms ease, box-shadow 240ms ease;
+    }
+    .rail-dot.active {
+      background: var(--dynamic-accent);
+      transform: scale(1.45);
+      box-shadow: 0 0 12px rgba(var(--dynamic-accent-rgb), 0.9);
+    }
+
+    /* Kinetic Statement Words */
+    .scrub-word {
+      display: inline-block;
+      will-change: transform, opacity, filter;
+    }
+
+    /* Architecture 3D Exploded Layer Card */
+    .arch-layer-card {
+      transition: border-color 240ms ease, background-color 240ms ease, box-shadow 260ms ease;
+      will-change: transform;
+    }
+    .arch-layer-card.active {
+      border-color: rgba(var(--dynamic-accent-rgb), 0.75);
+      background: rgba(19, 27, 46, 0.97);
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.7), 0 0 26px rgba(var(--dynamic-accent-rgb), 0.18);
+    }
+
+    /* Responsive Mobile Overrides so sticky tracks remain effortless on small viewports */
+    @media (max-width: 1023px) {
+      #overview-track { height: auto !important; min-height: 100vh; }
+      #features-track, #offline-track { height: auto !important; }
+      #gallery-track { height: 175vh !important; }
+      .sticky-viewport { position: relative; min-height: auto; padding-top: 5.5rem; padding-bottom: 4rem; }
+      #statement-track .sticky-viewport,
+      #gallery-track .sticky-viewport { position: sticky; min-height: 100vh; padding-top: 4rem; padding-bottom: 4rem; }
+    }
+  </style>
+</head>
+<body class="selection:bg-teal-400/30 selection:text-white">
+
+  <!-- ================================================================== -->
+  <!-- FIXED TOP SCROLL PROGRESS HAIRLINE & 3D WEBGL BLACK HOLE CANVAS    -->
+  <!-- ================================================================== -->
+  <div id="scroll-progress-track" aria-hidden="true">
+    <div id="scroll-progress-bar"></div>
+  </div>
+  <div id="cosmic-canvas-wrap" aria-hidden="true"></div>
+  <div class="cosmic-vignette" aria-hidden="true"></div>
+
+  <!-- Toast Host -->
+  <div id="toast-container" class="fixed bottom-6 right-6 z-[130] flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- ================================================================== -->
+  <!-- FLOATING VERTICAL SECTION RAIL (RIGHT EDGE)                        -->
+  <!-- ================================================================== -->
+  <aside id="section-rail" aria-label="Section Navigation"
+         class="hidden xl:flex fixed right-5 top-1/2 -translate-y-1/2 z-50 flex-col items-end gap-3.5">
+    <button type="button" onclick="scrollToSection('#overview-track')" data-rail-target="overview-track" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Orbit</span>
+      <span class="rail-dot active w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#features-track')" data-rail-target="features-track" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Ad-Free</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#offline-track')" data-rail-target="offline-track" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Offline</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#statement-track')" data-rail-target="statement-track" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Free</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#architecture')" data-rail-target="architecture" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Bento</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#reviews')" data-rail-target="reviews" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Reviews</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#gallery-track')" data-rail-target="gallery-track" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Showcase</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+    <button type="button" onclick="scrollToSection('#download')" data-rail-target="download" class="group flex items-center gap-2.5">
+      <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#9BA4C4] opacity-0 group-hover:opacity-100 transition-opacity">Get App</span>
+      <span class="rail-dot w-2 h-2 rounded-full bg-white/30"></span>
+    </button>
+  </aside>
+
+  <!-- ================================================================== -->
+  <!-- FLOATING PILL NAVBAR                                               -->
+  <!-- ================================================================== -->
+  <header class="fixed top-4 left-0 right-0 z-50 px-3 sm:px-6">
+    <nav class="max-w-6xl mx-auto eh-glass-pill rounded-full px-3 sm:px-5 h-14 flex items-center justify-between gap-2">
+      <!-- Brand Emblem + ORBIT. -->
+      <button type="button" onclick="scrollToSection('#overview-track')" class="flex items-center gap-2.5 group flex-none">
+        <div class="relative w-8 h-8 rounded-full bg-black ring-1 ring-white/20 flex items-center justify-center transition-transform group-hover:scale-105"
+             style="box-shadow: 0 0 16px rgba(var(--dynamic-accent-rgb), 0.48);">
+          <svg width="26" height="26" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <defs>
+              <radialGradient id="navBhCore" cx="50%" cy="50%" r="50%">
+                <stop offset="48%" stop-color="#000000" />
+                <stop offset="72%" stop-color="var(--dynamic-accent)" stop-opacity="0.95" />
+                <stop offset="88%" stop-color="var(--dynamic-secondary)" stop-opacity="0.5" />
+                <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+              </radialGradient>
+            </defs>
+            <circle cx="32" cy="32" r="29" fill="url(#navBhCore)" />
+            <ellipse cx="32" cy="32" rx="28" ry="10.5" transform="rotate(-18 32 32)" stroke="#FFFFFF" stroke-width="2" stroke-opacity="0.92" />
+            <circle cx="32" cy="32" r="13.5" fill="#010205" stroke="var(--dynamic-accent)" stroke-opacity="0.7" stroke-width="1.3" />
+          </svg>
+        </div>
+        <span class="font-extrabold text-base tracking-[-0.03em] text-[#F4F6FF]">ORBIT.</span>
+      </button>
+
+      <!-- Center Nav Links -->
+      <div class="hidden lg:flex items-center gap-0.5 text-xs font-medium text-[#9BA4C4]">
+        <button type="button" onclick="scrollToSection('#overview-track')" class="px-3 py-1.5 rounded-full hover:text-white hover:bg-white/[0.07] transition-colors">Overview</button>
+        <button type="button" onclick="scrollToSection('#features-track')" class="px-3 py-1.5 rounded-full hover:text-white hover:bg-white/[0.07] transition-colors">Features</button>
+        <button type="button" onclick="scrollToSection('#gallery-track')" class="px-3 py-1.5 rounded-full hover:text-white hover:bg-white/[0.07] transition-colors">Showcase</button>
+        <button type="button" onclick="scrollToSection('#architecture')" class="px-3 py-1.5 rounded-full hover:text-white hover:bg-white/[0.07] transition-colors">Architecture</button>
+        <button type="button" onclick="scrollToSection('#reviews')" class="px-3 py-1.5 rounded-full hover:text-white hover:bg-white/[0.07] transition-colors">Reviews</button>
+      </div>
+
+      <!-- Right: Cosmic Mode Toggle + Dynamic Palette Dots + Download CTA -->
+      <div class="flex items-center gap-2">
+        <div class="hidden md:flex items-center p-0.5 rounded-full bg-black/55 border border-white/10 text-[10px]" role="group" aria-label="Cosmic Mode">
+          <button type="button" data-cosmic-btn="full" class="cosmic-mode-btn px-2.5 py-1 rounded-full bg-[#F4F6FF] text-[#020308] font-semibold transition-colors">3D</button>
+          <button type="button" data-cosmic-btn="static" class="cosmic-mode-btn px-2.5 py-1 rounded-full text-[#9BA4C4] hover:text-white transition-colors">Static</button>
+          <button type="button" data-cosmic-btn="oled" class="cosmic-mode-btn px-2.5 py-1 rounded-full text-[#9BA4C4] hover:text-white transition-colors">OLED</button>
+        </div>
+
+        <div id="nav-accent-dots" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-black/45 border border-white/10"></div>
+
+        <button type="button" onclick="openDownloadModal()"
+          class="px-4 py-2 rounded-full text-xs font-bold bg-[#F4F6FF] text-[#020308] hover:scale-[1.04] active:scale-[0.98] transition-transform flex items-center gap-1.5"
+          style="box-shadow: 0 0 24px rgba(var(--dynamic-accent-rgb), 0.36);">
+          <span>Download ORBIT</span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="relative z-10">
+
+    <!-- ================================================================== -->
+    <!-- SECTION 1: PINNED 240vh SCROLL-SCRUBBED 3D HERO ("Enter the Orbit.") -->
+    <!-- ================================================================== -->
+    <section id="overview-track" class="sticky-track" style="height: 240vh;">
+      <div class="sticky-viewport px-3 sm:px-6 pt-16 pb-6">
+        <div class="w-full max-w-[1380px] mx-auto flex flex-col items-center justify-center">
+
+          <!-- Hero Copy Block (Scrubbed Lift & Scale on Scroll 0.0 -> 0.35) -->
+          <div id="hero-copy-block" class="text-center max-w-4xl mx-auto space-y-3 sm:space-y-4 mb-5 sm:mb-7 will-change-transform">
+            <div class="inline-flex items-center gap-2 px-3.5 py-1 rounded-full eh-glass-pill text-[10px] sm:text-[11px] font-mono font-semibold tracking-[0.18em] uppercase text-[#F4F6FF]">
+              <span class="w-2 h-2 rounded-full animate-pulse" style="background: var(--dynamic-accent); box-shadow: 0 0 10px var(--dynamic-accent);"></span>
+              <span>Created by Naitik Jain</span>
+              <span class="text-[#5E6685]">•</span>
+              <span style="color: var(--dynamic-accent);">Event Horizon Desktop Edition</span>
+            </div>
+
+            <h1 class="text-5xl sm:text-7xl lg:text-[86px] font-black tracking-[-0.045em] leading-[0.94] text-[#F4F6FF]">
+              Enter the <span class="orbit-gradient-text">Orbit.</span>
+            </h1>
+
+            <p class="text-xs sm:text-base text-[#9BA4C4] max-w-xl mx-auto leading-relaxed">
+              Native Rust + Tauri v2, React &amp; <code class="font-mono text-[#F4F6FF]">libmpv</code> desktop music client. Scroll to fan the 3D workspace or click any track live.
+            </p>
+          </div>
+
+          <!-- 3D TRIPLE DESKTOP STAGE (Scroll-scrubbed Pitch Rise + Wing Fan-Out) -->
+          <div class="w-full stage-3d">
+            <div id="hero-stage-rig" class="preserve-3d relative flex items-center justify-center">
+
+              <!-- LEFT 3D WING: Singularity Stage & Synced LRCLIB Lyrics (Fans out on scroll 0.35 -> 0.85) -->
+              <div id="hero-wing-left"
+                   class="hidden xl:flex flex-col absolute left-1/2 top-1/2 w-[275px] h-[448px] rounded-[24px] eh-solid-panel overflow-hidden z-10 select-none will-change-transform"
+                   style="margin-left: -137px; margin-top: -224px;">
+                <div class="h-10 px-3.5 border-b border-white/[0.08] bg-[#090C14] flex items-center justify-between text-[10px]">
+                  <span class="font-bold uppercase tracking-[0.16em] text-[#F4F6FF]">Singularity Stage</span>
+                  <span class="font-mono text-[#9BA4C4]">LRCLIB Sync</span>
+                </div>
+                <div class="p-3.5 flex flex-col items-center border-b border-white/[0.07]">
+                  <div class="relative w-24 h-24 flex items-center justify-center my-0.5">
+                    <div class="wing-accretion eh-accretion-ring absolute -inset-2.5 rounded-full opacity-90"
+                         style="background: conic-gradient(from 0deg, transparent 0%, rgba(var(--dynamic-accent-rgb), 0.72) 28%, rgba(var(--dynamic-secondary-rgb), 0.42) 56%, transparent 82%); -webkit-mask: radial-gradient(farthest-side, transparent 84%, #000 86%, #000 96%, transparent 100%); mask: radial-gradient(farthest-side, transparent 84%, #000 86%, #000 96%, transparent 100%);"></div>
+                    <div id="wing-left-art" class="relative w-20 h-20 rounded-2xl overflow-hidden border border-white/15 shadow-2xl"></div>
+                  </div>
+                  <div id="wing-left-title" class="text-xs font-bold text-[#F4F6FF] mt-1.5 truncate max-w-full">Event Horizon</div>
+                  <div id="wing-left-artist" class="text-[10px] text-[#9BA4C4] truncate max-w-full">Aether &amp; Sol</div>
+                  <div class="flex items-center gap-1.5 mt-2 text-[9px] font-mono">
+                    <button type="button" onclick="nudgeSyncOffset(-0.5)" class="px-2 py-0.5 rounded bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF]">-0.5s</button>
+                    <span class="sync-offset-readout text-[#9BA4C4]">+0.0s</span>
+                    <button type="button" onclick="nudgeSyncOffset(0.5)" class="px-2 py-0.5 rounded bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF]">+0.5s</button>
+                  </div>
+                </div>
+                <div id="wing-left-lyrics" class="flex-1 overflow-y-auto no-scrollbar px-3.5 py-2.5 space-y-1.5"></div>
+              </div>
+
+              <!-- CENTER INTERACTIVE ORBIT DESKTOP WINDOW -->
+              <div id="hero-center-window"
+                   class="w-full max-w-[770px] rounded-[24px] border border-white/15 bg-[#03040A] overflow-hidden relative z-20 select-none"
+                   style="box-shadow: 0 36px 96px -16px rgba(0,0,0,0.96), 0 0 65px rgba(var(--dynamic-accent-rgb), 0.16), inset 0 1px 0 rgba(255,255,255,0.18);">
+
+                <!-- Internal Black Hole Backdrop -->
+                <div class="pointer-events-none absolute inset-0 overflow-hidden z-0"
+                     style="background: radial-gradient(ellipse 85% 75% at 76% 22%, #080E1F 0%, #03040A 54%, #000000 100%);">
+                  <div class="absolute right-[7%] top-[9%] w-[210px] h-[210px] flex items-center justify-center opacity-90">
+                    <div class="absolute inset-0 rounded-full opacity-75"
+                         style="background: radial-gradient(circle, rgba(var(--dynamic-accent-rgb), 0.34) 0%, rgba(var(--dynamic-secondary-rgb), 0.16) 38%, transparent 68%);"></div>
+                    <svg viewBox="0 0 420 420" class="w-[196px] h-[196px] overflow-visible">
+                      <defs>
+                        <linearGradient id="appBhDisk" x1="0%" y1="50%" x2="100%" y2="50%">
+                          <stop offset="0%" stop-color="var(--dynamic-secondary)" stop-opacity="0" />
+                          <stop offset="22%" stop-color="var(--dynamic-accent)" stop-opacity="0.65" />
+                          <stop offset="50%" stop-color="#F4F6FF" stop-opacity="0.96" />
+                          <stop offset="78%" stop-color="var(--dynamic-accent)" stop-opacity="0.6" />
+                          <stop offset="100%" stop-color="var(--dynamic-secondary)" stop-opacity="0" />
+                        </linearGradient>
+                      </defs>
+                      <ellipse cx="210" cy="210" rx="98" ry="90" fill="none" stroke="var(--dynamic-accent)" stroke-width="2.5" opacity="0.6" />
+                      <g transform="rotate(-16 210 210)">
+                        <ellipse cx="210" cy="210" rx="190" ry="30" fill="none" stroke="url(#appBhDisk)" stroke-width="11" opacity="0.32" />
+                        <ellipse cx="210" cy="210" rx="188" ry="29" fill="none" stroke="url(#appBhDisk)" stroke-width="3.5" opacity="0.72" />
+                      </g>
+                      <circle cx="210" cy="210" r="76" fill="#000000" stroke="#F4F6FF" stroke-opacity="0.58" stroke-width="1.3" />
+                      <g transform="rotate(-16 210 210)">
+                        <path d="M 22 210 A 188 30 0 0 0 398 210" fill="none" stroke="url(#appBhDisk)" stroke-width="5" stroke-linecap="round" />
+                        <path d="M 48 212 A 162 23 0 0 0 372 212" fill="none" stroke="#FFFFFF" stroke-opacity="0.88" stroke-width="1.8" stroke-linecap="round" />
+                      </g>
+                    </svg>
+                    <div id="mockup-absorb-ring" class="hidden absolute w-32 h-32 rounded-full border-2"
+                         style="border-color: var(--dynamic-accent); box-shadow: 0 0 34px rgba(var(--dynamic-accent-rgb), 0.85);"></div>
+                  </div>
+                </div>
+
+                <!-- BlackHoleTransition Outgoing Suck Layer -->
+                <div id="blackhole-suck-layer" class="pointer-events-none absolute inset-0 z-40 overflow-hidden"></div>
+
+                <!-- App Shell -->
+                <div class="relative z-10 flex flex-col">
+                  <!-- Custom Frameless Tauri Titlebar -->
+                  <div class="h-11 px-3.5 flex items-center justify-between gap-2 border-b border-white/[0.06] bg-black/30">
+                    <div class="flex items-center gap-2">
+                      <span class="w-5 h-5 rounded-full bg-black border border-white/20 flex items-center justify-center" style="box-shadow: 0 0 10px rgba(var(--dynamic-accent-rgb), 0.5);">
+                        <span class="w-2 h-2 rounded-full bg-black ring-2" style="--tw-ring-color: var(--dynamic-accent);"></span>
+                      </span>
+                      <span class="text-[11px] font-bold tracking-[0.26em] text-[#F4F6FF]">ORBIT</span>
+                    </div>
+
+                    <!-- Search Capsule Ctrl+K -->
+                    <div class="flex items-center flex-1 max-w-[270px] px-3 py-1 bg-[#0B0E18] border border-white/12 rounded-full text-[11px] focus-within:border-white/30">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9BA4C4" stroke-width="2" class="mr-2 flex-none"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                      <input id="app-search-input" type="text" placeholder="Search tracks, artists..."
+                             class="bg-transparent text-[#F4F6FF] placeholder-[#5E6685] focus:outline-none w-full text-[11px]" />
+                      <kbd class="hidden sm:inline text-[9px] bg-white/[0.07] px-1.5 py-0.5 rounded-full text-[#9BA4C4] border border-white/10 ml-1.5 font-mono">Ctrl+K</kbd>
+                    </div>
+
+                    <!-- Right Titlebar Controls -->
+                    <div class="flex items-center gap-1 text-[#9BA4C4]">
+                      <button type="button" onclick="scrollToSection('#bento-island')" title="Dynamic Island PiP" class="w-6 h-6 rounded-full hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><rect width="7" height="5" x="12" y="12" rx="1"/></svg>
+                      </button>
+                      <button type="button" onclick="cycleCosmicMode()" title="Cycle 3D / Static / OLED" class="w-6 h-6 rounded-full hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      </button>
+                      <span class="hidden sm:inline-flex items-center gap-0.5 ml-1">
+                        <span class="w-5 h-5 rounded hover:bg-white/10 flex items-center justify-center text-[10px]">—</span>
+                        <span class="w-5 h-5 rounded hover:bg-white/10 flex items-center justify-center text-[9px]">□</span>
+                        <span class="w-5 h-5 rounded hover:bg-[#E81123] hover:text-white flex items-center justify-center text-[11px] transition-colors">×</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Workspace: Collapsible Obsidian Rail + Dynamic View -->
+                  <div class="flex h-[325px] sm:h-[345px] p-2 gap-2 overflow-hidden">
+                    <aside id="app-sidebar" class="w-[54px] flex-none bg-[#090C15]/92 border border-white/[0.09] rounded-[18px] flex flex-col p-1.5 gap-1 transition-[width] duration-200">
+                      <button type="button" data-app-tab="home" onclick="switchAppTab('home')" title="Home"
+                        class="app-nav-btn relative w-full py-2 px-2 rounded-xl flex items-center justify-center gap-2 bg-white/[0.11] text-[#F4F6FF] text-xs font-medium">
+                        <span class="nav-indicator w-[3px] h-4 rounded-full absolute left-0.5" style="background: var(--dynamic-accent); box-shadow: 0 0 8px var(--dynamic-accent);"></span>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flex-none"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                        <span class="sidebar-lbl hidden text-[11px] truncate">Home</span>
+                      </button>
+                      <button type="button" data-app-tab="search" onclick="switchAppTab('search')" title="Search"
+                        class="app-nav-btn relative w-full py-2 px-2 rounded-xl flex items-center justify-center gap-2 text-[#9BA4C4] hover:text-white hover:bg-white/[0.06] text-xs">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flex-none"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                        <span class="sidebar-lbl hidden text-[11px] truncate">Search</span>
+                      </button>
+                      <button type="button" data-app-tab="liked" onclick="switchAppTab('liked')" title="Liked"
+                        class="app-nav-btn relative w-full py-2 px-2 rounded-xl flex items-center justify-center gap-2 text-[#9BA4C4] hover:text-white hover:bg-white/[0.06] text-xs">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FF4D8D" stroke-width="2" class="flex-none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                        <span class="sidebar-lbl hidden text-[11px] truncate">Liked (<span id="sidebar-liked-count">3</span>)</span>
+                      </button>
+                      <button type="button" data-app-tab="offline" onclick="switchAppTab('offline')" title="Offline"
+                        class="app-nav-btn relative w-full py-2 px-2 rounded-xl flex items-center justify-center gap-2 text-[#9BA4C4] hover:text-white hover:bg-white/[0.06] text-xs">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#34D399" stroke-width="2" class="flex-none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                        <span class="sidebar-lbl hidden text-[11px] truncate">Offline (<span id="sidebar-offline-count">3</span>)</span>
+                      </button>
+                      <button type="button" data-app-tab="history" onclick="switchAppTab('history')" title="History"
+                        class="app-nav-btn relative w-full py-2 px-2 rounded-xl flex items-center justify-center gap-2 text-[#9BA4C4] hover:text-white hover:bg-white/[0.06] text-xs">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flex-none"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <span class="sidebar-lbl hidden text-[11px] truncate">History</span>
+                      </button>
+                      <button type="button" id="app-sidebar-toggle" title="Expand / Collapse Rail"
+                        class="mt-auto w-full py-1.5 rounded-lg flex items-center justify-center text-[#9BA4C4] hover:text-white hover:bg-white/[0.07] border-t border-white/[0.06]">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+                      </button>
+                    </aside>
+
+                    <div id="app-main-view" data-lenis-prevent class="flex-1 min-w-0 flex flex-col overflow-y-auto no-scrollbar px-2 py-1"></div>
+                  </div>
+
+                  <!-- Floating PlayerBar Island Dock -->
+                  <div class="px-2 pb-2 pt-0.5 relative">
+                    <div class="w-full min-h-[62px] bg-[#090C16]/95 border border-white/12 rounded-[20px] px-3 py-1.5 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-2xl">
+                      <!-- Left Rising Vinyl Card -->
+                      <div class="w-full sm:w-48 min-w-0 flex items-center overflow-hidden">
+                        <div id="playerbar-track-card" class="flex items-center gap-2.5 w-full min-w-0">
+                          <div class="w-9 h-9 rounded-full overflow-hidden flex-none border-2"
+                               style="border-color: rgba(var(--dynamic-accent-rgb), 0.78); box-shadow: 0 0 12px rgba(var(--dynamic-accent-rgb), 0.35);">
+                            <div id="playerbar-vinyl" class="w-full h-full eh-spin-vinyl"></div>
+                          </div>
+                          <div class="min-w-0 flex-1">
+                            <div id="playerbar-title" class="text-xs font-semibold text-[#F4F6FF] truncate">Event Horizon</div>
+                            <div class="flex items-center gap-1.5">
+                              <span id="playerbar-artist" class="text-[10px] text-[#9BA4C4] truncate">Aether &amp; Sol</span>
+                              <span id="playerbar-offline-badge" class="text-[8px] uppercase font-bold text-[#34D399] bg-[#34D399]/10 px-1.5 py-0.5 rounded-full border border-[#34D399]/25 flex-none">Offline</span>
+                            </div>
+                          </div>
+                          <button type="button" onclick="toggleCurrentLike()" title="Like" class="p-1 text-[#9BA4C4] hover:text-[#FF4D8D] flex-none">
+                            <svg id="playerbar-like-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                          </button>
+                        </div>
+                      </div>
+
+                      <!-- Center Controls + Scrub Bar -->
+                      <div class="flex flex-col items-center gap-1 w-full sm:flex-1 max-w-xs">
+                        <div class="flex items-center gap-3">
+                          <button type="button" id="pb-shuffle-btn" onclick="toggleShuffle()" title="Shuffle" class="p-1 text-[#9BA4C4] hover:text-white">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" x2="21" y1="20" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" x2="21" y1="15" y2="21"/><line x1="4" x2="9" y1="4" y2="9"/></svg>
+                          </button>
+                          <button type="button" onclick="triggerPrevTrack()" title="Previous" class="p-1 text-[#9BA4C4] hover:text-white">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" x2="5" y1="19" y2="5"/></svg>
+                          </button>
+                          <button type="button" id="pb-play-btn" onclick="togglePlayback()" title="Play / Pause"
+                            class="w-8 h-8 rounded-full bg-[#F4F6FF] text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+                            style="box-shadow: 0 0 18px rgba(var(--dynamic-accent-rgb), 0.55);"></button>
+                          <button type="button" onclick="triggerNextTrack()" title="Next (Black Hole Switch)" class="p-1 text-[#9BA4C4] hover:text-white">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" x2="19" y1="5" y2="19"/></svg>
+                          </button>
+                          <button type="button" id="pb-repeat-btn" onclick="cycleRepeat()" title="Repeat" class="p-1 text-[#9BA4C4] hover:text-white">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                          </button>
+                        </div>
+                        <div class="w-full flex items-center gap-2 text-[9px] font-mono tabular-nums text-[#9BA4C4]">
+                          <span id="pb-time-cur" class="w-7 text-right">0:24</span>
+                          <div id="pb-seek-track" class="flex-1 h-3.5 flex items-center cursor-pointer group relative">
+                            <div id="pb-seek-tooltip" class="pointer-events-none hidden absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 rounded bg-[#0B0E17] border border-white/15 text-[9px] font-mono text-[#F4F6FF]">0:00</div>
+                            <div class="w-full h-[3px] group-hover:h-[5px] bg-white/15 rounded-full transition-all relative">
+                              <div id="pb-seek-fill" class="h-full rounded-full relative" style="width: 14%; background: linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent));"></div>
+                            </div>
+                          </div>
+                          <span id="pb-time-dur" class="w-7 text-left">3:48</span>
+                        </div>
+                      </div>
+
+                      <!-- Right: Switch Trigger + Volume -->
+                      <div class="hidden sm:flex items-center gap-2 w-44 justify-end">
+                        <button type="button" onclick="triggerNextTrack()"
+                          class="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF] border border-white/10 transition-colors">
+                          Switch Track
+                        </button>
+                        <input type="range" min="0" max="100" value="80" aria-label="Volume" class="orbit-range w-14" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- RIGHT 3D WING: Dynamic Island + Queue & Autoplay Radio (Fans out on scroll 0.35 -> 0.85) -->
+              <div id="hero-wing-right"
+                   class="hidden xl:flex flex-col gap-2.5 absolute left-1/2 top-1/2 w-[275px] h-[448px] z-10 select-none will-change-transform"
+                   style="margin-left: -137px; margin-top: -224px;">
+                <div class="rounded-[22px] bg-[#05060B] border border-white/15 p-3 shadow-2xl"
+                     style="box-shadow: 0 14px 32px rgba(0,0,0,0.85), 0 0 20px rgba(var(--dynamic-accent-rgb), 0.22);">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <div class="w-8 h-8 rounded-full overflow-hidden border border-white/20 flex-none">
+                        <div id="wing-right-island-art" class="w-full h-full eh-spin-vinyl"></div>
+                      </div>
+                      <div class="min-w-0">
+                        <div id="wing-right-island-title" class="text-[11px] font-semibold text-[#F4F6FF] truncate">Event Horizon</div>
+                        <div class="text-[9px] text-[#9BA4C4] font-mono">Dynamic Island • On Top</div>
+                      </div>
+                    </div>
+                    <div class="flex items-end gap-[2px] h-3">
+                      <span class="w-[2px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 0ms;"></span>
+                      <span class="w-[2px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 180ms;"></span>
+                      <span class="w-[2px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 340ms;"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex-1 rounded-[22px] eh-solid-panel overflow-hidden flex flex-col">
+                  <div class="px-3.5 py-2 border-b border-white/[0.08] flex items-center justify-between">
+                    <span class="text-[10px] font-bold uppercase tracking-[0.18em] text-[#F4F6FF]">Queue</span>
+                    <span class="text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/[0.07] text-[#9BA4C4]">Drag to Reorder</span>
+                  </div>
+                  <div class="px-3.5 py-2 border-b border-white/[0.08] bg-[#0E1220] flex items-center justify-between text-[10px]">
+                    <span class="text-[#9BA4C4]">Autoplay Radio</span>
+                    <span class="w-7 h-4 rounded-full p-0.5 flex items-center justify-end" style="background: var(--dynamic-accent);"><span class="w-3 h-3 rounded-full bg-white"></span></span>
+                  </div>
+                  <div id="wing-right-queue" class="flex-1 overflow-y-auto no-scrollbar divide-y divide-white/[0.04] p-1.5"></div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Scroll Cue Pill -->
+          <div id="hero-scroll-cue" class="hidden lg:flex items-center gap-2 mt-4 text-[10px] font-mono uppercase tracking-[0.22em] text-[#9BA4C4]">
+            <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--dynamic-accent);"></span>
+            <span>Scroll smoothly to fan 3D windows</span>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 2: PINNED 190vh SCROLL-SCRUBBED "Ad-Free Music" + libmpv EQ -->
+    <!-- ================================================================== -->
+    <section id="features-track" class="sticky-track" style="height: 190vh;">
+      <div class="sticky-viewport px-4 sm:px-6">
+        <div class="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+
+          <!-- Left Editorial Copy -->
+          <div id="adfree-copy" class="lg:col-span-5 space-y-6 will-change-transform">
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.05] border border-white/10 text-[11px] font-mono text-[#9BA4C4]">
+              <span class="w-1.5 h-1.5 rounded-full" style="background: var(--dynamic-accent);"></span>
+              Native libmpv Audio Core
+            </div>
+
+            <h2 class="text-5xl sm:text-6xl font-black tracking-[-0.04em] leading-[0.98] text-[#F4F6FF]">
+              Ad-Free<br/>Music
+            </h2>
+
+            <p class="text-base sm:text-lg text-[#9BA4C4] leading-relaxed">
+              Enjoy pure music without distractions. No ads. No interruptions. Just sound.
+            </p>
+
+            <!-- 4 Separate Z-Depth Parallax Spec Badges -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <div data-adfree-badge="1" class="eh-solid-card rounded-2xl px-3.5 py-3 text-xs font-semibold text-[#F4F6FF] flex items-center gap-2.5 will-change-transform">
+                <span class="w-2 h-2 rounded-full flex-none" style="background: var(--dynamic-accent);"></span>
+                <span>Gapless libmpv Engine</span>
+              </div>
+              <div data-adfree-badge="2" class="eh-solid-card rounded-2xl px-3.5 py-3 text-xs font-semibold text-[#F4F6FF] flex items-center gap-2.5 will-change-transform">
+                <span class="w-2 h-2 rounded-full flex-none" style="background: var(--dynamic-accent);"></span>
+                <span>&lt;50ms Preload Switch</span>
+              </div>
+              <div data-adfree-badge="3" class="eh-solid-card rounded-2xl px-3.5 py-3 text-xs font-semibold text-[#F4F6FF] flex items-center gap-2.5 will-change-transform">
+                <span class="w-2 h-2 rounded-full flex-none" style="background: var(--dynamic-accent);"></span>
+                <span>Sticky yt-dlp Resolver</span>
+              </div>
+              <div data-adfree-badge="4" class="eh-solid-card rounded-2xl px-3.5 py-3 text-xs font-semibold text-[#F4F6FF] flex items-center gap-2.5 will-change-transform">
+                <span class="w-2 h-2 rounded-full flex-none" style="background: var(--dynamic-accent);"></span>
+                <span>Zero Browser Bloat</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Scroll-Rotating 3D Obsidian Desktop Audio Console + Live 5-Preset libmpv EQ -->
+          <div class="lg:col-span-7 stage-3d">
+            <div id="adfree-console-3d" class="eh-solid-panel rounded-[28px] p-5 sm:p-7 space-y-5 preserve-3d will-change-transform">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">Native libmpv C Audio Filter</div>
+                  <h3 id="eq-deck-title" class="text-lg font-bold text-[#F4F6FF] mt-0.5">Flat — Original studio mix</h3>
+                </div>
+                <span class="px-2.5 py-1 rounded-full bg-[#34D399]/10 border border-[#34D399]/30 text-[10px] font-mono font-semibold text-[#34D399]">
+                  60fps Live DSP Curve
+                </span>
+              </div>
+
+              <div class="rounded-2xl bg-[#050811] border border-white/[0.08] p-3.5">
+                <div class="w-full h-48 sm:h-56 relative">
+                  <canvas id="eq-visualizer-canvas" class="w-full h-full block"></canvas>
+                </div>
+                <div class="mt-2.5 pt-2.5 border-t border-white/[0.07] flex items-center gap-2 text-[10px] font-mono text-[#9BA4C4] overflow-x-auto no-scrollbar">
+                  <span class="text-[#5E6685] flex-none">mpv.af =</span>
+                  <code id="eq-deck-af" class="text-[#F4F6FF] truncate">"" (Bit-perfect passthrough)</code>
+                </div>
+              </div>
+
+              <div id="eq-deck-pills" class="grid grid-cols-2 sm:grid-cols-5 gap-2"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 3: PINNED 190vh SCROLL-SCRUBBED "Offline Downloads"        -->
+    <!-- ================================================================== -->
+    <section id="offline-track" class="sticky-track" style="height: 190vh;">
+      <div class="sticky-viewport px-4 sm:px-6">
+        <div class="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+
+          <!-- Left: 3 Layered 3D Obsidian Cards that Smoothly Fan/Unstack in Z-Depth on Scroll -->
+          <div class="lg:col-span-7 order-2 lg:order-1 stage-3d">
+            <div id="offline-stack-rig" class="preserve-3d space-y-3.5 relative">
+
+              <!-- Card 1: Background Concurrent Queue (yt-dlp + ffmpeg) -->
+              <div id="offline-card-1" class="eh-solid-panel rounded-[24px] p-5 space-y-3 will-change-transform">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div class="flex items-center gap-2.5">
+                    <span class="w-7 h-7 rounded-xl bg-[#34D399]/15 border border-[#34D399]/35 text-[#34D399] font-mono text-xs font-bold flex items-center justify-center">01</span>
+                    <div>
+                      <div class="text-xs font-bold text-[#F4F6FF]">Background Concurrent Queue</div>
+                      <div class="text-[10px] font-mono text-[#9BA4C4]">yt-dlp • ffmpeg • asyncio.Semaphore(2)</div>
+                    </div>
+                  </div>
+                  <button type="button" id="demo-dl-btn" onclick="runDemoDownload()"
+                    class="px-4 py-1.5 rounded-full text-xs font-bold bg-[#34D399] text-[#020308] hover:opacity-90 active:scale-95 transition-all">
+                    Simulate Download
+                  </button>
+                </div>
+
+                <div class="rounded-xl bg-[#050811] border border-white/[0.08] p-3.5 space-y-2.5">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-2.5 min-w-0">
+                      <div id="dl-demo-art" class="w-9 h-9 rounded-lg overflow-hidden border border-white/15 flex-none"></div>
+                      <div class="min-w-0">
+                        <div id="dl-demo-title" class="text-xs font-bold text-[#F4F6FF] truncate">Event Horizon.opus</div>
+                        <div id="dl-demo-stage" class="text-[10px] font-mono text-[#9BA4C4] truncate">Ready — Click Simulate Download</div>
+                      </div>
+                    </div>
+                    <span id="dl-demo-pct" class="text-xs font-mono tabular-nums font-bold text-[#34D399] flex-none">0%</span>
+                  </div>
+                  <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div id="dl-demo-bar" class="h-full rounded-full transition-[width] duration-150"
+                         style="width: 0%; background: linear-gradient(90deg, var(--dynamic-accent), #34D399);"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 2: mutagen ID3/Opus/M4A Tagging & Cover Art -->
+              <div id="offline-card-2" class="eh-solid-panel rounded-[24px] p-5 flex flex-wrap items-center justify-between gap-3 will-change-transform">
+                <div class="flex items-center gap-3">
+                  <span class="w-7 h-7 rounded-xl bg-white/[0.07] border border-white/15 font-mono text-xs font-bold flex items-center justify-center" style="color: var(--dynamic-accent);">02</span>
+                  <div>
+                    <div class="text-xs font-bold text-[#F4F6FF]">mutagen ID3 / OggOpus / M4A Tagging</div>
+                    <div class="text-[10px] font-mono text-[#9BA4C4]">Embeds Title, Artist, Album &amp; Front Cover Art directly into file bytes</div>
+                  </div>
+                </div>
+                <span id="dl-tag-badge" class="px-2.5 py-1 rounded-full text-[10px] font-mono bg-white/[0.06] border border-white/10 text-[#9BA4C4]">Waiting</span>
+              </div>
+
+              <!-- Card 3: Local SQLite WAL Offline Library + Live Auto-Download Toggle -->
+              <div id="offline-card-3" class="eh-solid-panel rounded-[24px] p-5 flex items-center justify-between gap-4 will-change-transform">
+                <div class="flex items-center gap-3">
+                  <span class="w-7 h-7 rounded-xl bg-[#FF4D8D]/15 border border-[#FF4D8D]/35 text-[#FF4D8D] font-mono text-xs font-bold flex items-center justify-center">03</span>
+                  <div>
+                    <div class="text-xs font-bold text-[#F4F6FF]">SQLite WAL Offline Library • Auto-Download Liked Songs</div>
+                    <div class="text-[10px] text-[#9BA4C4]">Local disk priority resolver automatically saves every hearted track</div>
+                  </div>
+                </div>
+                <button type="button" id="auto-dl-toggle" onclick="toggleAutoDownloadLiked()" aria-label="Toggle Auto-Download Liked Songs"
+                  class="w-11 h-6 rounded-full p-0.5 transition-colors flex-none bg-[#34D399]">
+                  <div id="auto-dl-knob" class="w-5 h-5 rounded-full bg-white shadow transition-transform translate-x-5"></div>
+                </button>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Right Editorial Copy -->
+          <div id="offline-copy" class="lg:col-span-5 order-1 lg:order-2 space-y-6 will-change-transform">
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#34D399]/10 border border-[#34D399]/25 text-[11px] font-mono text-[#34D399]">
+              Local Disk Priority • Zero Network Needed
+            </div>
+
+            <h2 class="text-5xl sm:text-6xl font-black tracking-[-0.04em] leading-[0.98] text-[#F4F6FF]">
+              Offline<br/>Downloads
+            </h2>
+
+            <p class="text-base sm:text-lg text-[#9BA4C4] leading-relaxed">
+              Download your favorite tracks. Listen anytime, anywhere. No internet? No problem.
+            </p>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 4: KINETIC SCROLL-SCRUBBED STATEMENT ("Say bye to paid music") -->
+    <!-- ================================================================== -->
+    <section id="statement-track" class="sticky-track" style="height: 165vh;">
+      <div class="sticky-viewport px-4 sm:px-6">
+        <div class="max-w-5xl mx-auto w-full text-center relative py-12">
+
+          <!-- Orbital Halo Rings -->
+          <div class="pointer-events-none absolute inset-0 flex items-center justify-center opacity-30">
+            <div class="w-[300px] h-[300px] sm:w-[560px] sm:h-[560px] rounded-full border border-white/10"></div>
+            <div class="absolute w-[200px] h-[200px] sm:w-[390px] sm:h-[390px] rounded-full border" style="border-color: rgba(var(--dynamic-accent-rgb), 0.38);"></div>
+          </div>
+
+          <!-- Word-by-Word Scroll-Scrubbed Giant Display Typography -->
+          <h2 id="statement-headline" class="relative z-10 text-5xl sm:text-7xl lg:text-[98px] font-black tracking-[-0.045em] leading-[0.98] text-[#F4F6FF] flex flex-wrap items-center justify-center gap-x-4 sm:gap-x-6 gap-y-2">
+            <span class="scrub-word" data-word-idx="0">Say</span>
+            <span class="scrub-word" data-word-idx="1">bye</span>
+            <span class="scrub-word" data-word-idx="2">to</span>
+            <span class="scrub-word orbit-gradient-text" data-word-idx="3">paid</span>
+            <span class="scrub-word orbit-gradient-text" data-word-idx="4">music</span>
+          </h2>
+
+          <!-- 6 Multi-Layer 3D Scroll-Parallax Obsidian Pills -->
+          <div class="relative z-10 flex flex-wrap items-center justify-center gap-3 sm:gap-4 max-w-4xl mx-auto mt-10">
+            <div data-float-pill="0" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-semibold text-[#F4F6FF] will-change-transform">No Subscriptions</div>
+            <div data-float-pill="1" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-semibold text-[#F4F6FF] will-change-transform">100% Free &amp; Local</div>
+            <div data-float-pill="2" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-semibold text-[#F4F6FF] will-change-transform">Global Windows Media Keys</div>
+            <div data-float-pill="3" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-semibold text-[#F4F6FF] will-change-transform">RAM Working-Set Trimmer</div>
+            <div data-float-pill="4" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-semibold text-[#F4F6FF] will-change-transform">SQLite WAL Storage</div>
+            <div data-float-pill="5" class="eh-glass-pill rounded-full px-5 py-2.5 text-xs sm:text-sm font-bold text-[#F4F6FF] will-change-transform" style="border-color: rgba(var(--dynamic-accent-rgb), 0.52);">Always-On-Top Dynamic Island</div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 5: "Integrates every feature" — 3D BENTO & PLAYGROUND      -->
+    <!-- ================================================================== -->
+    <section id="architecture" class="py-24 sm:py-36 px-4 sm:px-6">
+      <div class="max-w-6xl mx-auto space-y-14">
+
+        <div id="bento-header" class="text-center max-w-3xl mx-auto space-y-4 will-change-transform">
+          <div class="text-xs font-mono uppercase tracking-[0.24em]" style="color: var(--dynamic-accent);">Interactive Hardware-Grade Playground</div>
+          <h2 class="text-4xl sm:text-6xl font-black tracking-[-0.04em] leading-[1.0] text-[#F4F6FF]">
+            Integrates every feature
+          </h2>
+          <p class="text-sm sm:text-base text-[#9BA4C4]">
+            Live interactive components ported straight from ORBIT Desktop's real Rust, React &amp; Python codebase.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+
+          <!-- BENTO 1: Live Morphing Dynamic Island Mini-Player -->
+          <div id="bento-island" data-tilt-3d data-tilt-max="5"
+               class="lg:col-span-7 eh-solid-panel rounded-[28px] p-6 sm:p-7 flex flex-col justify-between gap-6">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">Tauri Window API • Always-On-Top</div>
+                <h3 class="text-xl font-bold text-[#F4F6FF] mt-1">Live Morphing Dynamic Island</h3>
+                <p class="text-xs text-[#9BA4C4] mt-1 max-w-md">
+                  Hover or tap the pill to morph smoothly between compact <code class="font-mono text-[#F4F6FF]">332×54</code> and expanded <code class="font-mono text-[#F4F6FF]">356×128</code> floating controls.
+                </p>
+              </div>
+              <button type="button" id="bento-island-pin" onclick="toggleIslandPin()"
+                class="px-3 py-1.5 rounded-full text-[11px] font-semibold bg-[#111624] hover:bg-[#1A2236] border border-white/12 text-[#F4F6FF]">
+                Pin Expanded
+              </button>
+            </div>
+
+            <div class="rounded-2xl bg-[#050811] border border-white/[0.08] p-6 sm:p-8 min-h-[185px] flex items-center justify-center relative overflow-hidden">
+              <div class="pointer-events-none absolute inset-0" style="background: radial-gradient(circle at 50% 25%, rgba(var(--dynamic-accent-rgb), 0.14), transparent 65%);"></div>
+
+              <div id="live-dynamic-island"
+                   onmouseenter="setIslandHover(true)"
+                   onmouseleave="setIslandHover(false)"
+                   onclick="toggleIslandTap()"
+                   style="width: 332px; max-width: 100%; height: 54px; border-radius: 999px; box-shadow: 0 18px 44px rgba(0,0,0,0.92), 0 0 28px rgba(var(--dynamic-accent-rgb), 0.28);"
+                   class="morph-island relative z-10 bg-[#05060B] border border-white/15 overflow-hidden flex flex-col justify-between px-3.5 py-2 cursor-pointer select-none">
+
+                <div class="flex items-center justify-between gap-2.5 h-[38px] flex-none">
+                  <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                    <div class="w-9 h-9 rounded-full overflow-hidden border border-white/20 flex-none bg-black" style="box-shadow: 0 0 12px rgba(var(--dynamic-accent-rgb), 0.45);">
+                      <div id="island-vinyl" class="w-full h-full eh-spin-vinyl"></div>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div id="island-title" class="text-xs font-semibold text-[#F4F6FF] truncate">Event Horizon</div>
+                      <div id="island-artist" class="text-[10px] text-[#9BA4C4] truncate">Aether &amp; Sol</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1.5 flex-none">
+                    <div id="island-eq-bars" class="flex items-end gap-[2px] h-3.5 mr-1">
+                      <span class="w-[2.5px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 0ms;"></span>
+                      <span class="w-[2.5px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 180ms;"></span>
+                      <span class="w-[2.5px] h-full rounded-full eh-eq-bar" style="background: var(--dynamic-accent); animation-delay: 340ms;"></span>
+                    </div>
+                    <button type="button" id="island-compact-play" onclick="event.stopPropagation(); togglePlayback();"
+                      class="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"></button>
+                  </div>
+                </div>
+
+                <div id="island-expanded-body" class="opacity-0 pointer-events-none space-y-2.5 pt-1 pb-0.5 transition-opacity duration-200">
+                  <div class="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                    <div id="island-progress-fill" class="h-full rounded-full transition-[width] duration-200"
+                         style="width: 14%; background: linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent));"></div>
+                  </div>
+                  <div class="flex items-center justify-between px-2">
+                    <button type="button" onclick="event.stopPropagation(); toggleCurrentLike();" class="p-1 text-[#9BA4C4] hover:text-[#FF4D8D]">
+                      <svg id="island-like-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                    </button>
+                    <div class="flex items-center gap-4">
+                      <button type="button" onclick="event.stopPropagation(); triggerPrevTrack();" class="p-1 text-[#9BA4C4] hover:text-white">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" x2="5" y1="19" y2="5"/></svg>
+                      </button>
+                      <button type="button" id="island-expanded-play" onclick="event.stopPropagation(); togglePlayback();" class="w-8 h-8 rounded-full bg-[#F4F6FF] text-[#020308] flex items-center justify-center hover:scale-105 transition-transform"></button>
+                      <button type="button" onclick="event.stopPropagation(); triggerNextTrack();" class="p-1 text-[#9BA4C4] hover:text-white">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" x2="19" y1="5" y2="19"/></svg>
+                      </button>
+                    </div>
+                    <span class="text-[9px] font-bold tracking-[0.2em] text-[#5E6685]">ORBIT</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- BENTO 2: Singularity Stage Synced Lyrics (LRCLIB + YTM) -->
+          <div data-tilt-3d data-tilt-max="5"
+               class="lg:col-span-5 eh-solid-panel rounded-[28px] p-6 flex flex-col gap-4">
+            <div class="flex items-center justify-between gap-2">
+              <div>
+                <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">LRCLIB + YouTube Music</div>
+                <h3 class="text-lg font-bold text-[#F4F6FF] mt-0.5">Singularity Synced Lyrics</h3>
+              </div>
+              <div class="flex items-center gap-1 text-[10px] font-mono">
+                <button type="button" onclick="nudgeSyncOffset(-0.5)" class="px-2 py-1 rounded-lg bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF]">-0.5s</button>
+                <span class="sync-offset-readout px-1.5 text-[#9BA4C4]">+0.0s</span>
+                <button type="button" onclick="nudgeSyncOffset(0.5)" class="px-2 py-1 rounded-lg bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF]">+0.5s</button>
+              </div>
+            </div>
+            <div id="bento-lyrics-scroll" data-lenis-prevent class="h-[205px] overflow-y-auto no-scrollbar rounded-2xl bg-[#050811] border border-white/[0.08] p-4 space-y-2"></div>
+          </div>
+
+          <!-- BENTO 3: Dynamic Artwork Accent Engine (12x12 Canvas WCAG Extraction) -->
+          <div data-tilt-3d data-tilt-max="5"
+               class="lg:col-span-5 eh-solid-panel rounded-[28px] p-6 flex flex-col justify-between gap-5">
+            <div class="space-y-1.5">
+              <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">colorExtract.ts • 12×12 Canvas Sampler</div>
+              <h3 class="text-xl font-bold text-[#F4F6FF]">Dynamic Artwork Accent Engine</h3>
+              <p class="text-xs text-[#9BA4C4] leading-relaxed">
+                Click any album swatch to sample WCAG-safe luminance/saturation tones and morph the entire UI &amp; 3D Black Hole live.
+              </p>
+            </div>
+            <div id="bento-palette-swatches" class="grid grid-cols-5 gap-2"></div>
+            <div class="flex items-center justify-between text-[11px] font-mono text-[#9BA4C4] px-3.5 py-2.5 rounded-xl bg-[#050811] border border-white/[0.08]">
+              <span>Active Accent</span>
+              <span id="active-accent-readout" class="font-bold" style="color: var(--dynamic-accent);">#2DD4BF • Aurora Teal</span>
+            </div>
+          </div>
+
+          <!-- BENTO 4: 4-Layer Native Architecture Exploded 3D Explorer -->
+          <div class="lg:col-span-7 eh-solid-panel rounded-[28px] p-6 space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">Exploded 3D System Stack</div>
+                <h3 class="text-xl font-bold text-[#F4F6FF] mt-0.5">4-Layer Native Architecture</h3>
+              </div>
+              <span class="text-[10px] font-mono text-[#9BA4C4]">Click a layer to inspect endpoints</span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch">
+              <div id="arch-layers-list" class="md:col-span-6 space-y-2"></div>
+              <div id="arch-layer-detail" class="md:col-span-6 rounded-2xl bg-[#050811] border border-white/[0.08] p-4 flex flex-col justify-between gap-3"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 6: "Trusted by Music Lovers" — SCROLL-PARALLAX REVIEWS     -->
+    <!-- ================================================================== -->
+    <section id="reviews" class="py-24 sm:py-32 px-4 sm:px-6">
+      <div class="max-w-6xl mx-auto space-y-12">
+
+        <div class="text-center max-w-2xl mx-auto space-y-4">
+          <div class="flex items-center justify-center -space-x-3 mb-2">
+            <div class="w-11 h-11 rounded-full bg-gradient-to-br from-teal-400 to-indigo-600 ring-2 ring-[#03040A] flex items-center justify-center text-xs font-bold text-white shadow-lg">AM</div>
+            <div class="w-11 h-11 rounded-full bg-gradient-to-br from-amber-400 to-pink-500 ring-2 ring-[#03040A] flex items-center justify-center text-xs font-bold text-white shadow-lg">RI</div>
+            <div class="w-12 h-12 rounded-full bg-black ring-2 ring-white/40 flex items-center justify-center text-xs font-black text-white z-10" style="box-shadow: 0 0 22px rgba(var(--dynamic-accent-rgb), 0.55);">NJ</div>
+            <div class="w-11 h-11 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 ring-2 ring-[#03040A] flex items-center justify-center text-xs font-bold text-white shadow-lg">DK</div>
+          </div>
+
+          <h2 class="text-4xl sm:text-5xl font-black tracking-[-0.035em] text-[#F4F6FF]">
+            Trusted by Music Lovers
+          </h2>
+          <p class="text-sm sm:text-base text-[#9BA4C4]">
+            Engineered for desktop listeners who refuse browser bloat, ads, and sluggish audio.
+          </p>
+        </div>
+
+        <div id="reviews-grid" class="grid grid-cols-1 md:grid-cols-3 gap-5">
+          <article data-review-card="0" data-tilt-3d data-tilt-max="6" class="eh-solid-card rounded-[24px] p-6 flex flex-col justify-between gap-5 will-change-transform">
+            <div class="space-y-3">
+              <div class="text-xs tracking-widest" style="color: var(--dynamic-accent);">★★★★★</div>
+              <p class="text-sm text-[#F4F6FF] leading-relaxed">
+                “ORBIT's native libmpv engine and 5-band C audio filter sound dramatically cleaner than browser players. Preloaded tracks switch in under 50ms with zero gaps.”
+              </p>
+            </div>
+            <div class="flex items-center gap-3 pt-3 border-t border-white/[0.07]">
+              <div class="w-9 h-9 rounded-full bg-gradient-to-br from-teal-400 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">AM</div>
+              <div>
+                <div class="text-xs font-bold text-[#F4F6FF]">Aarav Mehta</div>
+                <div class="text-[11px] text-[#9BA4C4]">Indie Music Producer</div>
+              </div>
+            </div>
+          </article>
+
+          <article data-review-card="1" data-tilt-3d data-tilt-max="6" class="eh-solid-card rounded-[24px] p-6 flex flex-col justify-between gap-5 will-change-transform">
+            <div class="space-y-3">
+              <div class="text-xs tracking-widest" style="color: var(--dynamic-accent);">★★★★★</div>
+              <p class="text-sm text-[#F4F6FF] leading-relaxed">
+                “The Always-on-Top Dynamic Island mini-player sits cleanly above my IDE while coding, and the Tauri shell stays under 60MB in the tray. Easily my favorite Windows app.”
+              </p>
+            </div>
+            <div class="flex items-center gap-3 pt-3 border-t border-white/[0.07]">
+              <div class="w-9 h-9 rounded-full bg-gradient-to-br from-amber-400 to-pink-500 flex items-center justify-center text-xs font-bold text-white">RI</div>
+              <div>
+                <div class="text-xs font-bold text-[#F4F6FF]">Rohan Iyer</div>
+                <div class="text-[11px] text-[#9BA4C4]">Tech Entrepreneur</div>
+              </div>
+            </div>
+          </article>
+
+          <article data-review-card="2" data-tilt-3d data-tilt-max="6" class="eh-solid-card rounded-[24px] p-6 flex flex-col justify-between gap-5 will-change-transform">
+            <div class="space-y-3">
+              <div class="text-xs tracking-widest" style="color: var(--dynamic-accent);">★★★★★</div>
+              <p class="text-sm text-[#F4F6FF] leading-relaxed">
+                “Auto-Download Liked Songs + Singularity synced lyrics + OLED pure black mode saved my laptop battery during exams. Naitik Jain nailed the Event Horizon aesthetic!”
+              </p>
+            </div>
+            <div class="flex items-center gap-3 pt-3 border-t border-white/[0.07]">
+              <div class="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-xs font-bold text-white">DK</div>
+              <div>
+                <div class="text-xs font-bold text-[#F4F6FF]">Diya Kapoor</div>
+                <div class="text-[11px] text-[#9BA4C4]">College Student</div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 7: PINNED 220vh 3D ISOMETRIC 9-SCREEN GALLERY WALL         -->
+    <!-- ================================================================== -->
+    <section id="gallery-track" class="sticky-track" style="height: 220vh;">
+      <div class="sticky-viewport flex-col px-4 sm:px-6">
+        <div class="text-center max-w-2xl mx-auto space-y-2 mb-6 relative z-20">
+          <div class="text-xs font-mono uppercase tracking-[0.24em]" style="color: var(--dynamic-accent);">Scroll-Driven 3D Isometric Showcase</div>
+          <h2 class="text-4xl sm:text-6xl font-black tracking-[-0.04em] text-[#F4F6FF]">
+            Nine screens in orbit.
+          </h2>
+        </div>
+
+        <!-- Full-Bleed 3D Perspective Plane with 3 Counter-Gliding Columns -->
+        <div class="w-full max-w-6xl mx-auto h-[64vh] relative overflow-hidden rounded-[32px] border border-white/[0.07] bg-black/35"
+             style="perspective: 1400px;">
+          <!-- Soft Vertical Edge Vignettes -->
+          <div class="pointer-events-none absolute inset-x-0 top-0 h-24 z-20 bg-gradient-to-b from-[#03040A] to-transparent"></div>
+          <div class="pointer-events-none absolute inset-x-0 bottom-0 h-24 z-20 bg-gradient-to-t from-[#03040A] to-transparent"></div>
+
+          <div id="iso-gallery-plane" class="w-full h-full flex items-center justify-center preserve-3d will-change-transform">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-5 w-[112%] max-w-[1060px] px-4">
+              <div id="iso-col-1" class="space-y-5 will-change-transform"></div>
+              <div id="iso-col-2" class="space-y-5 will-change-transform"></div>
+              <div id="iso-col-3" class="space-y-5 will-change-transform"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 8: "Get the App." CTA + NAITIK JAIN CREATOR SPOTLIGHT      -->
+    <!-- ================================================================== -->
+    <section id="download" class="py-28 sm:py-40 px-4 sm:px-6 relative overflow-hidden">
+      <div class="max-w-4xl mx-auto text-center relative">
+        <div class="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[320px] h-[320px] sm:w-[540px] sm:h-[540px] rounded-full opacity-35"
+             style="background: radial-gradient(circle, rgba(var(--dynamic-accent-rgb), 0.34) 0%, rgba(var(--dynamic-secondary-rgb), 0.14) 44%, transparent 72%);"></div>
+
+        <div class="relative z-10 space-y-7">
+          <h2 class="text-6xl sm:text-8xl font-black tracking-[-0.045em] leading-[0.94] text-[#F4F6FF]">
+            Get the <span class="orbit-gradient-text">App.</span>
+          </h2>
+          <p class="text-base sm:text-xl text-[#9BA4C4] max-w-xl mx-auto">
+            Fast, secure, and limitless music — powered by ORBIT.
+          </p>
+
+          <div class="flex flex-wrap items-center justify-center gap-3.5 pt-2">
+            <button type="button" onclick="openDownloadModal()"
+              class="px-9 py-4 rounded-full text-sm sm:text-base font-bold bg-[#F4F6FF] text-[#020308] hover:scale-[1.04] active:scale-[0.98] transition-transform inline-flex items-center gap-2"
+              style="box-shadow: 0 0 42px rgba(var(--dynamic-accent-rgb), 0.42);">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              <span>Download for Windows</span>
+            </button>
+            <button type="button" onclick="openDownloadModal()"
+              class="px-7 py-4 rounded-full text-sm sm:text-base font-semibold text-[#F4F6FF] eh-glass-pill hover:bg-white/[0.1] transition-colors">
+              View Architecture &amp; Setup
+            </button>
+          </div>
+
+          <!-- Dedicated Creator Spotlight Card: Naitik Jain -->
+          <div class="pt-10 max-w-2xl mx-auto">
+            <div data-tilt-3d data-tilt-max="6"
+                 class="eh-solid-panel rounded-[28px] p-6 sm:p-7 text-left flex flex-col sm:flex-row items-center sm:items-start gap-5 relative overflow-hidden"
+                 style="border-color: rgba(var(--dynamic-accent-rgb), 0.44);">
+              <div class="w-16 h-16 rounded-2xl bg-black border border-white/15 flex items-center justify-center font-black text-xl tracking-wider text-[#F4F6FF] flex-none"
+                   style="box-shadow: 0 0 28px rgba(var(--dynamic-accent-rgb), 0.36);">
+                NJ
+              </div>
+              <div class="space-y-1.5 text-center sm:text-left">
+                <div class="text-[10px] font-mono uppercase tracking-[0.22em]" style="color: var(--dynamic-accent);">
+                  Architected, Designed &amp; Built by Naitik Jain
+                </div>
+                <h3 class="text-2xl font-black text-[#F4F6FF]">Naitik Jain — ORBIT (Event Horizon Edition)</h3>
+                <p class="text-xs sm:text-sm text-[#9BA4C4] leading-relaxed">
+                  End-to-end desktop software engineering uniting a <strong class="text-[#F4F6FF]">Rust + Tauri v2</strong> transparent shell, <strong class="text-[#F4F6FF]">React &amp; TypeScript</strong> virtualized UI, <strong class="text-[#F4F6FF]">Python FastAPI</strong> WebSocket bridge, native <strong class="text-[#F4F6FF]">libmpv</strong> audio DSP, and <strong class="text-[#F4F6FF]">SQLite WAL</strong> offline persistence.
+                </p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- SECTION 9: FRAMER FOOTER & VELOCITY-REACTIVE GIANT MARQUEE         -->
+    <!-- ================================================================== -->
+    <footer class="border-t border-white/[0.08] bg-[#04050B]/95 pt-16">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 pb-14 grid grid-cols-1 md:grid-cols-12 gap-10">
+        <div class="md:col-span-6 space-y-4">
+          <div class="flex items-center gap-3">
+            <span class="w-9 h-9 rounded-full bg-black border border-white/20 flex items-center justify-center" style="box-shadow: 0 0 18px rgba(var(--dynamic-accent-rgb), 0.4);">
+              <span class="w-3.5 h-3.5 rounded-full bg-black ring-2" style="--tw-ring-color: var(--dynamic-accent);"></span>
+            </span>
+            <span class="font-black text-2xl tracking-[-0.03em] text-[#F4F6FF]">ORBIT.</span>
+          </div>
+          <p class="text-sm text-[#9BA4C4] max-w-sm leading-relaxed">
+            Where Music Never Ends — Created by <strong class="text-[#F4F6FF]">Naitik Jain</strong>.
+          </p>
+          <div class="text-xs font-mono text-[#5E6685]">© 2026 ORBIT • Created by Naitik Jain</div>
+        </div>
+
+        <div class="md:col-span-3 space-y-3">
+          <div class="text-xs font-mono uppercase tracking-[0.18em] text-[#5E6685]">Navigation</div>
+          <ul class="space-y-2 text-sm text-[#9BA4C4]">
+            <li><button type="button" onclick="scrollToSection('#overview-track')" class="hover:text-white transition-colors">Home</button></li>
+            <li><button type="button" onclick="scrollToSection('#features-track')" class="hover:text-white transition-colors">Features</button></li>
+            <li><button type="button" onclick="scrollToSection('#gallery-track')" class="hover:text-white transition-colors">Showcase</button></li>
+            <li><button type="button" onclick="scrollToSection('#architecture')" class="hover:text-white transition-colors">Architecture</button></li>
+            <li><button type="button" onclick="openDownloadModal()" class="hover:text-white transition-colors">Download</button></li>
+          </ul>
+        </div>
+
+        <div class="md:col-span-3 space-y-3">
+          <div class="text-xs font-mono uppercase tracking-[0.18em] text-[#5E6685]">Tech Stack</div>
+          <ul class="space-y-2 text-sm text-[#9BA4C4]">
+            <li>Rust &amp; Tauri v2</li>
+            <li>React 18 &amp; TypeScript</li>
+            <li>Python FastAPI &amp; WebSockets</li>
+            <li>libmpv, yt-dlp &amp; SQLite WAL</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Edge-to-Edge Velocity-Reactive Giant Kinetic Marquee -->
+      <div class="border-t border-white/[0.08] py-6 overflow-hidden select-none bg-black/60">
+        <div id="velocity-marquee-track" class="flex w-max will-change-transform text-5xl sm:text-7xl lg:text-8xl font-black tracking-[-0.04em] text-[#F4F6FF]/90">
+          <div class="marquee-segment flex items-center gap-10 px-5">
+            <span>ORBIT.</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>NAITIK JAIN</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>EVENT HORIZON</span><span style="color: var(--dynamic-accent);">—</span>
+          </div>
+          <div class="marquee-segment flex items-center gap-10 px-5" aria-hidden="true">
+            <span>ORBIT.</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>NAITIK JAIN</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>EVENT HORIZON</span><span style="color: var(--dynamic-accent);">—</span>
+          </div>
+          <div class="marquee-segment flex items-center gap-10 px-5" aria-hidden="true">
+            <span>ORBIT.</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>NAITIK JAIN</span><span style="color: var(--dynamic-accent);">—</span>
+            <span>EVENT HORIZON</span><span style="color: var(--dynamic-accent);">—</span>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <!-- ================================================================== -->
+  <!-- DOWNLOAD & ARCHITECTURE SETUP MODAL                                -->
+  <!-- ================================================================== -->
+  <div id="download-modal" onclick="closeDownloadModal()"
+       class="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md hidden items-center justify-center p-4">
+    <div onclick="event.stopPropagation()"
+         class="w-full max-w-xl bg-[#0B0E17] border border-white/15 rounded-[28px] shadow-[0_32px_90px_rgba(0,0,0,0.96)] p-6 sm:p-8 space-y-6 relative overflow-hidden">
+      <div class="pointer-events-none absolute -right-12 -top-12 w-52 h-52 rounded-full opacity-25"
+           style="background: radial-gradient(circle, var(--dynamic-accent), transparent 70%);"></div>
+
+      <div class="relative z-10 flex items-start justify-between gap-4">
+        <div>
+          <span class="text-[10px] font-mono uppercase tracking-[0.22em]" style="color: var(--dynamic-accent);">ORBIT • Event Horizon v0.1.0</span>
+          <h3 class="text-2xl sm:text-3xl font-black text-[#F4F6FF] mt-1">Build &amp; Run ORBIT Desktop</h3>
+          <p class="text-xs text-[#9BA4C4] mt-1">Created by Naitik Jain • Tauri v2 + Python FastAPI + libmpv</p>
+        </div>
+        <button type="button" onclick="closeDownloadModal()" aria-label="Close"
+                class="w-8 h-8 rounded-full bg-white/[0.08] hover:bg-white/[0.16] text-[#9BA4C4] hover:text-white flex items-center justify-center">×</button>
+      </div>
+
+      <div class="relative z-10 grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
+        <div class="p-3 rounded-2xl bg-[#111624] border border-white/[0.08]"><div class="text-[10px] font-mono text-[#9BA4C4]">OS</div><div class="text-xs font-bold text-[#F4F6FF] mt-0.5">Windows 10/11</div></div>
+        <div class="p-3 rounded-2xl bg-[#111624] border border-white/[0.08]"><div class="text-[10px] font-mono text-[#9BA4C4]">SHELL</div><div class="text-xs font-bold text-[#F4F6FF] mt-0.5">Rust + Tauri v2</div></div>
+        <div class="p-3 rounded-2xl bg-[#111624] border border-white/[0.08]"><div class="text-[10px] font-mono text-[#9BA4C4]">AUDIO</div><div class="text-xs font-bold text-[#F4F6FF] mt-0.5">libmpv-2.dll</div></div>
+        <div class="p-3 rounded-2xl bg-[#111624] border border-white/[0.08]"><div class="text-[10px] font-mono text-[#9BA4C4]">TRAY RAM</div><div class="text-xs font-bold text-[#34D399] mt-0.5">&lt;60MB</div></div>
+      </div>
+
+      <div class="relative z-10 space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <span class="font-semibold text-[#F4F6FF]">Quick-Start Commands</span>
+          <button type="button" onclick="copySetupCommands()"
+            class="px-3 py-1 rounded-full text-[11px] font-mono bg-white/[0.08] hover:bg-white/[0.16] text-[#F4F6FF] border border-white/10">Copy</button>
+        </div>
+        <pre id="setup-commands-text" class="p-4 rounded-2xl bg-[#05070E] border border-white/10 text-[11px] font-mono text-[#9BA4C4] overflow-x-auto leading-relaxed"># 1. Start Python FastAPI + WebSocket + libmpv bridge (127.0.0.1:8766)
+python -m metrolite run
+
+# 2. Launch ORBIT Tauri v2 Desktop App (or build installer)
+cd ui &amp;&amp; npm install &amp;&amp; npm run tauri dev
+# Production installer: npm run tauri build</pre>
+      </div>
+
+      <div class="relative z-10 flex items-center justify-between gap-3">
+        <span class="text-[11px] text-[#5E6685]">SQLite WAL DB &amp; bridge.json live in %LOCALAPPDATA%\metrolite</span>
+        <button type="button" onclick="closeDownloadModal()"
+          class="px-6 py-2.5 rounded-full text-xs font-bold bg-[#F4F6FF] text-[#020308] hover:opacity-90">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- MASTER SCRIPT: LENIS + SCROLL-SCRUB ENGINE + THREE.JS + INTERACTIVE -->
+  <!-- ================================================================== -->
+  <script>
+    /* =====================================================================
+     * 1. DATA MODELS (EXACT ORBIT EVENT HORIZON CODEBASE DATA)
+     * ===================================================================== */
+    const COSMIC_PALETTES = [
+      { id: 'aurora',   name: 'Aurora Teal',    hex: '#2DD4BF', rgb: '45, 212, 191',  secHex: '#6366F1', secRgb: '99, 102, 241' },
+      { id: 'cyan',     name: 'Event Cyan',     hex: '#4DE1FF', rgb: '77, 225, 255',  secHex: '#7C5CFF', secRgb: '124, 92, 255' },
+      { id: 'emerald',  name: 'Emerald Nebula', hex: '#34D399', rgb: '52, 211, 153',  secHex: '#4DE1FF', secRgb: '77, 225, 255' },
+      { id: 'amber',    name: 'Solar Amber',    hex: '#FFB347', rgb: '255, 179, 71',  secHex: '#FF4D8D', secRgb: '255, 77, 141' },
+      { id: 'violet',   name: 'Cosmic Violet',  hex: '#A78BFA', rgb: '167, 139, 250', secHex: '#4DE1FF', secRgb: '77, 225, 255' },
+    ];
+
+    const MOOD_PRESETS = [
+      { id: 'for_you',   label: 'For You' },
+      { id: 'trending',  label: 'Trending' },
+      { id: 'bollywood', label: 'Bollywood' },
+      { id: 'chill',     label: 'Chill & Lo-Fi' },
+      { id: 'focus',     label: 'Focus' },
+      { id: 'workout',   label: 'Workout' },
+      { id: 'latenight', label: 'Late Night' },
+    ];
+
+    const DEMO_TRACKS = [
+      {
+        id: 't1', title: 'Event Horizon', artist: 'Aether & Sol', album: 'Singularity Sessions',
+        duration: 228, plays: 18, mood: ['for_you', 'latenight', 'focus'], paletteIdx: 0, liked: true, offline: true, grad: ['#0F766E', '#1E1B4B'],
+        lyrics: [
+          { time: 0, text: 'Drifting past the quiet edge of light' },
+          { time: 9, text: 'Gravity bends the rhythm through the night' },
+          { time: 19, text: 'No static left, no noise to break the spell' },
+          { time: 29, text: 'Just basslines pulling softly where we fell' },
+          { time: 40, text: 'Enter the orbit, weightless in the dark' },
+          { time: 52, text: 'A ring of silver glowing like a spark' },
+          { time: 65, text: 'Where music never ends, and sound runs free' },
+        ],
+      },
+      {
+        id: 't2', title: 'Midnight Monsoon', artist: 'Rohan & Kalyani', album: 'Velvet Rain',
+        duration: 245, plays: 24, mood: ['for_you', 'bollywood', 'latenight'], paletteIdx: 3, liked: true, offline: true, grad: ['#B45309', '#831843'],
+        lyrics: [
+          { time: 0, text: 'City lights dissolve across the glass' },
+          { time: 10, text: 'Counting every raindrop as the hours pass' },
+          { time: 21, text: 'Soft guitar strings humming through the storm' },
+          { time: 33, text: 'Amber echoes keeping midnight warm' },
+          { time: 45, text: 'Stay a little longer on this quiet street' },
+          { time: 58, text: 'Every breath becomes a steady beat' },
+        ],
+      },
+      {
+        id: 't3', title: 'Emerald Drift', artist: 'Koda Nine', album: 'Deep Focus Vol. 4',
+        duration: 196, plays: 12, mood: ['for_you', 'chill', 'focus'], paletteIdx: 2, liked: false, offline: true, grad: ['#047857', '#0C4A6E'],
+        lyrics: [
+          { time: 0, text: 'Emerald currents floating under glass' },
+          { time: 10, text: 'Warm analog tape loops slowly pass' },
+          { time: 21, text: 'Keystrokes matching tempo in the room' },
+          { time: 33, text: 'Zero latency, pure crystal tone' },
+          { time: 46, text: 'Deep inside a flow state of our own' },
+        ],
+      },
+      {
+        id: 't4', title: 'Nebula Pulse', artist: 'Vespera', album: 'Hyperdrive EP',
+        duration: 212, plays: 15, mood: ['for_you', 'trending', 'workout'], paletteIdx: 4, liked: true, offline: false, grad: ['#5B21B6', '#0E7490'],
+        lyrics: [
+          { time: 0, text: 'Sub-bass climbing past the stratosphere' },
+          { time: 11, text: 'Violet lasers cutting crystal clear' },
+          { time: 22, text: 'Heartbeat synced at one-two-eight BPM' },
+          { time: 34, text: 'No buffer, no pause, we ignite the floor' },
+          { time: 47, text: 'Spinning faster than we ever spun before' },
+        ],
+      },
+      {
+        id: 't5', title: 'Cyber Velocity', artist: 'Kinetix & Lyra', album: 'Photon Run',
+        duration: 204, plays: 19, mood: ['for_you', 'trending', 'workout'], paletteIdx: 1, liked: false, offline: false, grad: ['#0284C7', '#4338CA'],
+        lyrics: [
+          { time: 0, text: 'Cyan horizons shimmering ahead' },
+          { time: 11, text: 'Engines locked in silent overdrive' },
+          { time: 23, text: 'Every frequency is coming alive' },
+          { time: 36, text: 'Gapless waves collide across the dark' },
+        ],
+      },
+      {
+        id: 't6', title: 'Starlight Reverie', artist: 'Mira & The Echoes', album: 'Lo-Fi Nebula',
+        duration: 234, plays: 9, mood: ['for_you', 'chill', 'bollywood'], paletteIdx: 3, liked: false, offline: false, grad: ['#BE185D', '#312E81'],
+        lyrics: [
+          { time: 0, text: 'Crimson dusk fades out into the void' },
+          { time: 11, text: 'Golden constellations shimmer on the screen' },
+          { time: 24, text: 'Softest vocals floating in between' },
+          { time: 38, text: 'Lost in orbit till the stars align' },
+        ],
+      },
+    ];
+
+    const EQ_PRESETS = [
+      { id: 'flat',   label: 'Flat',        desc: 'Original studio mix',          af: '"" (Bit-perfect passthrough)',                                                     gains: [0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'bass',   label: 'Deep Bass',   desc: 'Rich sub-bass punch',          af: 'equalizer=f=60:w=1.5:g=6,equalizer=f=150:w=1.5:g=3',                               gains: [6.0, 4.4, 2.8, 0.5, 0, 0, 0.4, 0.2] },
+      { id: 'vocal',  label: 'Vocal Boost', desc: 'Crisp lyrics & mids',          af: 'equalizer=f=1000:w=1.5:g=4,equalizer=f=3000:w=1.5:g=3,equalizer=f=120:w=1.5:g=-2', gains: [-1.6, -2.0, 0.6, 4.1, 3.6, 2.7, 0.8, 0] },
+      { id: 'night',  label: 'Late Night',  desc: 'Balanced low-volume dynamics', af: 'dynaudnorm=f=150:g=15,equalizer=f=80:w=1.5:g=2,equalizer=f=10000:w=1.5:g=-3',      gains: [2.2, 1.8, 0.8, 0.4, 0.2, -0.8, -2.4, -3.2] },
+      { id: 'studio', label: 'Studio',      desc: 'Subtle V-curve clarity',       af: 'equalizer=f=64:w=1.5:g=3,equalizer=f=1000:w=1.5:g=-1,equalizer=f=8000:w=1.5:g=3.5',gains: [3.2, 2.0, 0.2, -1.0, 0.4, 2.2, 3.5, 2.8] },
+    ];
+
+    const ARCH_LAYERS = [
+      {
+        num: '01', name: 'Tauri v2 Rust Shell', file: 'src-tauri/src/main.rs',
+        endpoints: ['get_bridge_config', 'set_always_on_top', 'set_size(376,152)'],
+        desc: 'Frameless transparent Windows desktop shell replacing heavy Electron. Reads %LOCALAPPDATA%\\metrolite\\bridge.json and morphs cleanly into the Dynamic Island mini-player.',
+      },
+      {
+        num: '02', name: 'React + TanStack Virtual UI', file: 'ui/src/App.tsx',
+        endpoints: ['colorExtract.ts (12×12)', 'StarfieldBg.tsx', 'BlackHoleTransition'],
+        desc: '60fps virtualized TrackList, dynamic artwork color extraction, GPU-composited Black Hole song-switch transitions, and automatic window-paused loop suspension.',
+      },
+      {
+        num: '03', name: 'FastAPI + WebSocket Bridge', file: 'bridge/server.py',
+        endpoints: ['WS /ws', 'GET /home/personalized', 'POST /player/eq', 'GET /lyrics/{video_id}'],
+        desc: 'Token-authenticated 127.0.0.1 bridge broadcasting 250ms playback_tick, queue_changed, download_progress, and library_changed events in real time.',
+      },
+      {
+        num: '04', name: 'libmpv + yt-dlp + SQLite WAL', file: 'audio/player.py • store/db.py',
+        endpoints: ['playlist_next (<50ms)', 'mutagen OggOpus/M4A', 'PRAGMA journal_mode=WAL'],
+        desc: 'Gapless C-level audio playback, sticky client fallback resolver, concurrent mutagen-tagged offline downloads, LRCLIB synced lyrics, and pynput media keys.',
+      },
+    ];
+
+    const GALLERY_SCREENS = [
+      // Col 1
+      { col: 0, title: 'Home Event Horizon',    badge: 'HomeView.tsx',      accent: '#2DD4BF', lines: ['Good evening • Personal Orbit', '7 Live Mood Filter Chips', 'Black Hole Backdrop'] },
+      { col: 0, title: 'Jump Back In',          badge: 'Speed Dial',        accent: '#4DE1FF', lines: ['Most Played + Recent Mix', '6 Instant Obsidian Capsules', 'Play Mix in One Click'] },
+      { col: 0, title: 'Singularity Lyrics',    badge: 'ImmersivePlayer',   accent: '#A78BFA', lines: ['LRCLIB + YTM Timestamps', '100ms Auto-Scroll Sync', '-0.5s / +0.5s Offset Nudge'] },
+      // Col 2
+      { col: 1, title: 'Queue & Autoplay Radio',badge: 'QueueDrawer.tsx',   accent: '#6366F1', lines: ['Pointer Drag-to-Reorder', 'Fisher-Yates Shuffle', 'Auto-Refill Watch Radio'] },
+      { col: 1, title: 'Offline Library',       badge: 'downloader.py',     accent: '#34D399', lines: ['Opus / M4A Local Priority', 'Embedded Mutagen Cover Art', 'Auto-Download Liked'] },
+      { col: 1, title: 'Most Played Charts',    badge: 'LibraryView.tsx',   accent: '#FFB347', lines: ['SQLite Play Count Ranking', 'Recently Played Toggle', 'Instant Shuffle Deck'] },
+      // Col 3
+      { col: 2, title: 'Dynamic Island Pill',   badge: 'DynamicIsland.tsx', accent: '#2DD4BF', lines: ['332×54 Compact Capsule', '356×128 Expanded Controls', 'Always-On-Top Windows'] },
+      { col: 2, title: 'Ctrl+K Instant Search', badge: 'SearchView.tsx',    accent: '#FF4D8D', lines: ['250ms Debounced Query', 'Songs • Albums • Artists', 'Hover URL Preload'] },
+      { col: 2, title: 'Cosmic OLED Settings',  badge: 'Modals.tsx',        accent: '#34D399', lines: ['Full 3D / Static / OLED', 'Windows RAM Trimming', 'Created by Naitik Jain'] },
+    ];
+
+    const state = {
+      cosmicMode: 'full',
+      paletteIdx: 0,
+      trackIdx: 0,
+      isPlaying: true,
+      currentTime: 24,
+      shuffle: false,
+      repeatMode: 'off',
+      appTab: 'home',
+      activeMood: 'for_you',
+      searchQuery: '',
+      sidebarExpanded: false,
+      syncOffset: 0,
+      activeLyricIdx: -1,
+      islandHovered: false,
+      islandPinned: false,
+      eqPresetId: 'flat',
+      autoDownloadLiked: true,
+      demoDownloading: false,
+      activeArchIdx: 0,
+    };
+
+    /* =====================================================================
+     * 2. LENIS-GRADE SMOOTH INERTIA SCROLL ENGINE + BULLETPROOF LERP FALLBACK
+     * ===================================================================== */
+    const scrollEngine = {
+      lenis: null,
+      rawY: 0,
+      smoothY: 0,
+      prevSmoothY: 0,
+      velocity: 0,
+      smoothVelocity: 0,
+      docHeight: 1,
+      globalProgress: 0,
+
+      init() {
+        this.measure();
+        window.addEventListener('resize', () => this.measure());
+
+        try {
+          if (typeof window.Lenis === 'function') {
+            this.lenis = new window.Lenis({
+              lerp: 0.08,
+              smoothWheel: true,
+              wheelMultiplier: 0.95,
+              touchMultiplier: 1.5,
+            });
+            this.lenis.on('scroll', (e) => {
+              this.rawY = e.animatedScroll ?? window.scrollY;
+            });
+          }
+        } catch {
+          this.lenis = null;
+        }
+
+        window.addEventListener('scroll', () => {
+          if (!this.lenis) this.rawY = window.scrollY;
+        }, { passive: true });
+      },
+
+      measure() {
+        this.docHeight = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      },
+
+      scrollTo(selector) {
+        const el = document.querySelector(selector);
+        if (!el) return;
+        if (this.lenis) {
+          this.lenis.scrollTo(el, { duration: 1.35, easing: (t) => 1 - Math.pow(1 - t, 4) });
+        } else {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      },
+
+      update(now) {
+        if (this.lenis) {
+          this.lenis.raf(now);
+          this.rawY = this.lenis.animatedScroll;
+          // Gently blend smoothY for rock-solid velocity & camera continuity
+          this.smoothY += (this.rawY - this.smoothY) * 0.28;
+        } else {
+          this.rawY = window.scrollY;
+          this.smoothY += (this.rawY - this.smoothY) * 0.08;
+        }
+
+        this.velocity = this.smoothY - this.prevSmoothY;
+        this.smoothVelocity += (this.velocity - this.smoothVelocity) * 0.12;
+        this.prevSmoothY = this.smoothY;
+        this.globalProgress = Math.min(1, Math.max(0, this.smoothY / this.docHeight));
+      },
+
+      /* Compute normalized 0..1 progress inside any sticky track */
+      trackProgress(el) {
+        if (!el) return 0;
+        const rect = el.getBoundingClientRect();
+        const total = Math.max(1, el.offsetHeight - window.innerHeight);
+        return Math.min(1, Math.max(0, -rect.top / total));
+      },
+
+      /* Compute viewport-crossing 0..1 progress for normal sections */
+      viewportProgress(el) {
+        if (!el) return 0;
+        const rect = el.getBoundingClientRect();
+        const span = window.innerHeight + rect.height;
+        return Math.min(1, Math.max(0, (window.innerHeight - rect.top) / span));
+      },
+    };
+
+    function scrollToSection(sel) { scrollEngine.scrollTo(sel); }
+    const clamp01 = (v) => Math.min(1, Math.max(0, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const smoothstep = (e0, e1, x) => {
+      const t = clamp01((x - e0) / (e1 - e0));
+      return t * t * (3 - 2 * t);
+    };
+
+    /* =====================================================================
+     * 3. THREE.JS 3D RELATIVISTIC BLACK HOLE WITH SPLINE CAMERA CHOREOGRAPHY
+     * ===================================================================== */
+    const threeEngine = {
+      active: false,
+      scene: null,
+      camera: null,
+      renderer: null,
+      bhGroup: null,
+      fresnelMat: null,
+      diskGeo: null,
+      diskBase: [],
+      arcGeoTop: null,
+      arcGeoBot: null,
+      arcBase: [],
+      photonRing: null,
+      absorbWave: null,
+      absorbProgress: 1,
+      starsPoints: null,
+      camPosCurve: null,
+      camLookCurve: null,
+      accentCol: null,
+      secCol: null,
+      targetAccent: null,
+      targetSec: null,
+      mouseX: 0,
+      mouseY: 0,
+      smoothMX: 0,
+      smoothMY: 0,
+
+      _glowTex() {
+        const c = document.createElement('canvas');
+        c.width = 64; c.height = 64;
+        const ctx = c.getContext('2d');
+        const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+        g.addColorStop(0.0, 'rgba(255,255,255,1)');
+        g.addColorStop(0.28, 'rgba(255,255,255,0.78)');
+        g.addColorStop(0.65, 'rgba(255,255,255,0.18)');
+        g.addColorStop(1.0, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 64, 64);
+        return new THREE.CanvasTexture(c);
+      },
+
+      init() {
+        const container = document.getElementById('cosmic-canvas-wrap');
+        if (!container || typeof THREE === 'undefined') return;
+        try {
+          const w = window.innerWidth, h = window.innerHeight;
+          const scene = new THREE.Scene();
+          const camera = new THREE.PerspectiveCamera(48, w / h, 0.1, 240);
+          const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+          renderer.setSize(w, h);
+          renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+          renderer.setClearColor(0x03040a, 1);
+          container.innerHTML = '';
+          container.appendChild(renderer.domElement);
+
+          this.scene = scene;
+          this.camera = camera;
+          this.renderer = renderer;
+
+          const pal = COSMIC_PALETTES[state.paletteIdx];
+          this.accentCol = new THREE.Color(pal.hex);
+          this.secCol = new THREE.Color(pal.secHex);
+          this.targetAccent = new THREE.Color(pal.hex);
+          this.targetSec = new THREE.Color(pal.secHex);
+
+          // 3D Spline Camera Choreography tied to page scroll (0% -> 100%)
+          this.camPosCurve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0.0,  2.2, 16.5),  // 0.00 Hero centered grand vista
+            new THREE.Vector3(4.8,  1.2, 14.0),  // 0.20 Glides right during Ad-Free Music
+            new THREE.Vector3(-4.2,-2.2, 13.5),  // 0.40 Sweeps low angle during Offline Downloads
+            new THREE.Vector3(0.8,  0.4,  8.6),  // 0.58 Dives close to photon ring during "Say bye to paid music"
+            new THREE.Vector3(-1.5, 4.2, 18.2),  // 0.80 Pulls back into wide orbital overview for 9-screen gallery
+            new THREE.Vector3(0.0,  1.6, 14.8),  // 1.00 Orbits serenely behind "Get the App." finale
+          ]);
+          this.camLookCurve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0.0,  0.4, -2.0),
+            new THREE.Vector3(1.5,  0.0, -2.0),
+            new THREE.Vector3(-1.2,-0.5, -2.0),
+            new THREE.Vector3(0.0,  0.0, -2.0),
+            new THREE.Vector3(0.0,  0.6, -2.0),
+            new THREE.Vector3(0.0,  0.2, -2.0),
+          ]);
+
+          const glowTex = this._glowTex();
+          const bhGroup = new THREE.Group();
+          bhGroup.position.set(0, 0.3, -2.0);
+          bhGroup.rotation.z = -0.22;
+          bhGroup.rotation.x = 0.26;
+          scene.add(bhGroup);
+          this.bhGroup = bhGroup;
+
+          // 1. Pitch-Black Event Horizon Sphere with Custom Fresnel Rim Glow Shader
+          this.fresnelMat = new THREE.ShaderMaterial({
+            uniforms: {
+              uAccent: { value: this.accentCol.clone() },
+              uSecondary: { value: this.secCol.clone() },
+            },
+            vertexShader: `
+              varying vec3 vNormal;
+              varying vec3 vViewPos;
+              void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+                vViewPos = -mvPos.xyz;
+                gl_Position = projectionMatrix * mvPos;
+              }
+            `,
+            fragmentShader: `
+              uniform vec3 uAccent;
+              uniform vec3 uSecondary;
+              varying vec3 vNormal;
+              varying vec3 vViewPos;
+              void main() {
+                float ndotv = max(0.0, dot(normalize(vNormal), normalize(vViewPos)));
+                float fresnel = pow(1.0 - ndotv, 4.2);
+                vec3 rimCol = mix(uSecondary, uAccent, smoothstep(0.15, 0.9, fresnel));
+                vec3 col = rimCol * fresnel * 1.45;
+                gl_FragColor = vec4(col, 1.0);
+              }
+            `,
+          });
+          bhGroup.add(new THREE.Mesh(new THREE.SphereGeometry(2.15, 56, 56), this.fresnelMat));
+
+          // 2. Incandescent Photon Ring
+          this.photonRing = new THREE.Mesh(
+            new THREE.TorusGeometry(2.26, 0.05, 20, 140),
+            new THREE.MeshBasicMaterial({ color: 0xf4f6ff, transparent: true, opacity: 0.88, blending: THREE.AdditiveBlending })
+          );
+          bhGroup.add(this.photonRing);
+
+          // 3. 3,600-Particle Keplerian Swirling Accretion Disk
+          const diskCount = 3600;
+          const dPos = new Float32Array(diskCount * 3);
+          const dCol = new Float32Array(diskCount * 3);
+          this.diskBase = [];
+          for (let i = 0; i < diskCount; i++) {
+            const t = Math.pow(Math.random(), 1.42);
+            const r = 2.42 + t * 6.4;
+            const ang = Math.random() * Math.PI * 2;
+            const y = (Math.random() - 0.5) * (0.11 + t * 0.42);
+            const spd = (0.58 / Math.pow(r * 0.35, 1.3)) * (0.85 + Math.random() * 0.3);
+            this.diskBase.push({ r, ang, y, spd, t });
+            dPos[i * 3] = Math.cos(ang) * r;
+            dPos[i * 3 + 1] = y;
+            dPos[i * 3 + 2] = Math.sin(ang) * r;
+            const c = this._diskCol(t, this.accentCol, this.secCol);
+            dCol[i * 3] = c.r; dCol[i * 3 + 1] = c.g; dCol[i * 3 + 2] = c.b;
+          }
+          this.diskGeo = new THREE.BufferGeometry();
+          this.diskGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+          this.diskGeo.setAttribute('color', new THREE.BufferAttribute(dCol, 3));
+          bhGroup.add(new THREE.Points(
+            this.diskGeo,
+            new THREE.PointsMaterial({ size: 0.22, map: glowTex, vertexColors: true, transparent: true, opacity: 0.92, blending: THREE.AdditiveBlending, depthWrite: false })
+          ));
+
+          // 4. Upper & Lower Gravitationally Lensed Photon Arcs
+          const arcCount = 720;
+          const topPos = new Float32Array(arcCount * 3);
+          const botPos = new Float32Array(arcCount * 3);
+          const arcCol = new Float32Array(arcCount * 3);
+          this.arcBase = [];
+          for (let i = 0; i < arcCount; i++) {
+            const t = Math.random();
+            const theta = Math.PI * (0.08 + t * 0.84);
+            const rad = 2.46 + Math.pow(Math.random(), 1.8) * 1.4;
+            const zj = (Math.random() - 0.5) * 0.22 - 0.3;
+            this.arcBase.push({ t });
+            topPos[i * 3] = Math.cos(theta) * rad;
+            topPos[i * 3 + 1] = Math.sin(theta) * rad * 0.94;
+            topPos[i * 3 + 2] = zj;
+            botPos[i * 3] = Math.cos(theta) * rad;
+            botPos[i * 3 + 1] = -Math.sin(theta) * rad * 0.86;
+            botPos[i * 3 + 2] = zj;
+            const c = this._diskCol(t * 0.5, this.accentCol, this.secCol);
+            arcCol[i * 3] = c.r; arcCol[i * 3 + 1] = c.g; arcCol[i * 3 + 2] = c.b;
+          }
+          const arcMat = new THREE.PointsMaterial({ size: 0.18, map: glowTex, vertexColors: true, transparent: true, opacity: 0.58, blending: THREE.AdditiveBlending, depthWrite: false });
+          this.arcGeoTop = new THREE.BufferGeometry();
+          this.arcGeoTop.setAttribute('position', new THREE.BufferAttribute(topPos, 3));
+          this.arcGeoTop.setAttribute('color', new THREE.BufferAttribute(arcCol.slice(), 3));
+          bhGroup.add(new THREE.Points(this.arcGeoTop, arcMat));
+
+          this.arcGeoBot = new THREE.BufferGeometry();
+          this.arcGeoBot.setAttribute('position', new THREE.BufferAttribute(botPos, 3));
+          this.arcGeoBot.setAttribute('color', new THREE.BufferAttribute(arcCol.slice(), 3));
+          bhGroup.add(new THREE.Points(this.arcGeoBot, arcMat));
+
+          // 5. Expanding 3D Shockwave Ring on Track Switch
+          this.absorbWave = new THREE.Mesh(
+            new THREE.TorusGeometry(2.38, 0.085, 16, 110),
+            new THREE.MeshBasicMaterial({ color: this.accentCol.clone(), transparent: true, opacity: 0, blending: THREE.AdditiveBlending })
+          );
+          bhGroup.add(this.absorbWave);
+
+          // 6. 2,200 Multi-Depth Parallax Stars
+          const starCount = 2200;
+          const sPos = new Float32Array(starCount * 3);
+          const sCol = new Float32Array(starCount * 3);
+          const tints = [new THREE.Color('#FFFFFF'), new THREE.Color('#E0F2FE'), new THREE.Color('#A7F3D0'), new THREE.Color('#C7D2FE')];
+          for (let i = 0; i < starCount; i++) {
+            sPos[i * 3] = (Math.random() - 0.5) * 115;
+            sPos[i * 3 + 1] = (Math.random() - 0.5) * 90;
+            sPos[i * 3 + 2] = -6 - Math.random() * 80;
+            const tn = tints[i % tints.length];
+            const b = 0.45 + Math.random() * 0.55;
+            sCol[i * 3] = tn.r * b; sCol[i * 3 + 1] = tn.g * b; sCol[i * 3 + 2] = tn.b * b;
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+          starGeo.setAttribute('color', new THREE.BufferAttribute(sCol, 3));
+          this.starsPoints = new THREE.Points(
+            starGeo,
+            new THREE.PointsMaterial({ size: 0.24, map: glowTex, vertexColors: true, transparent: true, opacity: 0.88, depthWrite: false })
+          );
+          scene.add(this.starsPoints);
+
+          this.active = true;
+          this.update(0.016, 0);
+
+          window.addEventListener('resize', () => {
+            if (!this.active) return;
+            this.camera.aspect = window.innerWidth / window.innerHeight;
+            this.camera.updateProjectionMatrix();
+            this.renderer.setSize(window.innerWidth, window.innerHeight);
+            if (state.cosmicMode === 'static') this.renderer.render(this.scene, this.camera);
+          });
+          window.addEventListener('mousemove', (e) => {
+            this.mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
+            this.mouseY = (e.clientY / window.innerHeight - 0.5) * 2;
+          }, { passive: true });
+        } catch {
+          this.active = false;
+        }
+      },
+
+      _diskCol(t, acc, sec) {
+        const c = new THREE.Color();
+        if (t < 0.2) c.setRGB(1, 0.98, 1).lerp(acc, t / 0.2);
+        else c.copy(acc).lerp(sec, Math.min(1, (t - 0.2) / 0.8));
+        return c;
+      },
+
+      setTargetPalette(hex, secHex) {
+        if (!this.active || typeof THREE === 'undefined') return;
+        this.targetAccent.set(hex);
+        this.targetSec.set(secHex);
+        if (state.cosmicMode === 'static') {
+          this.accentCol.copy(this.targetAccent);
+          this.secCol.copy(this.targetSec);
+          this._recolor();
+          this.renderer.render(this.scene, this.camera);
+        }
+      },
+
+      _recolor() {
+        this.fresnelMat.uniforms.uAccent.value.copy(this.accentCol);
+        this.fresnelMat.uniforms.uSecondary.value.copy(this.secCol);
+        this.absorbWave.material.color.copy(this.accentCol);
+        const dc = this.diskGeo.attributes.color;
+        for (let i = 0; i < this.diskBase.length; i++) {
+          const c = this._diskCol(this.diskBase[i].t, this.accentCol, this.secCol);
+          dc.setXYZ(i, c.r, c.g, c.b);
+        }
+        dc.needsUpdate = true;
+        const tc = this.arcGeoTop.attributes.color;
+        const bc = this.arcGeoBot.attributes.color;
+        for (let i = 0; i < this.arcBase.length; i++) {
+          const c = this._diskCol(this.arcBase[i].t * 0.5, this.accentCol, this.secCol);
+          tc.setXYZ(i, c.r, c.g, c.b);
+          bc.setXYZ(i, c.r, c.g, c.b);
+        }
+        tc.needsUpdate = true;
+        bc.needsUpdate = true;
+      },
+
+      triggerAbsorbPulse() { this.absorbProgress = 0; },
+
+      update(dt, globalP) {
+        if (!this.active || state.cosmicMode !== 'full') return;
+
+        // Lerp accent colors smoothly
+        const d = Math.abs(this.accentCol.r - this.targetAccent.r) + Math.abs(this.accentCol.g - this.targetAccent.g) + Math.abs(this.accentCol.b - this.targetAccent.b);
+        if (d > 0.004) {
+          this.accentCol.lerp(this.targetAccent, Math.min(1, dt * 4.5));
+          this.secCol.lerp(this.targetSec, Math.min(1, dt * 4.5));
+          this._recolor();
+        }
+
+        // Orbit Keplerian accretion particles (gently boosted by scrollVelocity)
+        const velBoost = 1 + Math.min(2.2, Math.abs(scrollEngine.smoothVelocity) * 0.025);
+        const playMult = (state.isPlaying ? 1.0 : 0.35) * velBoost;
+        const pos = this.diskGeo.attributes.position;
+        for (let i = 0; i < this.diskBase.length; i++) {
+          const item = this.diskBase[i];
+          item.ang += item.spd * dt * playMult;
+          pos.setXYZ(i, Math.cos(item.ang) * item.r, item.y, Math.sin(item.ang) * item.r);
+        }
+        pos.needsUpdate = true;
+
+        // Smooth mouse parallax + CatmullRom spline camera driven by global scroll progress
+        this.smoothMX += (this.mouseX - this.smoothMX) * 0.06;
+        this.smoothMY += (this.mouseY - this.smoothMY) * 0.06;
+
+        const pt = this.camPosCurve.getPointAt(clamp01(globalP));
+        const lk = this.camLookCurve.getPointAt(clamp01(globalP));
+        this.camera.position.set(pt.x + this.smoothMX * 1.15, pt.y - this.smoothMY * 0.75, pt.z);
+        this.camera.lookAt(lk);
+
+        this.bhGroup.rotation.y = globalP * 1.2 + this.smoothMX * 0.14;
+        this.starsPoints.rotation.y += dt * 0.009;
+        this.starsPoints.rotation.x = this.smoothMY * 0.035;
+
+        if (this.absorbProgress < 1) {
+          this.absorbProgress = Math.min(1, this.absorbProgress + dt * 1.4);
+          const ease = 1 - Math.pow(1 - this.absorbProgress, 3);
+          const sc = 1 + ease * 2.6;
+          this.absorbWave.scale.set(sc, sc, sc);
+          this.absorbWave.material.opacity = (1 - ease) * 0.92;
+        }
+
+        this.renderer.render(this.scene, this.camera);
+      },
+    };
+
+    /* =====================================================================
+     * 4. CONTINUOUS SCROLL-SCRUBBED 3D DOM CHOREOGRAPHY (FRAME-LOCKED)
+     * ===================================================================== */
+    const domScrub = {
+      els: {},
+      marqueeX: 0,
+      sectionIds: ['overview-track', 'features-track', 'offline-track', 'statement-track', 'architecture', 'reviews', 'gallery-track', 'download'],
+
+      init() {
+        this.els = {
+          progressBar: document.getElementById('scroll-progress-bar'),
+          overviewTrack: document.getElementById('overview-track'),
+          heroCopy: document.getElementById('hero-copy-block'),
+          heroRig: document.getElementById('hero-stage-rig'),
+          heroLeft: document.getElementById('hero-wing-left'),
+          heroRight: document.getElementById('hero-wing-right'),
+          heroCue: document.getElementById('hero-scroll-cue'),
+
+          featuresTrack: document.getElementById('features-track'),
+          adfreeCopy: document.getElementById('adfree-copy'),
+          adfreeConsole: document.getElementById('adfree-console-3d'),
+          adfreeBadges: [...document.querySelectorAll('[data-adfree-badge]')],
+
+          offlineTrack: document.getElementById('offline-track'),
+          offlineCopy: document.getElementById('offline-copy'),
+          offlineCards: [
+            document.getElementById('offline-card-1'),
+            document.getElementById('offline-card-2'),
+            document.getElementById('offline-card-3'),
+          ],
+
+          statementTrack: document.getElementById('statement-track'),
+          scrubWords: [...document.querySelectorAll('.scrub-word')],
+          floatPills: [...document.querySelectorAll('[data-float-pill]')],
+
+          bentoHeader: document.getElementById('bento-header'),
+          reviewsGrid: document.getElementById('reviews-grid'),
+          reviewCards: [...document.querySelectorAll('[data-review-card]')],
+
+          galleryTrack: document.getElementById('gallery-track'),
+          isoPlane: document.getElementById('iso-gallery-plane'),
+          isoCols: [
+            document.getElementById('iso-col-1'),
+            document.getElementById('iso-col-2'),
+            document.getElementById('iso-col-3'),
+          ],
+
+          marqueeTrack: document.getElementById('velocity-marquee-track'),
+          railButtons: [...document.querySelectorAll('[data-rail-target]')],
+        };
+      },
+
+      update(dt) {
+        const isDesktop = window.innerWidth >= 1024;
+
+        // 0. Top Orbital Scroll Progress Hairline
+        if (this.els.progressBar) {
+          this.els.progressBar.style.transform = `scaleX(${scrollEngine.globalProgress.toFixed(4)})`;
+        }
+
+        // 1. SECTION 1 — PINNED 240vh HERO CHOREOGRAPHY
+        if (this.els.overviewTrack && isDesktop) {
+          const p = scrollEngine.trackProgress(this.els.overviewTrack);
+
+          // 0.00 -> 0.35: Headline gently lifts & scales down slightly while 3D desktop rises upright
+          const riseT = smoothstep(0.0, 0.36, p);
+          if (this.els.heroCopy) {
+            const copyY = lerp(0, -24, riseT);
+            const copyS = lerp(1, 0.9, riseT);
+            const copyOp = lerp(1, 0.72, smoothstep(0.25, 0.75, p));
+            this.els.heroCopy.style.transform = `translate3d(0, ${copyY.toFixed(1)}px, 0) scale(${copyS.toFixed(3)})`;
+            this.els.heroCopy.style.opacity = copyOp.toFixed(3);
+          }
+
+          if (this.els.heroRig) {
+            const rx = lerp(22, 3, riseT);
+            const sc = lerp(0.86, 1.0, riseT);
+            const ty = lerp(24, -10, riseT);
+            this.els.heroRig.style.transform = `translate3d(0, ${ty.toFixed(1)}px, 0) rotateX(${rx.toFixed(2)}deg) scale(${sc.toFixed(3)})`;
+          }
+
+          // 0.35 -> 0.85: Left & Right 3D Wings fan smoothly out from behind center window
+          const fanT = smoothstep(0.32, 0.86, p);
+          if (this.els.heroLeft && this.els.heroRight) {
+            const spreadX = lerp(0, 515, fanT);
+            const zDepth = lerp(-130, -56, fanT);
+            const rotY = lerp(0, 19, fanT);
+            const rotX = lerp(8, 3, fanT);
+            const op = smoothstep(0.26, 0.52, p);
+            this.els.heroLeft.style.transform = `translate3d(${(-spreadX).toFixed(1)}px, 0, ${zDepth.toFixed(1)}px) rotateY(${rotY.toFixed(2)}deg) rotateX(${rotX.toFixed(2)}deg) scale(${lerp(0.84, 0.96, fanT).toFixed(3)})`;
+            this.els.heroLeft.style.opacity = op.toFixed(3);
+
+            this.els.heroRight.style.transform = `translate3d(${spreadX.toFixed(1)}px, 0, ${zDepth.toFixed(1)}px) rotateY(${(-rotY).toFixed(2)}deg) rotateX(${rotX.toFixed(2)}deg) scale(${lerp(0.84, 0.96, fanT).toFixed(3)})`;
+            this.els.heroRight.style.opacity = op.toFixed(3);
+          }
+
+          if (this.els.heroCue) {
+            this.els.heroCue.style.opacity = (1 - smoothstep(0.02, 0.2, p)).toFixed(3);
+          }
+        } else if (this.els.heroRig) {
+          this.els.heroRig.style.transform = '';
+          if (this.els.heroCopy) { this.els.heroCopy.style.transform = ''; this.els.heroCopy.style.opacity = '1'; }
+        }
+
+        // 2. SECTION 2 — PINNED 190vh AD-FREE MUSIC + 3D ROTATING LIBMPV CONSOLE
+        if (this.els.featuresTrack && isDesktop) {
+          const p = scrollEngine.trackProgress(this.els.featuresTrack);
+          if (this.els.adfreeConsole) {
+            const ry = lerp(-24, 10, p);
+            const rx = lerp(10, -2, p);
+            const tz = lerp(-40, 22, smoothstep(0, 0.65, p));
+            this.els.adfreeConsole.style.transform = `rotateY(${ry.toFixed(2)}deg) rotateX(${rx.toFixed(2)}deg) translateZ(${tz.toFixed(1)}px)`;
+          }
+          if (this.els.adfreeCopy) {
+            this.els.adfreeCopy.style.transform = `translate3d(0, ${lerp(24, -18, p).toFixed(1)}px, 0)`;
+          }
+          this.els.adfreeBadges.forEach((b, i) => {
+            const offset = lerp(26 + i * 8, -(12 + i * 5), p);
+            b.style.transform = `translate3d(0, ${offset.toFixed(1)}px, 0)`;
+          });
+        } else if (this.els.adfreeConsole) {
+          this.els.adfreeConsole.style.transform = '';
+        }
+
+        // 3. SECTION 3 — PINNED 190vh OFFLINE DOWNLOADS 3D UNSTACKING PIPELINE
+        if (this.els.offlineTrack && isDesktop) {
+          const p = scrollEngine.trackProgress(this.els.offlineTrack);
+          const unstack = smoothstep(0.05, 0.85, p);
+          const [c1, c2, c3] = this.els.offlineCards;
+          if (c1) {
+            c1.style.transform = `translate3d(0, ${lerp(56, 0, unstack).toFixed(1)}px, ${lerp(-20, 24, unstack).toFixed(1)}px) rotateX(${lerp(12, 0, unstack).toFixed(2)}deg)`;
+          }
+          if (c2) {
+            c2.style.transform = `translate3d(${lerp(14, 0, unstack).toFixed(1)}px, ${lerp(-18, 0, unstack).toFixed(1)}px, ${lerp(-65, 10, unstack).toFixed(1)}px) rotateX(${lerp(14, 0, unstack).toFixed(2)}deg) scale(${lerp(0.94, 1, unstack).toFixed(3)})`;
+          }
+          if (c3) {
+            c3.style.transform = `translate3d(${lerp(26, 0, unstack).toFixed(1)}px, ${lerp(-92, 0, unstack).toFixed(1)}px, ${lerp(-110, 0, unstack).toFixed(1)}px) rotateX(${lerp(16, 0, unstack).toFixed(2)}deg) scale(${lerp(0.88, 1, unstack).toFixed(3)})`;
+          }
+          if (this.els.offlineCopy) {
+            this.els.offlineCopy.style.transform = `translate3d(0, ${lerp(26, -16, p).toFixed(1)}px, 0)`;
+          }
+        } else {
+          this.els.offlineCards.forEach((c) => { if (c) c.style.transform = ''; });
+        }
+
+        // 4. SECTION 4 — KINETIC SCROLL-SCRUBBED STATEMENT ("Say bye to paid music")
+        if (this.els.statementTrack) {
+          const p = scrollEngine.trackProgress(this.els.statementTrack);
+          const totalW = this.els.scrubWords.length;
+          this.els.scrubWords.forEach((word, idx) => {
+            const start = idx * 0.13;
+            const end = start + 0.24;
+            const wP = smoothstep(start, end, p);
+            const op = lerp(0.14, 1.0, wP);
+            const blur = lerp(6, 0, wP);
+            const ty = lerp(36, 0, wP);
+            word.style.opacity = op.toFixed(3);
+            word.style.filter = `blur(${blur.toFixed(2)}px)`;
+            word.style.transform = `translate3d(0, ${ty.toFixed(1)}px, 0)`;
+          });
+
+          this.els.floatPills.forEach((pill, i) => {
+            const dir = i % 2 === 0 ? 1 : -1;
+            const depth = 18 + (i % 3) * 14;
+            const py = lerp(depth, -depth, p);
+            const px = lerp(-12 * dir, 12 * dir, p);
+            const op = smoothstep(0.18 + i * 0.05, 0.45 + i * 0.05, p);
+            pill.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0)`;
+            pill.style.opacity = lerp(0.25, 1, op).toFixed(3);
+          });
+        }
+
+        // 5. SECTION 5 & 6 — BENTO HEADER & STAGGERED SCROLL-PARALLAX REVIEWS
+        if (this.els.bentoHeader) {
+          const vp = scrollEngine.viewportProgress(this.els.bentoHeader);
+          const t = smoothstep(0.05, 0.45, vp);
+          this.els.bentoHeader.style.transform = `translate3d(0, ${lerp(36, 0, t).toFixed(1)}px, 0)`;
+          this.els.bentoHeader.style.opacity = lerp(0.2, 1, t).toFixed(3);
+        }
+
+        if (this.els.reviewsGrid && isDesktop) {
+          const vp = scrollEngine.viewportProgress(this.els.reviewsGrid);
+          const align = smoothstep(0.1, 0.55, vp);
+          const offsets = [54, 18, 76];
+          this.els.reviewCards.forEach((card, i) => {
+            if (card.matches(':hover')) return;
+            const y = lerp(offsets[i], 0, align);
+            card.style.transform = `translate3d(0, ${y.toFixed(1)}px, 0)`;
+          });
+        }
+
+        // 6. SECTION 7 — PINNED 220vh 3D ISOMETRIC 9-SCREEN GALLERY WALL
+        if (this.els.galleryTrack && this.els.isoPlane) {
+          const p = scrollEngine.trackProgress(this.els.galleryTrack);
+          const rx = lerp(30, 18, p);
+          const rz = lerp(-15, -7, p);
+          const sc = lerp(0.94, 1.05, p);
+          this.els.isoPlane.style.transform = `rotateX(${rx.toFixed(2)}deg) rotateZ(${rz.toFixed(2)}deg) scale(${sc.toFixed(3)})`;
+
+          const [col1, col2, col3] = this.els.isoCols;
+          if (col1) col1.style.transform = `translate3d(0, ${lerp(130, -140, p).toFixed(1)}px, 0)`;
+          if (col2) col2.style.transform = `translate3d(0, ${lerp(-130, 140, p).toFixed(1)}px, 28px)`;
+          if (col3) col3.style.transform = `translate3d(0, ${lerp(150, -125, p).toFixed(1)}px, 0)`;
+        }
+
+        // 7. SECTION 9 — VELOCITY-REACTIVE GIANT FOOTER MARQUEE
+        if (this.els.marqueeTrack) {
+          const seg = this.els.marqueeTrack.querySelector('.marquee-segment');
+          if (seg) {
+            const segW = seg.offsetWidth || 1000;
+            const baseSpeed = 62; // px/sec
+            const velBoost = Math.abs(scrollEngine.smoothVelocity) * 26;
+            const dir = scrollEngine.smoothVelocity < -0.5 ? -1 : 1;
+            this.marqueeX -= (baseSpeed + velBoost) * dt * dir;
+            if (this.marqueeX <= -segW) this.marqueeX += segW;
+            if (this.marqueeX > 0) this.marqueeX -= segW;
+            this.els.marqueeTrack.style.transform = `translate3d(${this.marqueeX.toFixed(1)}px, 0, 0)`;
+          }
+        }
+
+        // 8. Active Right-Rail Section Indicator Sync
+        let activeId = this.sectionIds[0];
+        const mid = window.innerHeight * 0.45;
+        for (const id of this.sectionIds) {
+          const el = document.getElementById(id);
+          if (el && el.getBoundingClientRect().top <= mid) activeId = id;
+        }
+        this.els.railButtons.forEach((btn) => {
+          const dot = btn.querySelector('.rail-dot');
+          if (dot) dot.classList.toggle('active', btn.getAttribute('data-rail-target') === activeId);
+        });
+      },
+    };
+
+    /* =====================================================================
+     * 5. INTERACTIVE ORBIT DESKTOP ENGINE (BLACK HOLE SWITCH, PALETTES, EQ, LYRICS)
+     * ===================================================================== */
+    function formatTime(secs) {
+      const s = Math.max(0, Math.floor(secs || 0));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return `${m}:${r < 10 ? '0' : ''}${r}`;
+    }
+
+    function showToast(msg) {
+      const wrap = document.getElementById('toast-container');
+      if (!wrap) return;
+      const el = document.createElement('div');
+      el.className = 'pointer-events-auto px-4 py-2.5 rounded-2xl bg-[#0B0E17] border text-xs font-medium text-[#F4F6FF] shadow-2xl flex items-center gap-2 transition-all duration-300 translate-y-2 opacity-0';
+      el.style.borderColor = 'rgba(var(--dynamic-accent-rgb), 0.5)';
+      el.innerHTML = `<span class="w-2 h-2 rounded-full flex-none" style="background: var(--dynamic-accent);"></span><span>${msg}</span>`;
+      wrap.appendChild(el);
+      requestAnimationFrame(() => el.classList.remove('translate-y-2', 'opacity-0'));
+      setTimeout(() => {
+        el.classList.add('translate-y-2', 'opacity-0');
+        setTimeout(() => el.remove(), 300);
+      }, 2400);
+    }
+
+    function buildTrackArt(track, size = 'sm') {
+      const [c1, c2] = track.grad;
+      const g = size === 'md' ? 28 : 16;
+      return `
+        <div class="w-full h-full flex items-center justify-center relative overflow-hidden"
+             style="background: radial-gradient(circle at 30% 25%, ${c1} 0%, ${c2} 72%, #020308 100%);">
+          <div class="absolute inset-0 opacity-30" style="background: conic-gradient(from 40deg, transparent, rgba(255,255,255,0.4), transparent 55%);"></div>
+          <svg width="${g}" height="${g}" viewBox="0 0 64 64" fill="none" class="relative z-10 opacity-90">
+            <circle cx="32" cy="32" r="22" stroke="rgba(255,255,255,0.28)" stroke-width="1.5"/>
+            <ellipse cx="32" cy="32" rx="26" ry="9" transform="rotate(-20 32 32)" stroke="rgba(255,255,255,0.8)" stroke-width="1.8"/>
+            <circle cx="32" cy="32" r="9" fill="#03040A" stroke="rgba(255,255,255,0.72)" stroke-width="1.4"/>
+          </svg>
+        </div>
+      `;
+    }
+
+    function applyDynamicPalette(idx, silent = false) {
+      state.paletteIdx = idx;
+      const p = COSMIC_PALETTES[idx];
+      const root = document.documentElement;
+      root.style.setProperty('--dynamic-accent', p.hex);
+      root.style.setProperty('--dynamic-accent-rgb', p.rgb);
+      root.style.setProperty('--dynamic-secondary', p.secHex);
+      root.style.setProperty('--dynamic-secondary-rgb', p.secRgb);
+      threeEngine.setTargetPalette(p.hex, p.secHex);
+      renderPalettes();
+      const rd = document.getElementById('active-accent-readout');
+      if (rd) rd.textContent = `${p.hex} • ${p.name}`;
+      if (!silent) showToast(`Dynamic Accent: ${p.name}`);
+    }
+
+    function renderPalettes() {
+      const navDots = document.getElementById('nav-accent-dots');
+      const swatches = document.getElementById('bento-palette-swatches');
+      if (navDots) {
+        navDots.innerHTML = COSMIC_PALETTES.map((p, idx) => `
+          <button type="button" onclick="applyDynamicPalette(${idx})" title="${p.name}"
+            class="w-3.5 h-3.5 rounded-full transition-transform ${idx === state.paletteIdx ? 'scale-125 ring-2 ring-white/85' : 'opacity-70 hover:opacity-100 hover:scale-110'}"
+            style="background: ${p.hex}; box-shadow: 0 0 8px ${p.hex};"></button>
+        `).join('');
+      }
+      if (swatches) {
+        swatches.innerHTML = COSMIC_PALETTES.map((p, idx) => `
+          <button type="button" onclick="applyDynamicPalette(${idx})" title="${p.name}"
+            class="aspect-square rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 ${idx === state.paletteIdx ? 'scale-105 border-white ring-1 ring-white/60' : 'border-white/10 opacity-80 hover:opacity-100'}"
+            style="background: radial-gradient(circle at 30% 25%, ${p.hex} 0%, ${p.secHex} 75%, #03040A 100%); box-shadow: ${idx === state.paletteIdx ? `0 0 22px ${p.hex}66` : 'none'};">
+            <span class="w-3 h-3 rounded-full bg-black/80 border border-white/50"></span>
+          </button>
+        `).join('');
+      }
+    }
+
+    function setCosmicMode(mode) {
+      state.cosmicMode = mode;
+      document.documentElement.setAttribute('data-effects', mode);
+      document.querySelectorAll('.cosmic-mode-btn').forEach((btn) => {
+        const act = btn.getAttribute('data-cosmic-btn') === mode;
+        btn.className = act
+          ? 'cosmic-mode-btn px-2.5 py-1 rounded-full bg-[#F4F6FF] text-[#020308] font-semibold transition-colors'
+          : 'cosmic-mode-btn px-2.5 py-1 rounded-full text-[#9BA4C4] hover:text-white transition-colors';
+      });
+      if (mode === 'static' && threeEngine.active) threeEngine.renderer.render(threeEngine.scene, threeEngine.camera);
+      showToast({ full: 'Full 3D Volumetric Mode', static: 'Static Stars Mode', oled: 'Minimal OLED (#000000)' }[mode]);
+    }
+
+    function cycleCosmicMode() {
+      const order = ['full', 'static', 'oled'];
+      setCosmicMode(order[(order.indexOf(state.cosmicMode) + 1) % order.length]);
+    }
+
+    function fireBlackHoleTransition(outgoingTrack) {
+      const layer = document.getElementById('blackhole-suck-layer');
+      if (layer && outgoingTrack) {
+        const card = document.createElement('div');
+        card.className = 'absolute bottom-14 left-4 eh-suck-card';
+        card.innerHTML = `
+          <div class="flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-[#0C101C] border shadow-2xl w-48"
+               style="border-color: rgba(var(--dynamic-accent-rgb), 0.65); box-shadow: 0 0 28px rgba(var(--dynamic-accent-rgb), 0.35);">
+            <div class="w-8 h-8 rounded-full overflow-hidden border border-white/20 flex-none">${buildTrackArt(outgoingTrack, 'sm')}</div>
+            <div class="min-w-0 flex-1">
+              <div class="text-xs font-semibold text-[#F4F6FF] truncate">${outgoingTrack.title}</div>
+              <div class="text-[10px] text-[#9BA4C4] truncate">${outgoingTrack.artist}</div>
+            </div>
+          </div>
+        `;
+        layer.appendChild(card);
+        setTimeout(() => card.remove(), 1080);
+      }
+
+      const pbCard = document.getElementById('playerbar-track-card');
+      if (pbCard) {
+        pbCard.classList.remove('eh-rise-card');
+        void pbCard.offsetWidth;
+        pbCard.classList.add('eh-rise-card');
+      }
+
+      setTimeout(() => {
+        threeEngine.triggerAbsorbPulse();
+        const ring = document.getElementById('mockup-absorb-ring');
+        if (ring) {
+          ring.classList.remove('hidden', 'eh-bh-absorb');
+          void ring.offsetWidth;
+          ring.classList.add('eh-bh-absorb');
+          setTimeout(() => ring.classList.add('hidden'), 800);
+        }
+      }, 450);
+    }
+
+    function selectTrack(idx, animate = true) {
+      const prev = DEMO_TRACKS[state.trackIdx];
+      state.trackIdx = ((idx % DEMO_TRACKS.length) + DEMO_TRACKS.length) % DEMO_TRACKS.length;
+      const next = DEMO_TRACKS[state.trackIdx];
+      state.currentTime = 0;
+      state.isPlaying = true;
+      state.activeLyricIdx = -1;
+      if (animate && prev && prev.id !== next.id) fireBlackHoleTransition(prev);
+      applyDynamicPalette(next.paletteIdx, true);
+      syncAllUI();
+    }
+
+    function triggerNextTrack() {
+      if (state.shuffle) {
+        let r = Math.floor(Math.random() * DEMO_TRACKS.length);
+        if (r === state.trackIdx) r = (r + 1) % DEMO_TRACKS.length;
+        selectTrack(r, true);
+      } else {
+        selectTrack(state.trackIdx + 1, true);
+      }
+    }
+
+    function triggerPrevTrack() {
+      if (state.currentTime > 5) { state.currentTime = 0; syncTimeUI(); }
+      else selectTrack(state.trackIdx - 1, true);
+    }
+
+    function togglePlayback() { state.isPlaying = !state.isPlaying; syncPlayPause(); }
+
+    function toggleCurrentLike() {
+      const t = DEMO_TRACKS[state.trackIdx];
+      t.liked = !t.liked;
+      if (t.liked && state.autoDownloadLiked && !t.offline) {
+        t.offline = true;
+        showToast(`Liked & Auto-Downloaded "${t.title}" (.opus)`);
+      } else {
+        showToast(t.liked ? `Liked "${t.title}"` : `Removed "${t.title}" from Liked`);
+      }
+      syncAllUI();
+    }
+
+    function toggleShuffle() {
+      state.shuffle = !state.shuffle;
+      document.getElementById('pb-shuffle-btn').style.color = state.shuffle ? 'var(--dynamic-accent)' : '';
+      showToast(state.shuffle ? 'Shuffle: ON' : 'Shuffle: OFF');
+    }
+
+    function cycleRepeat() {
+      const modes = ['off', 'all', 'one'];
+      state.repeatMode = modes[(modes.indexOf(state.repeatMode) + 1) % modes.length];
+      document.getElementById('pb-repeat-btn').style.color = state.repeatMode !== 'off' ? 'var(--dynamic-accent)' : '';
+      showToast(`Repeat: ${state.repeatMode.toUpperCase()}`);
+    }
+
+    function switchAppTab(tab) {
+      state.appTab = tab;
+      document.querySelectorAll('.app-nav-btn').forEach((btn) => {
+        const act = btn.getAttribute('data-app-tab') === tab;
+        const ind = btn.querySelector('.nav-indicator');
+        btn.classList.toggle('bg-white/[0.11]', act);
+        btn.classList.toggle('text-[#F4F6FF]', act);
+        btn.classList.toggle('text-[#9BA4C4]', !act);
+        if (act && !ind) {
+          const sp = document.createElement('span');
+          sp.className = 'nav-indicator w-[3px] h-4 rounded-full absolute left-0.5';
+          sp.style.background = 'var(--dynamic-accent)';
+          sp.style.boxShadow = '0 0 8px var(--dynamic-accent)';
+          btn.prepend(sp);
+        } else if (!act && ind) ind.remove();
+      });
+      renderAppMainView();
+    }
+
+    function selectMood(id) { state.activeMood = id; renderAppMainView(); }
+
+    function renderTrackListMarkup(tracks) {
+      if (!tracks.length) return `<div class="py-10 text-center text-xs text-[#9BA4C4]">No matching tracks.</div>`;
+      return `<div class="divide-y divide-white/[0.05] rounded-2xl bg-[#090C14]/90 border border-white/[0.07] overflow-hidden">
+        ${tracks.map((t, i) => `
+          <div onclick="selectTrack(${t.origIdx}, true)" class="flex items-center gap-2.5 px-3 py-2 hover:bg-[#141B2D] cursor-pointer ${t.origIdx === state.trackIdx ? 'bg-[#141D2E]' : ''}">
+            <span class="w-4 text-[10px] font-mono text-[#5E6685]">${i + 1}</span>
+            <div class="w-8 h-8 rounded-lg overflow-hidden border border-white/10 flex-none">${buildTrackArt(t, 'sm')}</div>
+            <div class="min-w-0 flex-1">
+              <div class="text-xs font-semibold truncate" style="${t.origIdx === state.trackIdx ? 'color: var(--dynamic-accent);' : 'color: #F4F6FF;'}">${t.title}</div>
+              <div class="text-[10px] text-[#9BA4C4] truncate">${t.artist}</div>
+            </div>
+            <span class="text-[10px] font-mono text-[#9BA4C4]">${t.plays}x</span>
+            <span class="text-[10px] font-mono text-[#5E6685] w-8 text-right">${formatTime(t.duration)}</span>
+          </div>
+        `).join('')}
+      </div>`;
+    }
+
+    function renderAppMainView() {
+      const box = document.getElementById('app-main-view');
+      if (!box) return;
+      const indexed = DEMO_TRACKS.map((t, i) => ({ ...t, origIdx: i }));
+      const hr = new Date().getHours();
+      const greet = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
+
+      if (state.appTab === 'home') {
+        const list = state.activeMood === 'for_you' ? indexed : indexed.filter((t) => t.mood.includes(state.activeMood));
+        const shown = list.length ? list : indexed;
+        box.innerHTML = `
+          <div class="space-y-3">
+            <div class="space-y-2 max-w-md">
+              <div class="flex items-center gap-2">
+                <span class="text-[9px] font-bold uppercase tracking-[0.22em] text-[#9BA4C4]">Personal Orbit</span>
+                <span class="text-[9px] font-mono px-2 py-0.5 rounded-full bg-[#111624] border border-white/10 text-[#34D399]">● WS Connected</span>
+              </div>
+              <h2 class="text-xl sm:text-2xl font-bold tracking-tight text-[#F4F6FF]">${greet}</h2>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                ${MOOD_PRESETS.map((m) => `
+                  <button type="button" onclick="selectMood('${m.id}')"
+                    class="px-2.5 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${m.id === state.activeMood ? 'bg-[#F4F6FF] text-[#020308] border-[#F4F6FF] font-semibold' : 'bg-[#0C101B] text-[#9BA4C4] border-white/10 hover:text-white'}">${m.label}</button>
+                `).join('')}
+              </div>
+            </div>
+            <div class="space-y-1.5">
+              <div class="text-[9px] font-bold uppercase tracking-[0.2em] text-[#9BA4C4]">Jump Back In • Click to Switch</div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                ${shown.map((t) => `
+                  <div onclick="selectTrack(${t.origIdx}, true)"
+                       class="group eh-solid-card flex items-center gap-2 pr-2 rounded-xl overflow-hidden cursor-pointer"
+                       style="${t.origIdx === state.trackIdx ? 'border-color: rgba(var(--dynamic-accent-rgb), 0.72); background: #141D2E;' : ''}">
+                    <div class="w-11 h-11 flex-none relative overflow-hidden">${buildTrackArt(t, 'sm')}</div>
+                    <div class="min-w-0 flex-1 py-1">
+                      <div class="text-[11px] font-semibold truncate" style="${t.origIdx === state.trackIdx ? 'color: var(--dynamic-accent);' : 'color: #F4F6FF;'}">${t.title}</div>
+                      <div class="text-[9px] text-[#9BA4C4] truncate">${t.artist}</div>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+        `;
+      } else if (state.appTab === 'search') {
+        const q = state.searchQuery.trim().toLowerCase();
+        const m = q ? indexed.filter((t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q)) : indexed;
+        box.innerHTML = `<div class="space-y-2"><div class="text-xs font-bold text-[#F4F6FF]">Search (${m.length})</div>${renderTrackListMarkup(m)}</div>`;
+      } else if (state.appTab === 'liked') {
+        box.innerHTML = `<div class="space-y-2"><div class="text-xs font-bold text-[#FF4D8D]">Liked Songs</div>${renderTrackListMarkup(indexed.filter((t) => t.liked))}</div>`;
+      } else if (state.appTab === 'offline') {
+        box.innerHTML = `<div class="space-y-2"><div class="text-xs font-bold text-[#34D399]">Offline Downloads</div>${renderTrackListMarkup(indexed.filter((t) => t.offline))}</div>`;
+      } else {
+        box.innerHTML = `<div class="space-y-2"><div class="text-xs font-bold text-[#F4F6FF]">Most Played History</div>${renderTrackListMarkup([...indexed].sort((a, b) => b.plays - a.plays))}</div>`;
+      }
+    }
+
+    function renderLyrics() {
+      const trk = DEMO_TRACKS[state.trackIdx];
+      const html = trk.lyrics.map((l, i) => `
+        <button type="button" onclick="seekToLyric(${l.time})"
+          class="synced-lyric-item block w-full text-left rounded-xl px-2.5 py-1.5 transition-all duration-200 text-xs sm:text-sm font-medium text-[#9BA4C4]/75 hover:text-white">
+          <span class="font-mono text-[9px] text-[#5E6685] mr-2 tabular-nums">${formatTime(l.time)}</span>${l.text}
+        </button>
+      `).join('');
+      ['bento-lyrics-scroll', 'wing-left-lyrics'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = html;
+      });
+      state.activeLyricIdx = -1;
+      updateActiveLyric(true);
+    }
+
+    function seekToLyric(sec) {
+      state.currentTime = Math.max(0, sec - state.syncOffset);
+      syncTimeUI();
+      updateActiveLyric(true);
+    }
+
+    function nudgeSyncOffset(d) {
+      state.syncOffset = Number((state.syncOffset + d).toFixed(1));
+      const str = `${state.syncOffset >= 0 ? '+' : ''}${state.syncOffset.toFixed(1)}s`;
+      document.querySelectorAll('.sync-offset-readout').forEach((el) => (el.textContent = str));
+      updateActiveLyric(true);
+    }
+
+    function updateActiveLyric(force) {
+      const trk = DEMO_TRACKS[state.trackIdx];
+      const eff = state.currentTime + state.syncOffset;
+      let idx = 0;
+      for (let i = 0; i < trk.lyrics.length; i++) {
+        if (trk.lyrics[i].time <= eff + 0.15) idx = i;
+        else break;
+      }
+      if (idx === state.activeLyricIdx && !force) return;
+      state.activeLyricIdx = idx;
+      ['bento-lyrics-scroll', 'wing-left-lyrics'].forEach((boxId) => {
+        const box = document.getElementById(boxId);
+        if (!box) return;
+        box.querySelectorAll('.synced-lyric-item').forEach((btn, i) => {
+          if (i === idx) {
+            btn.className = 'synced-lyric-item block w-full text-left rounded-xl px-2.5 py-1.5 transition-all duration-200 text-sm font-bold text-white bg-white/[0.06]';
+            btn.style.textShadow = '0 0 18px rgba(var(--dynamic-accent-rgb), 0.65)';
+            box.scrollTo({ top: Math.max(0, btn.offsetTop - box.clientHeight / 2 + btn.clientHeight / 2), behavior: 'smooth' });
+          } else if (i < idx) {
+            btn.className = 'synced-lyric-item block w-full text-left rounded-xl px-2.5 py-1.5 transition-all duration-200 text-xs font-medium text-[#5E6685]';
+            btn.style.textShadow = 'none';
+          } else {
+            btn.className = 'synced-lyric-item block w-full text-left rounded-xl px-2.5 py-1.5 transition-all duration-200 text-xs font-medium text-[#9BA4C4]/80 hover:text-white';
+            btn.style.textShadow = 'none';
+          }
+        });
+      });
+    }
+
+    function updateIslandAppearance() {
+      const isl = document.getElementById('live-dynamic-island');
+      const body = document.getElementById('island-expanded-body');
+      const eq = document.getElementById('island-eq-bars');
+      const cp = document.getElementById('island-compact-play');
+      if (!isl) return;
+      const exp = state.islandHovered || state.islandPinned;
+      isl.style.width = exp ? '356px' : '332px';
+      isl.style.height = exp ? '128px' : '54px';
+      isl.style.borderRadius = exp ? '28px' : '999px';
+      if (body) { body.style.opacity = exp ? '1' : '0'; body.style.pointerEvents = exp ? 'auto' : 'none'; }
+      if (eq) eq.style.display = exp ? 'none' : 'flex';
+      if (cp) cp.style.display = exp ? 'none' : 'flex';
+    }
+    function setIslandHover(v) { state.islandHovered = v; updateIslandAppearance(); }
+    function toggleIslandTap() { if (window.innerWidth < 768) toggleIslandPin(); }
+    function toggleIslandPin() {
+      state.islandPinned = !state.islandPinned;
+      document.getElementById('bento-island-pin').textContent = state.islandPinned ? 'Unpin Compact' : 'Pin Expanded';
+      updateIslandAppearance();
+    }
+
+    function toggleAutoDownloadLiked() {
+      state.autoDownloadLiked = !state.autoDownloadLiked;
+      const btn = document.getElementById('auto-dl-toggle');
+      const knob = document.getElementById('auto-dl-knob');
+      btn.className = state.autoDownloadLiked ? 'w-11 h-6 rounded-full p-0.5 transition-colors flex-none bg-[#34D399]' : 'w-11 h-6 rounded-full p-0.5 transition-colors flex-none bg-white/15';
+      knob.className = state.autoDownloadLiked ? 'w-5 h-5 rounded-full bg-white shadow transition-transform translate-x-5' : 'w-5 h-5 rounded-full bg-white shadow transition-transform translate-x-0';
+      showToast(state.autoDownloadLiked ? 'Auto-Download Liked Songs: ON' : 'Auto-Download Liked Songs: OFF');
+    }
+
+    function runDemoDownload() {
+      if (state.demoDownloading) return;
+      state.demoDownloading = true;
+      const btn = document.getElementById('demo-dl-btn');
+      const bar = document.getElementById('dl-demo-bar');
+      const pctEl = document.getElementById('dl-demo-pct');
+      const stEl = document.getElementById('dl-demo-stage');
+      const tagBadge = document.getElementById('dl-tag-badge');
+      const trk = DEMO_TRACKS[state.trackIdx];
+      document.getElementById('dl-demo-title').textContent = `${trk.title}.opus`;
+      document.getElementById('dl-demo-art').innerHTML = buildTrackArt(trk, 'sm');
+      btn.disabled = true;
+
+      stEl.textContent = 'queued — Acquired concurrency slot...';
+      bar.style.width = '5%'; pctEl.textContent = '5%';
+      tagBadge.textContent = 'Pending';
+
+      let pct = 8;
+      const timer = setInterval(() => {
+        pct += 8;
+        if (pct < 90) {
+          stEl.textContent = `downloading ${pct}% — bestaudio[acodec=opus] via yt-dlp`;
+          bar.style.width = `${pct}%`; pctEl.textContent = `${pct}%`;
+        } else if (pct < 98) {
+          stEl.textContent = 'tagging 95% — Embedding Cover Art & OggOpus metadata via mutagen';
+          bar.style.width = '95%'; pctEl.textContent = '95%';
+          tagBadge.textContent = 'Tagging 95%';
+          tagBadge.style.color = 'var(--dynamic-accent)';
+        } else {
+          clearInterval(timer);
+          stEl.textContent = 'Offline Ready 100% — Verified in local SQLite WAL DB';
+          bar.style.width = '100%'; pctEl.textContent = '100%';
+          tagBadge.textContent = 'Tagged ✓';
+          tagBadge.style.color = '#34D399';
+          trk.offline = true;
+          state.demoDownloading = false;
+          btn.disabled = false;
+          syncAllUI();
+          showToast(`"${trk.title}.opus" saved & tagged offline!`);
+        }
+      }, 170);
+    }
+
+    function syncPlayPause() {
+      const pauseSvg = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+      const playSvg  = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" class="ml-0.5"><polygon points="6 3 20 12 6 21 6 3"/></svg>`;
+      ['pb-play-btn', 'island-compact-play', 'island-expanded-play'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = state.isPlaying ? pauseSvg : playSvg;
+      });
+      document.querySelectorAll('.eh-spin-vinyl, .wing-accretion').forEach((el) => el.classList.toggle('eh-paused', !state.isPlaying));
+    }
+
+    function syncTimeUI() {
+      const trk = DEMO_TRACKS[state.trackIdx];
+      const pct = trk.duration > 0 ? Math.min(100, (state.currentTime / trk.duration) * 100) : 0;
+      document.getElementById('pb-time-cur').textContent = formatTime(state.currentTime);
+      document.getElementById('pb-time-dur').textContent = formatTime(trk.duration);
+      document.getElementById('pb-seek-fill').style.width = `${pct}%`;
+      document.getElementById('island-progress-fill').style.width = `${pct}%`;
+    }
+
+    function syncAllUI() {
+      const trk = DEMO_TRACKS[state.trackIdx];
+      const artSm = buildTrackArt(trk, 'sm');
+      const artMd = buildTrackArt(trk, 'md');
+      document.getElementById('playerbar-title').textContent = trk.title;
+      document.getElementById('playerbar-artist').textContent = trk.artist;
+      document.getElementById('playerbar-vinyl').innerHTML = artSm;
+      document.getElementById('playerbar-offline-badge').classList.toggle('hidden', !trk.offline);
+
+      document.getElementById('wing-left-art').innerHTML = artMd;
+      document.getElementById('wing-left-title').textContent = trk.title;
+      document.getElementById('wing-left-artist').textContent = trk.artist;
+
+      document.getElementById('wing-right-island-art').innerHTML = artSm;
+      document.getElementById('wing-right-island-title').textContent = trk.title;
+      document.getElementById('wing-right-queue').innerHTML = DEMO_TRACKS.map((q, i) => `
+        <div onclick="selectTrack(${i}, true)" class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-white/[0.06] cursor-pointer ${i === state.trackIdx ? 'bg-white/[0.08]' : ''}">
+          <span class="text-[9px] text-[#5E6685]">⋮⋮</span>
+          <div class="w-7 h-7 rounded-md overflow-hidden flex-none">${buildTrackArt(q, 'sm')}</div>
+          <div class="min-w-0 flex-1">
+            <div class="text-[10px] font-medium truncate" style="${i === state.trackIdx ? 'color: var(--dynamic-accent);' : 'color: #F4F6FF;'}">${q.title}</div>
+            <div class="text-[9px] text-[#9BA4C4] truncate">${q.artist}</div>
+          </div>
+        </div>
+      `).join('');
+
+      document.getElementById('island-title').textContent = trk.title;
+      document.getElementById('island-artist').textContent = trk.artist;
+      document.getElementById('island-vinyl').innerHTML = artSm;
+      if (!state.demoDownloading) {
+        document.getElementById('dl-demo-art').innerHTML = artSm;
+        document.getElementById('dl-demo-title').textContent = `${trk.title}.opus`;
+      }
+
+      document.getElementById('sidebar-liked-count').textContent = String(DEMO_TRACKS.filter((t) => t.liked).length);
+      document.getElementById('sidebar-offline-count').textContent = String(DEMO_TRACKS.filter((t) => t.offline).length);
+      ['playerbar-like-svg', 'island-like-svg'].forEach((id) => {
+        const svg = document.getElementById(id);
+        if (!svg) return;
+        svg.setAttribute('fill', trk.liked ? '#FF4D8D' : 'none');
+        svg.setAttribute('stroke', trk.liked ? '#FF4D8D' : 'currentColor');
+      });
+
+      renderAppMainView();
+      renderLyrics();
+      syncPlayPause();
+      syncTimeUI();
+    }
+
+    /* =====================================================================
+     * 6. LIBMPV 60FPS EQ CANVAS + ARCHITECTURE + 9-SCREEN GALLERY RENDERERS
+     * ===================================================================== */
+    const eqCanvas = {
+      el: null, ctx: null, cur: [0,0,0,0,0,0,0,0], tgt: [0,0,0,0,0,0,0,0], ph: 0,
+      init() {
+        this.el = document.getElementById('eq-visualizer-canvas');
+        if (!this.el) return;
+        this.ctx = this.el.getContext('2d');
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        this.renderPills();
+      },
+      resize() {
+        if (!this.el) return;
+        const r = this.el.parentElement.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.el.width = Math.max(240, Math.floor(r.width * dpr));
+        this.el.height = Math.max(160, Math.floor(r.height * dpr));
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      },
+      select(id) {
+        const p = EQ_PRESETS.find((x) => x.id === id) || EQ_PRESETS[0];
+        state.eqPresetId = p.id;
+        this.tgt = [...p.gains];
+        document.getElementById('eq-deck-title').textContent = `${p.label} — ${p.desc}`;
+        document.getElementById('eq-deck-af').textContent = p.af;
+        this.renderPills();
+      },
+      renderPills() {
+        const wrap = document.getElementById('eq-deck-pills');
+        if (!wrap) return;
+        wrap.innerHTML = EQ_PRESETS.map((p) => {
+          const act = p.id === state.eqPresetId;
+          return `
+            <button type="button" onclick="eqCanvas.select('${p.id}')"
+              class="px-3 py-2.5 rounded-2xl border text-center transition-all ${act ? 'bg-[#161E31] text-[#F4F6FF]' : 'bg-[#0B0E17] text-[#9BA4C4] border-white/[0.08] hover:text-white hover:bg-[#141A2B]'}"
+              style="${act ? 'border-color: rgba(var(--dynamic-accent-rgb), 0.78); box-shadow: 0 0 16px rgba(var(--dynamic-accent-rgb), 0.16);' : ''}">
+              <div class="text-xs font-bold" style="${act ? 'color: var(--dynamic-accent);' : ''}">${p.label}</div>
+            </button>
+          `;
+        }).join('');
+      },
+      draw(dt) {
+        if (!this.ctx || !this.el) return;
+        const ctx = this.ctx;
+        const w = this.el.parentElement.clientWidth || 400;
+        const h = this.el.parentElement.clientHeight || 200;
+        for (let i = 0; i < 8; i++) this.cur[i] += (this.tgt[i] - this.cur[i]) * Math.min(1, dt * 8);
+        if (state.isPlaying && state.cosmicMode !== 'static') this.ph += dt * 4.6;
+        ctx.clearRect(0, 0, w, h);
+
+        const accRgb = getComputedStyle(document.documentElement).getPropertyValue('--dynamic-accent-rgb').trim() || '45, 212, 191';
+        const secRgb = getComputedStyle(document.documentElement).getPropertyValue('--dynamic-secondary-rgb').trim() || '99, 102, 241';
+        const px = 18, py = 22, midY = h * 0.52, uw = w - px * 2, mDb = h * 0.34;
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.lineWidth = 1;
+        [-1, 0, 1].forEach((l) => {
+          const y = midY + l * mDb * 0.85;
+          ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(w - px, y); ctx.stroke();
+        });
+
+        const bars = 36, step = uw / bars;
+        for (let b = 0; b < bars; b++) {
+          const gi = (b / (bars - 1)) * 7, lo = Math.floor(gi), hi = Math.min(7, lo + 1), fr = gi - lo;
+          const db = this.cur[lo] * (1 - fr) + this.cur[hi] * fr;
+          const en = state.isPlaying ? (0.36 + 0.32 * Math.sin(this.ph + b * 0.44) + 0.24 * Math.cos(this.ph * 1.45 - b * 0.65)) : 0.14;
+          const bh = Math.max(6, en * (h * 0.38) * (1 + db * 0.085));
+          const gr = ctx.createLinearGradient(0, h - py - bh, 0, h - py);
+          gr.addColorStop(0, `rgba(${accRgb}, 0.48)`);
+          gr.addColorStop(1, `rgba(${secRgb}, 0.04)`);
+          ctx.fillStyle = gr;
+          ctx.fillRect(px + b * step + 2, h - py - bh, Math.max(2, step - 4), bh);
+        }
+
+        const pts = this.cur.map((db, i) => ({ x: px + (i / 7) * uw, y: midY - (db / 7) * mDb }));
+        const ag = ctx.createLinearGradient(0, py, 0, h - py);
+        ag.addColorStop(0, `rgba(${accRgb}, 0.32)`);
+        ag.addColorStop(1, `rgba(${secRgb}, 0.0)`);
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 0; i < 7; i++) ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+        ctx.lineTo(pts[7].x, pts[7].y); ctx.lineTo(pts[7].x, h - py); ctx.lineTo(pts[0].x, h - py); ctx.closePath();
+        ctx.fillStyle = ag; ctx.fill();
+
+        const sg = ctx.createLinearGradient(px, 0, w - px, 0);
+        sg.addColorStop(0, `rgb(${secRgb})`); sg.addColorStop(0.5, `rgb(${accRgb})`); sg.addColorStop(1, '#F4F6FF');
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 0; i < 7; i++) ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+        ctx.lineTo(pts[7].x, pts[7].y);
+        ctx.strokeStyle = sg; ctx.lineWidth = 2.6; ctx.stroke();
+
+        const bands = ['60Hz', '150Hz', '400Hz', '1kHz', '3kHz', '6kHz', '10kHz', '16kHz'];
+        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        pts.forEach((pt, i) => {
+          ctx.beginPath(); ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#FFFFFF'; ctx.fill();
+          ctx.fillStyle = 'rgba(155, 164, 196, 0.78)'; ctx.fillText(bands[i], pt.x, h - 6);
+        });
+      },
+    };
+
+    function renderArchitecture() {
+      const list = document.getElementById('arch-layers-list');
+      const det = document.getElementById('arch-layer-detail');
+      if (!list || !det) return;
+      list.innerHTML = ARCH_LAYERS.map((l, idx) => `
+        <button type="button" onclick="selectArchLayer(${idx})"
+          class="arch-layer-card w-full text-left px-3.5 py-2.5 rounded-2xl bg-[#090C14] border border-white/[0.08] flex items-center justify-between gap-2 ${idx === state.activeArchIdx ? 'active' : 'hover:bg-[#111624]'}">
+          <div class="min-w-0">
+            <div class="text-xs font-bold text-[#F4F6FF] truncate"><span class="font-mono mr-2" style="color: var(--dynamic-accent);">L${l.num}</span>${l.name}</div>
+            <div class="text-[10px] font-mono text-[#5E6685] truncate mt-0.5">${l.file}</div>
+          </div>
+          <span class="text-xs text-[#9BA4C4]">→</span>
+        </button>
+      `).join('');
+      const cur = ARCH_LAYERS[state.activeArchIdx];
+      det.innerHTML = `
+        <div class="space-y-2">
+          <div class="text-[10px] font-mono uppercase tracking-[0.2em]" style="color: var(--dynamic-accent);">Layer ${cur.num} • ${cur.file}</div>
+          <h4 class="text-base font-bold text-[#F4F6FF]">${cur.name}</h4>
+          <p class="text-xs text-[#9BA4C4] leading-relaxed">${cur.desc}</p>
+        </div>
+        <div class="flex flex-wrap gap-1.5 pt-2 border-t border-white/[0.07]">
+          ${cur.endpoints.map((ep) => `<code class="px-2 py-0.5 rounded-lg text-[10px] font-mono bg-white/[0.06] border border-white/10 text-[#F4F6FF]">${ep}</code>`).join('')}
+        </div>
+      `;
+    }
+    function selectArchLayer(i) { state.activeArchIdx = i; renderArchitecture(); }
+
+    function renderGalleryWall() {
+      const cols = [document.getElementById('iso-col-1'), document.getElementById('iso-col-2'), document.getElementById('iso-col-3')];
+      cols.forEach((c) => { if (c) c.innerHTML = ''; });
+      GALLERY_SCREENS.forEach((s, idx) => {
+        const card = `
+          <div class="rounded-[22px] bg-[#0B0E17]/95 border border-white/12 p-4 shadow-2xl select-none hover:border-white/35 transition-colors">
+            <div class="flex items-center justify-between pb-2.5 mb-2.5 border-b border-white/[0.07]">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full flex-none" style="background: ${s.accent}; box-shadow: 0 0 10px ${s.accent};"></span>
+                <span class="text-xs font-bold text-[#F4F6FF] truncate">${s.title}</span>
+              </div>
+              <span class="text-[9px] font-mono px-2 py-0.5 rounded-full bg-white/[0.06] text-[#9BA4C4] flex-none">${s.badge}</span>
+            </div>
+            <div class="space-y-1.5">
+              ${s.lines.map((ln, li) => `
+                <div class="flex items-center justify-between px-3 py-2 rounded-xl bg-[#111624] border border-white/[0.06]">
+                  <span class="text-[11px] text-[#F4F6FF]/90 font-medium">${ln}</span>
+                  <span class="w-5 h-1.5 rounded-full opacity-75" style="background: ${li === 0 ? s.accent : 'rgba(255,255,255,0.2)'};"></span>
+                </div>
+              `).join('')}
+            </div>
+            <div class="mt-2.5 pt-2 border-t border-white/[0.06] flex items-center justify-between text-[9px] font-mono text-[#5E6685]">
+              <span>ORBIT DESKTOP • 0${idx + 1}</span>
+              <span style="color: ${s.accent};">60 FPS</span>
+            </div>
+          </div>
+        `;
+        if (cols[s.col]) cols[s.col].innerHTML += card;
+      });
+    }
+
+    function openDownloadModal() {
+      const m = document.getElementById('download-modal');
+      m.classList.remove('hidden'); m.classList.add('flex');
+    }
+    function closeDownloadModal() {
+      const m = document.getElementById('download-modal');
+      m.classList.add('hidden'); m.classList.remove('flex');
+    }
+    function copySetupCommands() {
+      const txt = document.getElementById('setup-commands-text')?.textContent || '';
+      const ta = document.createElement('textarea');
+      ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); showToast('Setup commands copied!'); } catch { showToast('Copy manually from the box.'); }
+      document.body.removeChild(ta);
+    }
+
+    function bindEvents() {
+      document.querySelectorAll('.cosmic-mode-btn').forEach((b) => {
+        b.addEventListener('click', () => setCosmicMode(b.getAttribute('data-cosmic-btn')));
+      });
+
+      const sIn = document.getElementById('app-search-input');
+      sIn?.addEventListener('input', (e) => {
+        state.searchQuery = e.target.value;
+        if (state.appTab !== 'search' && state.searchQuery.trim()) switchAppTab('search');
+        else renderAppMainView();
+      });
+
+      const sideToggle = document.getElementById('app-sidebar-toggle');
+      const sidebar = document.getElementById('app-sidebar');
+      sideToggle?.addEventListener('click', () => {
+        state.sidebarExpanded = !state.sidebarExpanded;
+        sidebar.style.width = state.sidebarExpanded ? '146px' : '54px';
+        sidebar.querySelectorAll('.sidebar-lbl').forEach((l) => l.classList.toggle('hidden', !state.sidebarExpanded));
+        sidebar.querySelectorAll('.app-nav-btn').forEach((b) => {
+          b.classList.toggle('justify-start', state.sidebarExpanded);
+          b.classList.toggle('justify-center', !state.sidebarExpanded);
+        });
+      });
+
+      const seekTrack = document.getElementById('pb-seek-track');
+      const seekTip = document.getElementById('pb-seek-tooltip');
+      seekTrack?.addEventListener('mousemove', (e) => {
+        const r = seekTrack.getBoundingClientRect();
+        const ratio = clamp01((e.clientX - r.left) / r.width);
+        seekTip.classList.remove('hidden');
+        seekTip.style.left = `${Math.max(8, Math.min(92, ratio * 100))}%`;
+        seekTip.textContent = formatTime(ratio * DEMO_TRACKS[state.trackIdx].duration);
+      });
+      seekTrack?.addEventListener('mouseleave', () => seekTip?.classList.add('hidden'));
+      seekTrack?.addEventListener('click', (e) => {
+        const r = seekTrack.getBoundingClientRect();
+        const ratio = clamp01((e.clientX - r.left) / r.width);
+        state.currentTime = ratio * DEMO_TRACKS[state.trackIdx].duration;
+        syncTimeUI(); updateActiveLyric(true);
+      });
+
+      // Damped 3D Hover Tilt on Bento, Reviews & Creator Cards
+      document.querySelectorAll('[data-tilt-3d]').forEach((el) => {
+        const maxT = parseFloat(el.getAttribute('data-tilt-max') || '6');
+        el.addEventListener('mousemove', (e) => {
+          if (window.innerWidth < 768) return;
+          const r = el.getBoundingClientRect();
+          const px = (e.clientX - r.left) / r.width;
+          const py = (e.clientY - r.top) / r.height;
+          el.style.transition = 'transform 140ms ease-out';
+          el.style.transform = `perspective(1300px) rotateX(${((0.5 - py) * maxT * 2).toFixed(2)}deg) rotateY(${((px - 0.5) * maxT * 2).toFixed(2)}deg) translateZ(12px)`;
+          el.style.setProperty('--glare-x', `${(px * 100).toFixed(1)}%`);
+          el.style.setProperty('--glare-y', `${(py * 100).toFixed(1)}%`);
+          el.style.setProperty('--glare-opacity', '1');
+        });
+        el.addEventListener('mouseleave', () => {
+          el.style.transition = 'transform 460ms cubic-bezier(0.16, 1, 0.3, 1)';
+          el.style.transform = '';
+          el.style.setProperty('--glare-opacity', '0');
+        });
+      });
+
+      window.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); sIn?.focus(); }
+        if (e.key === 'Escape') closeDownloadModal();
+      });
+    }
+
+    /* =====================================================================
+     * 7. SINGLE MASTER 60/120FPS FRAME-LOCKED RAF LOOP
+     * ===================================================================== */
+    let lastNow = 0;
+    let clockAccum = 0;
+
+    function masterRaf(now) {
+      requestAnimationFrame(masterRaf);
+      if (document.hidden) { lastNow = now; return; }
+      if (!lastNow) lastNow = now;
+      const dt = Math.min(0.05, (now - lastNow) / 1000);
+      lastNow = now;
+
+      // 1. Advance Lenis / Smooth Inertia Scroll
+      scrollEngine.update(now);
+
+      // 2. Drive Continuous Scroll-Scrubbed 3D DOM Choreography & Velocity Marquee
+      domScrub.update(dt);
+
+      // 3. Drive Spline-Choreographed Three.js Volumetric Black Hole
+      threeEngine.update(dt, scrollEngine.globalProgress);
+
+      // 4. Drive 60fps libmpv EQ Frequency Canvas
+      eqCanvas.draw(dt);
+
+      // 5. Advance Live Simulated Audio Clock & 100ms Synced Lyrics
+      if (state.isPlaying) {
+        const trk = DEMO_TRACKS[state.trackIdx];
+        state.currentTime += dt;
+        if (state.currentTime >= trk.duration) {
+          if (state.repeatMode === 'one') state.currentTime = 0;
+          else triggerNextTrack();
+        }
+        clockAccum += dt;
+        if (clockAccum >= 0.1) {
+          clockAccum = 0;
+          syncTimeUI();
+          updateActiveLyric(false);
+        }
+      }
+    }
+
+    window.onload = function () {
+      scrollEngine.init();
+      threeEngine.init();
+      eqCanvas.init();
+      renderPalettes();
+      renderArchitecture();
+      renderGalleryWall();
+      syncAllUI();
+      bindEvents();
+      domScrub.init();
+      requestAnimationFrame(masterRaf);
+    };
+  </script>
+</body>
+</html>

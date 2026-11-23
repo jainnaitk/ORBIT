@@ -6,6 +6,7 @@ import json
 import socket
 import sqlite3
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -565,3 +566,156 @@ def test_bridge_server_lifecycle(
 
     server.stop()
     assert not bridge_file.is_file()
+
+
+@pytest.mark.asyncio
+async def test_bridge_consecutive_error_skips_and_websocket(
+    mock_controller: BridgeController,
+) -> None:
+    """Test max 2 consecutive error skips before pausing and sending WebSocket error event."""
+    tracks = [
+        Track(video_id=f"err_t{i}", title=f"Track {i}", artist="Artist")
+        for i in range(1, 6)
+    ]
+    mock_controller.queue.set_queue(tracks, start_index=0)
+
+    # Mock ws_manager to capture broadcast events
+    broadcast_events: list[tuple[str, Any]] = []
+
+    async def fake_broadcast(event: str, data: Any) -> None:
+        broadcast_events.append((event, data))
+
+    mock_controller.ws_manager.broadcast = fake_broadcast  # type: ignore[method-assign]
+
+    # Error skip 1: should advance to track 2
+    mock_controller.player.record_error()
+    await mock_controller.handle_track_ended(reason="error")
+    assert mock_controller.queue.current_index == 1
+    assert mock_controller.player.consecutive_errors == 1
+    assert mock_controller.queue.consecutive_errors == 1
+
+    # Error skip 2: should advance to track 3
+    mock_controller.player.record_error()
+    await mock_controller.handle_track_ended(reason="error")
+    assert mock_controller.queue.current_index == 2
+    assert mock_controller.player.consecutive_errors == 2
+    assert mock_controller.queue.consecutive_errors == 2
+
+    # Error skip 3: should stop auto-advancing, pause player, and emit WebSocket error event
+    mock_controller.player.record_error()
+    await mock_controller.handle_track_ended(reason="error")
+    assert mock_controller.queue.current_index == 2  # did NOT advance
+    assert mock_controller.player.consecutive_errors == 3
+    mock_controller.player._mpv.pause = True
+
+    # Verify "error" event was broadcast
+    error_broadcasts = [e for e in broadcast_events if e[0] == "error"]
+    assert len(error_broadcasts) >= 1
+    err_event, err_data = error_broadcasts[-1]
+    assert err_event == "error"
+    assert "consecutive_errors" in err_data
+    assert err_data["consecutive_errors"] == 3
+
+    # Normal completion (eof) resets consecutive errors and advances
+    await mock_controller.handle_track_ended(reason="eof")
+    assert mock_controller.player.consecutive_errors == 0
+    assert mock_controller.queue.consecutive_errors == 0
+    assert mock_controller.queue.current_index == 3
+
+
+@pytest.mark.asyncio
+async def test_bridge_aborted_reason_no_advance(
+    mock_controller: BridgeController,
+) -> None:
+    """Test that end-file reason 'aborted' does not trigger auto-advance."""
+    tracks = [
+        Track(video_id=f"abt_t{i}", title=f"Track {i}", artist="Artist")
+        for i in range(1, 4)
+    ]
+    mock_controller.queue.set_queue(tracks, start_index=1)
+    assert mock_controller.queue.current_index == 1
+
+    await mock_controller.handle_track_ended(reason="aborted")
+    assert mock_controller.queue.current_index == 1
+
+
+@pytest.mark.asyncio
+async def test_ctrl_play_catches_stream_resolution_error(
+    mock_controller: BridgeController,
+) -> None:
+    """Test that ctrl.play() catches StreamResolutionError and broadcasts WebSocket error event."""
+    from metrolite.audio.resolver import StreamResolutionError
+
+    mock_controller.player.resolver.resolve = AsyncMock(
+        side_effect=StreamResolutionError("yt-dlp extraction failed for bad_vid: Requested format is not available")
+    )
+
+    broadcast_events: list[tuple[str, Any]] = []
+
+    async def fake_broadcast(event: str, data: Any) -> None:
+        broadcast_events.append((event, data))
+
+    mock_controller.ws_manager.broadcast = fake_broadcast  # type: ignore[method-assign]
+
+    res = await mock_controller.play("bad_vid")
+    assert res["status"] == "error"
+    assert "Requested format is not available" in res["error"]
+    assert res["video_id"] == "bad_vid"
+
+    # Verify WebSocket error event broadcast
+    err_events = [e for e in broadcast_events if e[0] == "error"]
+    assert len(err_events) == 1
+    _, err_payload = err_events[0]
+    assert "Requested format is not available" in err_payload["message"]
+    assert err_payload["video_id"] == "bad_vid"
+    assert mock_controller.player.consecutive_errors >= 1
+
+
+def test_player_play_endpoint_stream_resolution_error(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Test that /player/play returns a clean JSON error response instead of ASGI 500 when resolution fails."""
+    from metrolite.audio.resolver import StreamResolutionError
+
+    mock_controller.player.resolver.resolve = AsyncMock(
+        side_effect=StreamResolutionError("yt-dlp extraction failed for fail_vid: Requested format is not available")
+    )
+    headers = {"X-Bridge-Token": test_token}
+
+    res_post = client.post("/player/play", json={"video_id": "fail_vid"}, headers=headers)
+    assert res_post.status_code == 200
+    data = res_post.json()
+    assert data["status"] == "error"
+    assert "Requested format is not available" in data["error"]
+    assert data["video_id"] == "fail_vid"
+
+    res_get = client.get("/player/play?video_id=fail_vid", headers=headers)
+    assert res_get.status_code == 200
+    get_data = res_get.json()
+    assert get_data["status"] == "error"
+    assert "Requested format is not available" in get_data["error"]
+
+
+def test_queue_set_autoplay_stream_resolution_error(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Test that /queue action 'set' with auto_play=True does not crash with ASGI 500 if resolution fails."""
+    from metrolite.audio.resolver import StreamResolutionError
+
+    mock_controller.player.resolver.resolve = AsyncMock(
+        side_effect=StreamResolutionError("yt-dlp extraction failed: Requested format is not available")
+    )
+    headers = {"X-Bridge-Token": test_token}
+
+    track = {"video_id": "unplayable_vid", "title": "Unplayable", "artist": "Artist"}
+    res = client.post(
+        "/queue",
+        json={"action": "set", "items": [track], "auto_play": True},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert len(res.json()["items"]) == 1

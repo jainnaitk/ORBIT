@@ -7,19 +7,23 @@ app:
 
 audio:
   quality: high                    # high (128-160kbps opus) | medium (64-96kbps) | low (48kbps)
-  format_selector: "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio"
+  format_selector: "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
   gapless: true
   normalize_volume: false          # true adds mpv dynaudnorm filter
   default_volume: 80               # 0 - 100
-  mpv_demuxer_max_mb: 15           # keeps libmpv RAM under ~22 MB
-  mpv_demuxer_back_mb: 5
+  mpv_demuxer_max_mb: 6            # keeps libmpv active buffer lean (~6 MB = ~5 min of opus)
+  mpv_demuxer_back_mb: 2
   stream_url_ttl_s: 18000          # refresh expiring googlevideo URLs before 5h
+  cookies_from_browser: null       # optional: chrome | edge | firefox | brave
+  cookies_file: null               # optional path to cookies.txt
 
 downloads:
   preferred_ext: opus              # opus | m4a
   embed_metadata: true
   embed_thumbnail: true
   max_concurrent: 2
+  cookies_from_browser: null       # optional: chrome | edge | firefox | brave
+  cookies_file: null               # optional path to cookies.txt
 
 queue:
   autoplay_radio: true             # auto-fetch YTM watch playlist when queue ends

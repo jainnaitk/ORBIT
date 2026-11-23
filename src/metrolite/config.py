@@ -35,6 +35,7 @@ class AppConfig(BaseModel):
         default_factory=lambda: expand_path("%LOCALAPPDATA%\\metrolite\\downloads")
     )
     cookies_file: Path | None = None
+    cookies_from_browser: str | None = None
     ram_budget_active_mb: int = 185
     ram_budget_tray_mb: int = 60
 
@@ -51,13 +52,20 @@ class AppConfig(BaseModel):
 
 class AudioConfig(BaseModel):
     quality: str = "high"
-    format_selector: str = "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio"
+    format_selector: str = "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio*/best"
     gapless: bool = True
     normalize_volume: bool = False
     default_volume: int = 80
-    mpv_demuxer_max_mb: int = 15
-    mpv_demuxer_back_mb: int = 5
+    mpv_demuxer_max_mb: int = 6
+    mpv_demuxer_back_mb: int = 2
     stream_url_ttl_s: int = 18000
+    cookies_from_browser: str | None = None
+    cookies_file: Path | None = None
+
+    @field_validator("cookies_file", mode="before")
+    @classmethod
+    def _resolve_cookies_path(cls, v: Any) -> Path | None:
+        return expand_path(v) if v else None
 
 
 class DownloadsConfig(BaseModel):
@@ -65,6 +73,13 @@ class DownloadsConfig(BaseModel):
     embed_metadata: bool = True
     embed_thumbnail: bool = True
     max_concurrent: int = 2
+    cookies_from_browser: str | None = None
+    cookies_file: Path | None = None
+
+    @field_validator("cookies_file", mode="before")
+    @classmethod
+    def _resolve_cookies_path(cls, v: Any) -> Path | None:
+        return expand_path(v) if v else None
 
 
 class QueueConfig(BaseModel):

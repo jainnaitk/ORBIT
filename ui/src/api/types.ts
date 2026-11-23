@@ -1,5 +1,5 @@
 /**
- * MetroLite typed API and WebSocket message specifications.
+ * ORBIT typed API and WebSocket message specifications.
  */
 
 export interface Track {
@@ -13,6 +13,7 @@ export interface Track {
   local_path?: string | null;
   download_status?: 'none' | 'queued' | 'downloading' | 'completed' | 'failed';
   play_count?: number;
+  last_played_at?: string | null;
 }
 
 export type PlaybackState = 'idle' | 'playing' | 'paused' | 'buffering' | 'stopped';
@@ -26,14 +27,30 @@ export interface PlaybackTick {
 }
 
 export interface TrackChangedEvent {
-  current_track: Track | null;
-  time_pos: number;
-  duration: number;
-  state: PlaybackState;
-  queue_index: number;
+  track?: Track | null;
+  current_track?: Track | null;
+  time_pos?: number;
+  duration?: number;
+  state?: PlaybackState;
+  index?: number;
+  queue_index?: number;
 }
 
 export type RepeatMode = 'off' | 'all' | 'one';
+
+export type EqPreset = 'flat' | 'bass' | 'vocal' | 'night' | 'studio';
+
+export interface LyricLine {
+  time: number;
+  text: string;
+}
+
+export interface LyricsResponse {
+  synced: LyricLine[] | null;
+  lyrics: string | null;
+  source: string | null;
+  offline?: boolean;
+}
 
 export interface QueueData {
   current_index: number;
@@ -46,10 +63,12 @@ export interface QueueData {
 
 export interface DownloadProgress {
   video_id: string;
-  status: 'queued' | 'downloading' | 'completed' | 'failed';
-  progress_pct: number;
-  downloaded_bytes: number;
-  total_bytes: number;
+  status: 'queued' | 'downloading' | 'tagging' | 'completed' | 'failed' | 'error' | 'deleted';
+  percent?: number;
+  progress_pct?: number;
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  local_path?: string | null;
   error?: string | null;
 }
 
@@ -74,8 +93,18 @@ export interface Playlist {
 }
 
 export interface HomeSection {
+  id?: string;
   title: string;
+  subtitle?: string;
+  layout?: 'compact_grid' | 'cards';
   contents: (Track | any)[];
+}
+
+export interface PersonalizedHomeResponse {
+  greeting: string;
+  speed_dial: Track[];
+  sections: HomeSection[];
+  personalized: boolean;
 }
 
 export interface BridgeConfig {
@@ -84,10 +113,17 @@ export interface BridgeConfig {
   token: string;
 }
 
+export interface BridgeErrorEvent {
+  message: string;
+  video_id?: string;
+  consecutive_errors?: number;
+}
+
 export type BridgeEventMap = {
   playback_tick: PlaybackTick;
   track_changed: TrackChangedEvent;
   queue_changed: QueueData;
   download_progress: DownloadProgress;
   library_changed: LibraryChangedEvent;
+  error: BridgeErrorEvent;
 };

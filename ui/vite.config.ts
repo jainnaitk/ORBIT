@@ -5,10 +5,31 @@ import path from "path";
 
 // Plugin to serve bridge configuration during local browser development
 function bridgeConfigDevPlugin() {
+  const isLocalOrigin = (origin?: string): boolean => {
+    if (!origin) return true;
+    try {
+      const parsed = new URL(origin);
+      return (
+        (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+        (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+      );
+    } catch {
+      return false;
+    }
+  };
+
   return {
     name: "bridge-config-dev",
     configureServer(server: any) {
-      server.middlewares.use("/__bridge_config", (_req: any, res: any) => {
+      server.middlewares.use("/__bridge_config", (req: any, res: any) => {
+        res.setHeader("Cache-Control", "no-store");
+        const origin = req.headers?.origin as string | undefined;
+        const secFetchSite = req.headers?.["sec-fetch-site"] as string | undefined;
+        if (!isLocalOrigin(origin) || (secFetchSite && secFetchSite !== "same-origin" && secFetchSite !== "none")) {
+          res.statusCode = 403;
+          res.end(JSON.stringify({ error: "forbidden" }));
+          return;
+        }
         try {
           const localAppData =
             process.env.LOCALAPPDATA ||
@@ -37,6 +58,7 @@ export default defineConfig({
   plugins: [react(), bridgeConfigDevPlugin()],
   clearScreen: false,
   server: {
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
     watch: {

@@ -1,8 +1,16 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { AlertCircle, X } from 'lucide-react';
+import { StarfieldBg, type CosmicEffectsMode } from './components/StarfieldBg';
+import {
+  BlackHoleTransition,
+  type SuckAnimationPayload,
+} from './components/BlackHoleTransition';
+import { DynamicIsland } from './components/DynamicIsland';
 import { Titlebar } from './components/Titlebar';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { PlayerBar } from './components/PlayerBar';
 import { QueueDrawer } from './components/QueueDrawer';
+import { LyricsDrawer } from './components/LyricsDrawer';
 import { HomeView } from './views/HomeView';
 import { SearchView } from './views/SearchView';
 import { LibraryView } from './views/LibraryView';
@@ -11,12 +19,23 @@ import {
   AddToPlaylistModal,
   SettingsModal,
 } from './components/Modals';
-import { useBridge } from './api/client';
-import type { Track, Playlist } from './api/types';
+import {
+  useBridge,
+  bridgeSocket,
+  enterDynamicIslandWindow,
+  exitDynamicIslandWindow,
+  showMainWindow,
+  trimProcessMemory,
+  waitForNextPaint,
+  type SavedWindowBounds,
+} from './api/client';
+import { extractTrackAccent, DEFAULT_COSMIC_ACCENT } from './utils/colorExtract';
+import type { Track, Playlist, EqPreset } from './api/types';
+
+type RightDrawerTab = 'none' | 'queue' | 'lyrics';
 
 export default function App() {
   const {
-    config,
     isConnected,
     playback,
     setPlayback,
@@ -25,9 +44,25 @@ export default function App() {
     downloads,
     setDownloads,
     api,
+    lastError,
   } = useBridge();
 
-  // Navigation state & history stack
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!lastError) {
+      setDismissedError(null);
+      return;
+    }
+    setDismissedError(null);
+    const timer = window.setTimeout(() => {
+      setDismissedError(lastError);
+    }, 6500);
+    return () => clearTimeout(timer);
+  }, [lastError]);
+
+  const visibleError = lastError && lastError !== dismissedError ? lastError : null;
+
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
   const [historyStack, setHistoryStack] = useState<{ tab: NavTab; playlistId?: string | null }[]>([
@@ -35,35 +70,184 @@ export default function App() {
   ]);
   const [historyIndex, setHistoryIndex] = useState<number>(0);
 
-  // Search input state
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [submittedSearch, setSubmittedSearch] = useState<string>('');
 
-  // UI Drawer & Modal states
-  const [isQueueOpen, setIsQueueOpen] = useState<boolean>(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(true);
+  // Queue and Lyrics share the exact same right-hand drawer slot (mutually exclusive)
+  const [rightDrawer, setRightDrawer] = useState<RightDrawerTab>('none');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState<boolean>(false);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
-  const [isOled, setIsOled] = useState<boolean>(false);
 
-  // Playlists & Liked counts
+  const [isIslandMode, setIsIslandMode] = useState<boolean>(false);
+  const [restoreSeq, setRestoreSeq] = useState<number>(0);
+  const savedBoundsRef = useRef<SavedWindowBounds | null>(null);
+  const islandSwitchingRef = useRef<boolean>(false);
+
+  const [suckPayload, setSuckPayload] = useState<SuckAnimationPayload | null>(null);
+  const [absorbPulseKey, setAbsorbPulseKey] = useState<number>(0);
+  const [playerRiseKey, setPlayerRiseKey] = useState<number>(0);
+  const lastTrackRef = useRef<Track | null>(null);
+  const isIslandModeRef = useRef<boolean>(isIslandMode);
+  const rightDrawerRef = useRef<RightDrawerTab>(rightDrawer);
+  isIslandModeRef.current = isIslandMode;
+  rightDrawerRef.current = rightDrawer;
+
+  const [cosmicMode, setCosmicMode] = useState<CosmicEffectsMode>('full');
+  const [autoDownloadLiked, setAutoDownloadLiked] = useState<boolean>(false);
+  const [eqPreset, setEqPreset] = useState<EqPreset>('flat');
+  const appliedEqRef = useRef<EqPreset | null>(null);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshPendingRef = useRef<boolean>(false);
+
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [likedTracks, setLikedTracks] = useState<Track[]>([]);
   const [downloadTracks, setDownloadTracks] = useState<Track[]>([]);
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [libraryVersion, setLibraryVersion] = useState<number>(0);
 
-  // Navigation handlers
-  const navigateTo = useCallback((tab: NavTab, playlistId?: string | null) => {
-    setActiveTab(tab);
-    setActivePlaylistId(playlistId || null);
-    setHistoryStack((prev) => {
-      const nextStack = prev.slice(0, historyIndex + 1);
-      return [...nextStack, { tab, playlistId: playlistId || null }];
+  const downloadedIds = useMemo(
+    () => new Set(downloadTracks.map((t) => t.video_id)),
+    [downloadTracks]
+  );
+
+  useEffect(() => {
+    let trimTimer: number | null = null;
+    const syncPause = () => {
+      const paused = document.hidden || !document.hasFocus();
+      document.documentElement.classList.toggle('window-paused', paused);
+      if (trimTimer !== null) {
+        clearTimeout(trimTimer);
+        trimTimer = null;
+      }
+      if (paused) {
+        trimTimer = window.setTimeout(() => {
+          void trimProcessMemory();
+        }, 1500);
+      }
+    };
+    const idleInterval = window.setInterval(() => {
+      if (document.hidden || !document.hasFocus()) {
+        void trimProcessMemory();
+      }
+    }, 45000);
+    window.addEventListener('blur', syncPause);
+    window.addEventListener('focus', syncPause);
+    document.addEventListener('visibilitychange', syncPause);
+    syncPause();
+    return () => {
+      if (trimTimer !== null) clearTimeout(trimTimer);
+      clearInterval(idleInterval);
+      window.removeEventListener('blur', syncPause);
+      window.removeEventListener('focus', syncPause);
+      document.removeEventListener('visibilitychange', syncPause);
+    };
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-effects', cosmicMode);
+  }, [cosmicMode]);
+
+  const cosmicModeRef = useRef<CosmicEffectsMode>(cosmicMode);
+  cosmicModeRef.current = cosmicMode;
+
+  const activeTrack = playback?.current_track || queue?.current_track || null;
+  const activeVideoId = activeTrack?.video_id || null;
+  const activeThumb = activeTrack?.thumbnail_url || null;
+  const activeTrackRef = useRef<Track | null>(activeTrack);
+  activeTrackRef.current = activeTrack;
+
+  useEffect(() => {
+    const curr = activeTrackRef.current;
+    if (!activeVideoId || !curr) return;
+    const prev = lastTrackRef.current;
+    lastTrackRef.current = curr;
+
+    if (prev && prev.video_id !== activeVideoId) {
+      setPlayerRiseKey((k) => k + 1);
+
+      // Suppress BlackHole suck-in animation when Lyrics or Dynamic Island obscures the canvas
+      if (
+        !isIslandModeRef.current &&
+        rightDrawerRef.current !== 'lyrics' &&
+        cosmicModeRef.current === 'full'
+      ) {
+        const nowId = Date.now();
+        setSuckPayload({ id: nowId, track: prev });
+        const pulseTimer = window.setTimeout(() => {
+          setAbsorbPulseKey((k) => k + 1);
+        }, 640);
+        return () => {
+          clearTimeout(pulseTimer);
+        };
+      }
+
+      setSuckPayload(null);
+    }
+  }, [activeVideoId]);
+
+  useEffect(() => {
+    if (isIslandMode || rightDrawer === 'lyrics') {
+      setSuckPayload(null);
+      if (activeTrackRef.current) {
+        lastTrackRef.current = activeTrackRef.current;
+      }
+    }
+  }, [isIslandMode, rightDrawer]);
+
+  useEffect(() => {
+    document.title = activeTrack?.title
+      ? `${activeTrack.title} — ${activeTrack.artist} • ORBIT`
+      : 'ORBIT';
+  }, [activeTrack?.title, activeTrack?.artist]);
+
+  useEffect(() => {
+    let mounted = true;
+    const applyAccent = (accent = DEFAULT_COSMIC_ACCENT) => {
+      const root = document.documentElement;
+      root.style.setProperty('--dynamic-accent', accent.hex);
+      root.style.setProperty('--dynamic-accent-rgb', accent.rgb);
+      root.style.setProperty('--dynamic-secondary', accent.secondaryHex);
+      root.style.setProperty('--dynamic-secondary-rgb', accent.secondaryRgb);
+    };
+
+    if (!activeVideoId) {
+      applyAccent({
+        hex: '#2DD4BF',
+        rgb: '45, 212, 191',
+        secondaryHex: '#6366F1',
+        secondaryRgb: '99, 102, 241',
+      });
+      return;
+    }
+
+    extractTrackAccent(activeVideoId, activeThumb).then((accent) => {
+      if (mounted) applyAccent(accent);
     });
-    setHistoryIndex((prev) => prev + 1);
-  }, [historyIndex]);
+
+    return () => {
+      mounted = false;
+    };
+  }, [activeVideoId, activeThumb]);
+
+  const navigateTo = useCallback(
+    (tab: NavTab, playlistId?: string | null) => {
+      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+      setActiveTab(tab);
+      setActivePlaylistId(playlistId || null);
+      setHistoryStack((prev) => {
+        const nextStack = prev.slice(0, historyIndex + 1);
+        return [...nextStack, { tab, playlistId: playlistId || null }];
+      });
+      setHistoryIndex((prev) => prev + 1);
+    },
+    [historyIndex]
+  );
 
   const handleGoBack = useCallback(() => {
     if (historyIndex > 0) {
+      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
       const nextIdx = historyIndex - 1;
       const target = historyStack[nextIdx];
       setHistoryIndex(nextIdx);
@@ -74,6 +258,7 @@ export default function App() {
 
   const handleGoForward = useCallback(() => {
     if (historyIndex < historyStack.length - 1) {
+      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
       const nextIdx = historyIndex + 1;
       const target = historyStack[nextIdx];
       setHistoryIndex(nextIdx);
@@ -82,46 +267,192 @@ export default function App() {
     }
   }, [historyIndex, historyStack]);
 
-  // Load playlists, liked and downloads counts
+  const applySettingsPayload = useCallback(
+    (settingsObj: Record<string, unknown> | null | undefined) => {
+      if (!settingsObj) return;
+      if (typeof settingsObj.auto_download_liked === 'boolean') {
+        setAutoDownloadLiked(settingsObj.auto_download_liked);
+      }
+      const savedMode = settingsObj.cosmic_mode;
+      if (savedMode === 'full' || savedMode === 'static' || savedMode === 'oled') {
+        setCosmicMode(savedMode);
+      } else if (settingsObj.oled_mode === true) {
+        setCosmicMode('oled');
+      }
+      const savedEq = settingsObj.eq_preset;
+      if (
+        savedEq === 'flat' ||
+        savedEq === 'bass' ||
+        savedEq === 'vocal' ||
+        savedEq === 'night' ||
+        savedEq === 'studio'
+      ) {
+        setEqPreset(savedEq);
+        if (appliedEqRef.current !== savedEq) {
+          appliedEqRef.current = savedEq;
+          void api.setEqPreset(savedEq).catch(() => {});
+        }
+      }
+    },
+    [api]
+  );
+
   const refreshLibraryStats = useCallback(async () => {
-    try {
-      const [pls, lk, dl] = await Promise.allSettled([
-        api.getPlaylists(),
-        api.getLiked(),
-        api.getDownloads(),
-      ]);
-      if (pls.status === 'fulfilled') setPlaylists(pls.value);
-      if (lk.status === 'fulfilled') setLikedTracks(lk.value);
-      if (dl.status === 'fulfilled') setDownloadTracks(dl.value);
-    } catch {
-      // Ignore
+    if (refreshInFlightRef.current) {
+      refreshPendingRef.current = true;
+      return refreshInFlightRef.current;
     }
-  }, [api]);
+
+    const run = (async () => {
+      try {
+        const [pls, lk, dl, settings] = await Promise.allSettled([
+          api.getPlaylists(),
+          api.getLiked(),
+          api.getDownloads(),
+          api.getSettings(),
+        ]);
+        if (pls.status === 'fulfilled') setPlaylists(pls.value);
+        if (lk.status === 'fulfilled') {
+          setLikedTracks(lk.value);
+          setLikedIds(new Set(lk.value.map((t) => t.video_id)));
+        }
+        if (dl.status === 'fulfilled') setDownloadTracks(dl.value);
+        if (settings.status === 'fulfilled') {
+          applySettingsPayload(settings.value);
+        }
+        setLibraryVersion((v) => v + 1);
+      } catch {
+        // Ignore
+      } finally {
+        refreshInFlightRef.current = null;
+        if (refreshPendingRef.current) {
+          refreshPendingRef.current = false;
+          void refreshLibraryStats();
+        }
+      }
+    })();
+
+    refreshInFlightRef.current = run;
+    return run;
+  }, [api, applySettingsPayload]);
+
+  const refreshLibraryByEvent = useCallback(
+    async (evtType?: string) => {
+      try {
+        if (evtType === 'liked') {
+          const lk = await api.getLiked();
+          setLikedTracks(lk);
+          setLikedIds(new Set(lk.map((t) => t.video_id)));
+          return;
+        }
+        if (evtType === 'download_updated' || evtType === 'download_deleted') {
+          const dl = await api.getDownloads();
+          setDownloadTracks(dl);
+          return;
+        }
+        if (
+          evtType === 'playlist_created' ||
+          evtType === 'playlist_deleted' ||
+          evtType === 'playlist_tracks_added' ||
+          evtType === 'playlist_tracks_removed'
+        ) {
+          const pls = await api.getPlaylists();
+          setPlaylists(pls);
+          setLibraryVersion((v) => v + 1);
+          return;
+        }
+        if (evtType === 'settings_updated') {
+          const settings = await api.getSettings();
+          applySettingsPayload(settings);
+          return;
+        }
+      } catch {
+        // Fall through on transient error
+      }
+      await refreshLibraryStats();
+    },
+    [api, applySettingsPayload, refreshLibraryStats]
+  );
 
   useEffect(() => {
-    refreshLibraryStats();
+    void refreshLibraryStats();
   }, [refreshLibraryStats, isConnected]);
 
-  // OLED mode DOM attribute toggling
   useEffect(() => {
-    if (isOled) {
-      document.documentElement.setAttribute('data-theme', 'oled');
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-    }
-  }, [isOled]);
+    const unsubLibrary = bridgeSocket.on('library_changed', (evt) => {
+      void refreshLibraryByEvent(evt?.type);
+    });
+    return () => {
+      unsubLibrary();
+    };
+  }, [refreshLibraryByEvent]);
 
-  // ---------------------------------------------------------------------------
-  // Audio playback actions (with optimistic updates)
-  // ---------------------------------------------------------------------------
+  const handleChangeCosmicMode = useCallback(
+    (mode: CosmicEffectsMode) => {
+      setCosmicMode(mode);
+      void api.setSettings({ cosmic_mode: mode, oled_mode: mode === 'oled' }).catch(() => {});
+    },
+    [api]
+  );
+
+  const handleToggleAutoDownloadLiked = useCallback(() => {
+    setAutoDownloadLiked((prev) => {
+      const next = !prev;
+      void api.setSettings({ auto_download_liked: next }).catch(() => {});
+      return next;
+    });
+  }, [api]);
+
+  const handleChangeEqPreset = useCallback(
+    (preset: EqPreset) => {
+      setEqPreset(preset);
+      appliedEqRef.current = preset;
+      void api.setEqPreset(preset).catch(() => {});
+      void api.setSettings({ eq_preset: preset }).catch(() => {});
+    },
+    [api]
+  );
+
+  // Atomic glitch-free transition into Dynamic Island (hides -> native resize/center -> React swap -> paint -> reveal)
+  const handleEnterIsland = useCallback(async () => {
+    if (islandSwitchingRef.current) return;
+    islandSwitchingRef.current = true;
+    try {
+      setRightDrawer('none');
+      setSuckPayload(null);
+      if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
+      savedBoundsRef.current = await enterDynamicIslandWindow();
+      setIsIslandMode(true);
+      await waitForNextPaint();
+      await showMainWindow(true);
+    } finally {
+      islandSwitchingRef.current = false;
+    }
+  }, []);
+
+  const handleExitIsland = useCallback(async () => {
+    if (islandSwitchingRef.current) return;
+    islandSwitchingRef.current = true;
+    try {
+      setSuckPayload(null);
+      if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
+      await exitDynamicIslandWindow(savedBoundsRef.current);
+      setRestoreSeq((s) => s + 1);
+      setIsIslandMode(false);
+      await waitForNextPaint();
+      await showMainWindow(true);
+      window.setTimeout(() => void trimProcessMemory(), 800);
+    } finally {
+      islandSwitchingRef.current = false;
+    }
+  }, []);
 
   const handlePlayTrack = useCallback(
     async (track: Track, index: number = 0, trackList?: Track[]) => {
-      // Optimistic state
       setPlayback((prev) => ({
         time_pos: 0,
         duration: track.duration_s,
-        state: 'playing',
+        state: 'buffering',
         volume: prev ? prev.volume : 80,
         current_track: track,
       }));
@@ -133,7 +464,7 @@ export default function App() {
           await api.play(track);
         }
       } catch {
-        // Handled via socket broadcast or error state
+        // Handled via socket broadcast
       }
     },
     [api, setPlayback]
@@ -142,55 +473,107 @@ export default function App() {
   const handlePlayAll = useCallback(
     async (tracks: Track[], shuffle: boolean = false) => {
       if (tracks.length === 0) return;
-      const targetList = shuffle ? [...tracks].sort(() => Math.random() - 0.5) : tracks;
-      handlePlayTrack(targetList[0], 0, targetList);
-      if (shuffle) {
-        api.setShuffle(true);
+      const startIndex = shuffle ? Math.floor(Math.random() * tracks.length) : 0;
+      const firstTrack = tracks[startIndex];
+      setPlayback((prev) => ({
+        time_pos: 0,
+        duration: firstTrack.duration_s,
+        state: 'buffering',
+        volume: prev ? prev.volume : 80,
+        current_track: firstTrack,
+      }));
+      setQueue((prev) => (prev ? { ...prev, shuffle } : prev));
+      try {
+        await api.setShuffle(shuffle);
+        await api.setQueue(tracks, startIndex, true);
+      } catch {
+        // Handled via socket broadcast
       }
     },
-    [api, handlePlayTrack]
+    [api, setPlayback, setQueue]
   );
 
   const handleTogglePlay = useCallback(async () => {
-    const isPlaying = playback?.state === 'playing';
+    const isPlaying = playback?.state === 'playing' || playback?.state === 'buffering';
+    if (!isPlaying && !playback?.current_track && !queue?.current_track) {
+      return;
+    }
+    const prevState = playback?.state;
     setPlayback((prev) =>
       prev ? { ...prev, state: isPlaying ? 'paused' : 'playing' } : null
     );
     try {
-      if (isPlaying) {
-        await api.pause();
-      } else {
-        await api.resume();
+      const tick = isPlaying ? await api.pause() : await api.resume();
+      if (tick && typeof tick.state === 'string') {
+        setPlayback((prev) => ({
+          time_pos: typeof tick.time_pos === 'number' ? tick.time_pos : prev?.time_pos ?? 0,
+          duration: typeof tick.duration === 'number' ? tick.duration : prev?.duration ?? 0,
+          state: tick.state,
+          volume: typeof tick.volume === 'number' ? tick.volume : prev?.volume ?? 80,
+          current_track:
+            tick.current_track !== undefined ? tick.current_track : prev?.current_track ?? null,
+        }));
       }
     } catch {
-      // Ignore
+      if (prevState) {
+        setPlayback((prev) => (prev ? { ...prev, state: prevState } : null));
+      }
     }
-  }, [api, playback?.state, setPlayback]);
+  }, [api, playback?.state, playback?.current_track, queue?.current_track, setPlayback]);
 
   const handleNext = useCallback(async () => {
-    try {
-      await api.next();
-    } catch {
-      // Ignore
+    if (queue && queue.items.length > 0) {
+      const nextIdx =
+        queue.repeat_mode === 'one'
+          ? queue.current_index
+          : queue.current_index + 1 < queue.items.length
+          ? queue.current_index + 1
+          : queue.repeat_mode === 'all'
+          ? 0
+          : -1;
+      if (nextIdx >= 0) {
+        const nextTrack = queue.items[nextIdx];
+        setPlayback((prev) => ({
+          time_pos: 0,
+          duration: nextTrack.duration_s,
+          state: 'buffering',
+          volume: prev ? prev.volume : 80,
+          current_track: nextTrack,
+        }));
+      }
     }
-  }, [api]);
+    try { await api.next(); } catch { /* Ignore */ }
+  }, [api, queue, setPlayback]);
 
   const handlePrev = useCallback(async () => {
-    try {
-      await api.prev();
-    } catch {
-      // Ignore
+    if (queue && queue.items.length > 0) {
+      const prevIdx =
+        queue.repeat_mode === 'one'
+          ? queue.current_index
+          : queue.current_index > 0
+          ? queue.current_index - 1
+          : queue.repeat_mode === 'all'
+          ? queue.items.length - 1
+          : 0;
+      const prevTrack = queue.items[prevIdx];
+      if (prevTrack) {
+        setPlayback((prev) => ({
+          time_pos: 0,
+          duration: prevTrack.duration_s,
+          state: 'buffering',
+          volume: prev ? prev.volume : 80,
+          current_track: prevTrack,
+        }));
+      }
     }
-  }, [api]);
+    try { await api.prev(); } catch { /* Ignore */ }
+  }, [api, queue, setPlayback]);
 
   const handleSeek = useCallback(
     async (seconds: number) => {
+      bridgeSocket.latestTimePos = seconds;
       setPlayback((prev) => (prev ? { ...prev, time_pos: seconds } : null));
-      try {
-        await api.seek(seconds);
-      } catch {
-        // Ignore
-      }
+      try { await api.seek(seconds); } catch { /* Ignore */ }
     },
     [api, setPlayback]
   );
@@ -198,11 +581,7 @@ export default function App() {
   const handleSetVolume = useCallback(
     async (vol: number) => {
       setPlayback((prev) => (prev ? { ...prev, volume: vol } : null));
-      try {
-        await api.setVolume(vol);
-      } catch {
-        // Ignore
-      }
+      try { await api.setVolume(vol); } catch { /* Ignore */ }
     },
     [api, setPlayback]
   );
@@ -210,11 +589,7 @@ export default function App() {
   const handleToggleShuffle = useCallback(async () => {
     const current = queue?.shuffle ?? false;
     setQueue((prev) => (prev ? { ...prev, shuffle: !current } : null));
-    try {
-      await api.setShuffle(!current);
-    } catch {
-      // Ignore
-    }
+    try { await api.setShuffle(!current); } catch { /* Ignore */ }
   }, [api, queue?.shuffle, setQueue]);
 
   const handleCycleRepeat = useCallback(async () => {
@@ -222,58 +597,53 @@ export default function App() {
     const current = queue?.repeat_mode || 'off';
     const nextMode = modes[(modes.indexOf(current) + 1) % modes.length];
     setQueue((prev) => (prev ? { ...prev, repeat_mode: nextMode } : null));
-    try {
-      await api.setRepeat(nextMode);
-    } catch {
-      // Ignore
-    }
+    try { await api.setRepeat(nextMode); } catch { /* Ignore */ }
   }, [api, queue?.repeat_mode, setQueue]);
 
   const handleToggleAutoplayRadio = useCallback(async () => {
     const current = queue?.autoplay_radio ?? true;
     setQueue((prev) => (prev ? { ...prev, autoplay_radio: !current } : null));
-    try {
-      await api.setAutoplayRadio(!current);
-    } catch {
-      // Ignore
-    }
+    try { await api.setAutoplayRadio(!current); } catch { /* Ignore */ }
   }, [api, queue?.autoplay_radio, setQueue]);
 
   const handleToggleLike = useCallback(
     async (track: Track) => {
-      const nextLiked = !track.is_liked;
+      const currentlyLiked = likedIds.has(track.video_id);
+      const nextLiked = !currentlyLiked;
 
-      // Optimistic track update in playback
-      if (playback?.current_track?.video_id === track.video_id) {
-        setPlayback((prev) =>
-          prev && prev.current_track
-            ? { ...prev, current_track: { ...prev.current_track, is_liked: nextLiked } }
-            : prev
-        );
-      }
+      setLikedIds((prev) => {
+        const next = new Set(prev);
+        if (nextLiked) next.add(track.video_id);
+        else next.delete(track.video_id);
+        return next;
+      });
 
-      // Optimistic update in queue
-      if (queue?.items) {
-        setQueue((prev) =>
-          prev
-            ? {
-                ...prev,
-                items: prev.items.map((it) =>
-                  it.video_id === track.video_id ? { ...it, is_liked: nextLiked } : it
-                ),
-              }
-            : prev
-        );
+      if (nextLiked && autoDownloadLiked && !downloadedIds.has(track.video_id)) {
+        setDownloads((prev) => ({
+          ...prev,
+          [track.video_id]: {
+            video_id: track.video_id,
+            status: 'queued',
+            percent: 0,
+            progress_pct: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+          },
+        }));
       }
 
       try {
         await api.toggleLike(track.video_id, track);
-        refreshLibraryStats();
       } catch {
-        // Revert on error
+        setLikedIds((prev) => {
+          const next = new Set(prev);
+          if (currentlyLiked) next.add(track.video_id);
+          else next.delete(track.video_id);
+          return next;
+        });
       }
     },
-    [api, playback?.current_track, queue?.items, refreshLibraryStats, setPlayback, setQueue]
+    [api, likedIds, autoDownloadLiked, downloadedIds, setDownloads]
   );
 
   const handleDownload = useCallback(
@@ -283,16 +653,30 @@ export default function App() {
         [track.video_id]: {
           video_id: track.video_id,
           status: 'queued',
+          percent: 0,
           progress_pct: 0,
           downloaded_bytes: 0,
           total_bytes: 0,
         },
       }));
+      try { await api.startDownload(track.video_id, track); } catch { /* Ignore */ }
+    },
+    [api, setDownloads]
+  );
+
+  const handleDeleteDownload = useCallback(
+    async (track: Track) => {
+      setDownloadTracks((prev) => prev.filter((t) => t.video_id !== track.video_id));
+      setDownloads((prev) => {
+        const next = { ...prev };
+        delete next[track.video_id];
+        return next;
+      });
       try {
-        await api.startDownload(track.video_id, track);
-        refreshLibraryStats();
+        await api.deleteDownload(track.video_id);
+        await refreshLibraryStats();
       } catch {
-        // Ignore
+        await refreshLibraryStats();
       }
     },
     [api, refreshLibraryStats, setDownloads]
@@ -300,75 +684,38 @@ export default function App() {
 
   const handleDownloadAll = useCallback(
     async (tracksToDownload: Track[]) => {
-      for (const t of tracksToDownload) {
-        handleDownload(t);
-      }
+      for (const t of tracksToDownload) void handleDownload(t);
     },
     [handleDownload]
   );
 
-  const handleAddNext = useCallback(
-    async (track: Track) => {
-      try {
-        await api.addNextQueue(track);
-      } catch {
-        // Ignore
-      }
-    },
-    [api]
-  );
-
-  const handleAppendQueue = useCallback(
-    async (track: Track) => {
-      try {
-        await api.appendQueue(track);
-      } catch {
-        // Ignore
-      }
-    },
-    [api]
-  );
-
-  const handleRemoveQueueItem = useCallback(
-    async (index: number) => {
-      try {
-        await api.removeQueue(index);
-      } catch {
-        // Ignore
-      }
-    },
-    [api]
-  );
-
-  const handleMoveQueueItem = useCallback(
-    async (fromIdx: number, toIdx: number) => {
-      try {
-        await api.moveQueue(fromIdx, toIdx);
-      } catch {
-        // Ignore
-      }
-    },
-    [api]
-  );
-
-  const handleClearQueue = useCallback(async () => {
-    try {
-      await api.clearQueue();
-    } catch {
-      // Ignore
-    }
+  const handleAddNext = useCallback(async (track: Track) => {
+    try { await api.addNextQueue(track); } catch { /* Ignore */ }
   }, [api]);
 
-  // Playlist creation & track insertion
+  const handleAppendQueue = useCallback(async (track: Track) => {
+    try { await api.appendQueue(track); } catch { /* Ignore */ }
+  }, [api]);
+
+  const handleRemoveQueueItem = useCallback(async (index: number) => {
+    try { await api.removeQueue(index); } catch { /* Ignore */ }
+  }, [api]);
+
+  const handleMoveQueueItem = useCallback(async (fromIdx: number, toIdx: number) => {
+    try { await api.moveQueue(fromIdx, toIdx); } catch { /* Ignore */ }
+  }, [api]);
+
+  const handleClearQueue = useCallback(async () => {
+    try { await api.clearQueue(); } catch { /* Ignore */ }
+  }, [api]);
+
   const handleCreatePlaylist = useCallback(
     async (name: string, description: string) => {
       try {
         const created = await api.createPlaylist(name, description);
         setPlaylists((prev) => [...prev, created]);
         navigateTo('playlist', created.id);
-      } catch {
-        // Ignore
-      }
+      } catch { /* Ignore */ }
     },
     [api, navigateTo]
   );
@@ -377,20 +724,20 @@ export default function App() {
     async (playlistId: string, track: Track) => {
       try {
         await api.addPlaylistTracks(playlistId, [track]);
-        refreshLibraryStats();
-      } catch {
-        // Ignore
-      }
+        await refreshLibraryStats();
+      } catch { /* Ignore */ }
     },
     [api, refreshLibraryStats]
   );
 
-  const handlePlaylistDeleted = useCallback((id: string) => {
-    setPlaylists((prev) => prev.filter((p) => p.id !== id));
-    navigateTo('library');
-  }, [navigateTo]);
+  const handlePlaylistDeleted = useCallback(
+    (id: string) => {
+      setPlaylists((prev) => prev.filter((p) => p.id !== id));
+      navigateTo('home');
+    },
+    [navigateTo]
+  );
 
-  // Global Keyboard Shortcuts per UI_SPEC.md Section 4
   const currentTrackRef = useRef(playback?.current_track);
   currentTrackRef.current = playback?.current_track;
 
@@ -402,54 +749,31 @@ export default function App() {
         activeEl?.tagName === 'TEXTAREA' ||
         (activeEl as HTMLElement)?.isContentEditable;
 
-      // Space: Play / Pause (when not typing in an input)
       if (e.code === 'Space' && !isInput) {
         e.preventDefault();
-        handleTogglePlay();
+        void handleTogglePlay();
         return;
       }
-
-      // Ctrl+Right: Next track
       if (e.ctrlKey && e.key === 'ArrowRight') {
         e.preventDefault();
-        handleNext();
+        void handleNext();
         return;
       }
-
-      // Ctrl+Left: Previous track
       if (e.ctrlKey && e.key === 'ArrowLeft') {
         e.preventDefault();
-        handlePrev();
+        void handlePrev();
         return;
       }
-
-      // Ctrl+L: Like / Unlike current track
       if (e.ctrlKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
-        if (currentTrackRef.current) {
-          handleToggleLike(currentTrackRef.current);
-        }
+        if (currentTrackRef.current) void handleToggleLike(currentTrackRef.current);
         return;
       }
-
-      // Esc: Close modal or Queue drawer
       if (e.key === 'Escape') {
-        if (isCreatePlaylistOpen) {
-          setIsCreatePlaylistOpen(false);
-          return;
-        }
-        if (addToPlaylistTrack) {
-          setAddToPlaylistTrack(null);
-          return;
-        }
-        if (isSettingsOpen) {
-          setIsSettingsOpen(false);
-          return;
-        }
-        if (isQueueOpen) {
-          setIsQueueOpen(false);
-          return;
-        }
+        if (isCreatePlaylistOpen) return setIsCreatePlaylistOpen(false);
+        if (addToPlaylistTrack) return setAddToPlaylistTrack(null);
+        if (isSettingsOpen) return setIsSettingsOpen(false);
+        if (rightDrawer !== 'none') return setRightDrawer('none');
       }
     };
 
@@ -463,134 +787,273 @@ export default function App() {
     isCreatePlaylistOpen,
     addToPlaylistTrack,
     isSettingsOpen,
-    isQueueOpen,
+    rightDrawer,
   ]);
 
-  return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden select-none bg-bg-base text-text-1">
-      {/* 44px Draggable Frameless Titlebar */}
-      <Titlebar
-        searchQuery={searchQuery}
-        onSearchChange={(q: string) => {
-          setSearchQuery(q);
-          setSubmittedSearch(q);
-          if (activeTab !== 'search') {
-            navigateTo('search');
-          }
-        }}
-        onSearchSubmit={(q: string) => {
-          setSubmittedSearch(q);
-          if (activeTab !== 'search') {
-            navigateTo('search');
-          }
-        }}
-        canGoBack={historyIndex > 0}
-        canGoForward={historyIndex < historyStack.length - 1}
-        onGoBack={handleGoBack}
-        onGoForward={handleGoForward}
-        isConnected={isConnected}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onFocusSearchTab={() => {
-          if (activeTab !== 'search') {
-            navigateTo('search');
-          }
-        }}
-      />
+  const handleToggleSidebar = useCallback(() => {
+    setIsSidebarCollapsed((c) => !c);
+  }, []);
 
-      {/* Main Workspace (Sidebar + Dynamic View + Collapsible Queue) */}
-      <div className="flex flex-1 min-h-0 overflow-hidden relative">
-        {/* 220px Left Sidebar */}
-        <Sidebar
-          activeTab={activeTab}
-          activePlaylistId={activePlaylistId}
-          playlists={playlists}
-          likedCount={likedTracks.length}
-          downloadCount={downloadTracks.length}
-          onSelectTab={navigateTo}
-          onOpenCreatePlaylist={() => setIsCreatePlaylistOpen(true)}
-        />
+  const handleOpenSettings = useCallback(() => {
+    setIsSettingsOpen(true);
+  }, []);
 
-        {/* Fluid View Area */}
-        <main className="flex-1 min-w-0 flex flex-col bg-bg-base overflow-hidden relative">
-          {activeTab === 'home' && (
-            <HomeView
-              onPlayTrack={(t: Track) => handlePlayTrack(t, 0, [t])}
-              onPlayAll={handlePlayAll}
-            />
-          )}
+  const handleOpenCreatePlaylist = useCallback(() => {
+    setIsCreatePlaylistOpen(true);
+  }, []);
 
-          {activeTab === 'search' && (
-            <SearchView
-              initialQuery={submittedSearch}
-              currentTrackId={playback?.current_track?.video_id}
-              isPlaying={playback?.state === 'playing'}
-              downloads={downloads}
-              onPlay={handlePlayTrack}
-              onToggleLike={handleToggleLike}
-              onDownload={handleDownload}
-              onAddNext={handleAddNext}
-              onAppendQueue={handleAppendQueue}
-              onOpenAddToPlaylist={(t: Track) => setAddToPlaylistTrack(t)}
-            />
-          )}
+  const handleOpenAddToPlaylist = useCallback((t: Track) => {
+    setAddToPlaylistTrack(t);
+  }, []);
 
-          {(activeTab === 'library' ||
-            activeTab === 'liked' ||
-            activeTab === 'downloads' ||
-            activeTab === 'history' ||
-            activeTab === 'playlist') && (
-            <LibraryView
-              tab={activeTab}
-              playlistId={activePlaylistId}
-              playlists={playlists}
-              currentTrackId={playback?.current_track?.video_id}
-              isPlaying={playback?.state === 'playing'}
-              downloads={downloads}
-              onPlay={handlePlayTrack}
-              onPlayAll={handlePlayAll}
-              onToggleLike={handleToggleLike}
-              onDownload={handleDownload}
-              onDownloadAll={handleDownloadAll}
-              onAddNext={handleAddNext}
-              onAppendQueue={handleAppendQueue}
-              onOpenAddToPlaylist={(t: Track) => setAddToPlaylistTrack(t)}
-              onPlaylistDeleted={handlePlaylistDeleted}
-            />
-          )}
-        </main>
+  const handleCloseRightDrawer = useCallback(() => {
+    setRightDrawer('none');
+  }, []);
 
-        {/* 300px Collapsible Queue Drawer */}
-        <QueueDrawer
-          isOpen={isQueueOpen}
-          queue={queue}
-          onClose={() => setIsQueueOpen(false)}
-          onPlayQueueItem={(track: Track, idx: number) => handlePlayTrack(track, idx, queue?.items)}
-          onRemoveQueueItem={handleRemoveQueueItem}
-          onMoveQueueItem={handleMoveQueueItem}
-          onClearQueue={handleClearQueue}
-          onToggleAutoplayRadio={handleToggleAutoplayRadio}
-        />
-      </div>
+  const handleTitlebarSearchChange = useCallback(
+    (q: string) => {
+      setSearchQuery(q);
+      setSubmittedSearch(q);
+      if (q.trim().length > 0) {
+        setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+        if (activeTab !== 'search') navigateTo('search');
+      }
+    },
+    [activeTab, navigateTo]
+  );
 
-      {/* 76px Fixed Bottom Player Bar */}
-      <PlayerBar
+  const handleTitlebarSearchSubmit = useCallback(
+    (q: string) => {
+      setSubmittedSearch(q);
+      if (q.trim().length > 0) {
+        setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+        if (activeTab !== 'search') navigateTo('search');
+      }
+    },
+    [activeTab, navigateTo]
+  );
+
+  const handleFocusSearchTab = useCallback(() => {
+    setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+    if (activeTab !== 'search') navigateTo('search');
+  }, [activeTab, navigateTo]);
+
+  const handlePlaySingleHomeTrack = useCallback(
+    (t: Track) => {
+      void handlePlayTrack(t, 0, [t]);
+    },
+    [handlePlayTrack]
+  );
+
+  const handlePlayQueueItem = useCallback(
+    async (track: Track, idx: number) => {
+      setPlayback((prev) => ({
+        time_pos: 0,
+        duration: track.duration_s,
+        state: 'buffering',
+        volume: prev ? prev.volume : 80,
+        current_track: track,
+      }));
+      try {
+        await api.jumpQueue(idx, true);
+      } catch {
+        // Handled via socket broadcast
+      }
+    },
+    [api, setPlayback]
+  );
+
+  const handleEnterIslandAction = useCallback(() => {
+    void handleEnterIsland();
+  }, [handleEnterIsland]);
+
+  const handleExitIslandAction = useCallback(() => {
+    void handleExitIsland();
+  }, [handleExitIsland]);
+
+  if (isIslandMode) {
+    return (
+      <DynamicIsland
         playback={playback}
         queue={queue}
-        downloads={downloads}
-        isQueueOpen={isQueueOpen}
-        onToggleQueue={() => setIsQueueOpen((prev) => !prev)}
+        likedIds={likedIds}
         onTogglePlay={handleTogglePlay}
         onNext={handleNext}
         onPrev={handlePrev}
         onSeek={handleSeek}
-        onSetVolume={handleSetVolume}
-        onToggleShuffle={handleToggleShuffle}
-        onCycleRepeat={handleCycleRepeat}
         onToggleLike={handleToggleLike}
-        onDownload={handleDownload}
+        onExitIsland={handleExitIslandAction}
+      />
+    );
+  }
+
+  return (
+    <div
+      key={`orbit-shell-${restoreSeq}`}
+      className={`relative flex flex-col h-screen w-screen overflow-hidden select-none text-[#F1F4FA] bg-[#06080F] ${
+        restoreSeq > 0 ? 'eh-app-restore' : ''
+      }`}
+    >
+      {/* Subtle Top-Right Black Hole + Starfield */}
+      <StarfieldBg
+        mode={cosmicMode}
+        absorbPulseKey={absorbPulseKey}
+        isPlaying={playback?.state === 'playing' || playback?.state === 'buffering'}
+        paused={rightDrawer === 'lyrics'}
       />
 
-      {/* Modals & Dialogs (No backdrop-filter blur) */}
+      {/* Outgoing Song Card Spiraling into the Black Hole (Full mode only, suppressed when Lyrics/Island active) */}
+      <BlackHoleTransition
+        payload={suckPayload}
+        enabled={cosmicMode === 'full' && !isIslandMode && rightDrawer !== 'lyrics'}
+      />
+
+      <div className="relative z-10 flex flex-col h-full w-full overflow-hidden">
+        <Titlebar
+          searchQuery={searchQuery}
+          onSearchChange={handleTitlebarSearchChange}
+          onSearchSubmit={handleTitlebarSearchSubmit}
+          canGoBack={historyIndex > 0}
+          canGoForward={historyIndex < historyStack.length - 1}
+          onGoBack={handleGoBack}
+          onGoForward={handleGoForward}
+          isConnected={isConnected}
+          onOpenSettings={handleOpenSettings}
+          onEnterIsland={handleEnterIslandAction}
+          onFocusSearchTab={handleFocusSearchTab}
+        />
+
+        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 sm:gap-3 px-2 sm:px-3 pb-2">
+          <Sidebar
+            activeTab={activeTab}
+            activePlaylistId={activePlaylistId}
+            playlists={playlists}
+            likedCount={likedTracks.length}
+            downloadCount={downloadTracks.length}
+            collapsed={isSidebarCollapsed}
+            onToggleCollapse={handleToggleSidebar}
+            onSelectTab={navigateTo}
+            onOpenCreatePlaylist={handleOpenCreatePlaylist}
+          />
+
+          <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent">
+            {activeTab === 'home' && (
+              <HomeView
+                currentTrackId={activeVideoId}
+                likedIds={likedIds}
+                onPlayTrack={handlePlaySingleHomeTrack}
+                onPlayAll={handlePlayAll}
+                onToggleLike={handleToggleLike}
+                onAddNext={handleAddNext}
+              />
+            )}
+
+            {activeTab === 'search' && (
+              <SearchView
+                initialQuery={submittedSearch}
+                currentTrackId={activeVideoId}
+                isPlaying={playback?.state === 'playing'}
+                downloads={downloads}
+                likedIds={likedIds}
+                downloadedIds={downloadedIds}
+                onPlay={handlePlayTrack}
+                onToggleLike={handleToggleLike}
+                onDownload={handleDownload}
+                onDeleteDownload={handleDeleteDownload}
+                onAddNext={handleAddNext}
+                onAppendQueue={handleAppendQueue}
+                onOpenAddToPlaylist={handleOpenAddToPlaylist}
+              />
+            )}
+
+            {(activeTab === 'library' ||
+              activeTab === 'liked' ||
+              activeTab === 'downloads' ||
+              activeTab === 'history' ||
+              activeTab === 'playlist') && (
+              <LibraryView
+                tab={activeTab}
+                playlistId={activePlaylistId}
+                playlists={playlists}
+                likedTracks={likedTracks}
+                downloadTracks={downloadTracks}
+                currentTrackId={activeVideoId}
+                isPlaying={playback?.state === 'playing'}
+                downloads={downloads}
+                likedIds={likedIds}
+                downloadedIds={downloadedIds}
+                libraryVersion={libraryVersion}
+                onPlay={handlePlayTrack}
+                onPlayAll={handlePlayAll}
+                onToggleLike={handleToggleLike}
+                onDownload={handleDownload}
+                onDeleteDownload={handleDeleteDownload}
+                onDownloadAll={handleDownloadAll}
+                onAddNext={handleAddNext}
+                onAppendQueue={handleAppendQueue}
+                onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                onPlaylistDeleted={handlePlaylistDeleted}
+              />
+            )}
+            {/* Mutually-Exclusive Split-Pane Lyrics Stage */}
+            <LyricsDrawer
+              isOpen={rightDrawer === 'lyrics'}
+              playback={playback}
+              queue={queue}
+              downloads={downloads}
+              likedIds={likedIds}
+              downloadedIds={downloadedIds}
+              onClose={handleCloseRightDrawer}
+              onSeek={handleSeek}
+              onToggleLike={handleToggleLike}
+              onDownload={handleDownload}
+            />
+            {/* Smooth GPU Slide-Over Queue Drawer (Zero Main-Pane Reflow) */}
+            <QueueDrawer
+              isOpen={rightDrawer === 'queue'}
+              queue={queue}
+              onClose={handleCloseRightDrawer}
+              onPlayQueueItem={handlePlayQueueItem}
+              onRemoveQueueItem={handleRemoveQueueItem}
+              onMoveQueueItem={handleMoveQueueItem}
+              onClearQueue={handleClearQueue}
+              onToggleAutoplayRadio={handleToggleAutoplayRadio}
+            />
+          </main>
+        </div>
+
+        {/* Floating Liquid Glass Player Dock */}
+        <div className="px-2 sm:px-4 pb-2 sm:pb-3 pt-0.5 sm:pt-1 flex-none">
+          <PlayerBar
+            playback={playback}
+            queue={queue}
+            downloads={downloads}
+            likedIds={likedIds}
+            downloadedIds={downloadedIds}
+            eqPreset={eqPreset}
+            isQueueOpen={rightDrawer === 'queue'}
+            isLyricsOpen={rightDrawer === 'lyrics'}
+            transitionKey={playerRiseKey}
+            onChangeEqPreset={handleChangeEqPreset}
+            onToggleQueue={() =>
+              setRightDrawer((prev) => (prev === 'queue' ? 'none' : 'queue'))
+            }
+            onToggleLyrics={() =>
+              setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : 'lyrics'))
+            }
+            onTogglePlay={handleTogglePlay}
+            onNext={handleNext}
+            onPrev={handlePrev}
+            onSeek={handleSeek}
+            onSetVolume={handleSetVolume}
+            onToggleShuffle={handleToggleShuffle}
+            onCycleRepeat={handleCycleRepeat}
+            onToggleLike={handleToggleLike}
+            onDownload={handleDownload}
+          />
+        </div>
+      </div>
+
       <CreatePlaylistModal
         isOpen={isCreatePlaylistOpen}
         onClose={() => setIsCreatePlaylistOpen(false)}
@@ -609,10 +1072,31 @@ export default function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        config={config}
-        isOled={isOled}
-        onToggleOled={() => setIsOled((prev) => !prev)}
+        cosmicMode={cosmicMode}
+        onChangeCosmicMode={handleChangeCosmicMode}
+        autoDownloadLiked={autoDownloadLiked}
+        onToggleAutoDownloadLiked={handleToggleAutoDownloadLiked}
       />
+
+      {visibleError && (
+        <div
+          role="alert"
+          className="fixed bottom-[98px] left-1/2 -translate-x-1/2 z-[90] max-w-md w-[calc(100%-2rem)] ios-liquid-popover eh-popover-in rounded-2xl px-4 py-2.5 flex items-center gap-2.5 border border-[#FF4D8D]/35"
+        >
+          <AlertCircle size={15} className="text-[#FF4D8D] flex-none" />
+          <span className="text-xs text-[#F1F4FA] flex-1 min-w-0 truncate" title={visibleError}>
+            {visibleError}
+          </span>
+          <button
+            type="button"
+            onClick={() => setDismissedError(visibleError)}
+            title="Dismiss"
+            className="p-1 text-[#9AA5C4] hover:text-white rounded-full hover:bg-white/[0.08] transition-colors flex-none"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

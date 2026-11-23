@@ -3,7 +3,13 @@ name = "metrolite"
 version = "0.1.0"
 description = "Lightweight Windows desktop YouTube Music player under 185 MB RAM"
 requires-python = ">=3.11,<3.13"
-dependencies = ["pyyaml", "pydantic-settings", "httpx", "psutil"]
+dependencies = [
+    "pyyaml",
+    "pydantic-settings",
+    "httpx",
+    "psutil",
+    "yt-dlp[default]>=2026.10.26",
+]
 
 [project.scripts]
 metrolite = "metrolite.main:main"
@@ -35,3 +41,4 @@ src = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

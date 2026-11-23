@@ -34,3 +34,11 @@ ui/src-tauri/target/
 
 # os
 Thumbs.db
+
+# backups, logs & temporary dumps
+.backup_*/
+*.log
+err.txt
+metrolite_code.txt
+*.exe
+

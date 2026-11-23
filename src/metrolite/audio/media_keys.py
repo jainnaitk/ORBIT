@@ -29,6 +29,9 @@ class MediaKeysListener:
     ) -> None:
         cfg = get_config()
         self.enabled = enabled if enabled is not None else cfg.hotkeys.enabled
+        self.play_pause_key_name = cfg.hotkeys.play_pause
+        self.next_track_key_name = cfg.hotkeys.next_track
+        self.prev_track_key_name = cfg.hotkeys.prev_track
         self.on_play_pause = on_play_pause
         self.on_next = on_next
         self.on_prev = on_prev
@@ -37,19 +40,22 @@ class MediaKeysListener:
 
     def _on_press(self, key: Any) -> None:
         """Handle key press event."""
-        if not self.enabled:
+        if not self.enabled or keyboard is None:
             return
 
         try:
-            if key == getattr(keyboard.Key, "media_play_pause", None):
+            play_key = getattr(keyboard.Key, self.play_pause_key_name, None)
+            next_key = getattr(keyboard.Key, self.next_track_key_name, None)
+            prev_key = getattr(keyboard.Key, self.prev_track_key_name, None)
+            if play_key is not None and key == play_key:
                 logger.debug("MediaPlayPause pressed")
                 if self.on_play_pause:
                     self.on_play_pause()
-            elif key == getattr(keyboard.Key, "media_next", None):
+            elif next_key is not None and key == next_key:
                 logger.debug("MediaNext pressed")
                 if self.on_next:
                     self.on_next()
-            elif key == getattr(keyboard.Key, "media_previous", None):
+            elif prev_key is not None and key == prev_key:
                 logger.debug("MediaPrevious pressed")
                 if self.on_prev:
                     self.on_prev()

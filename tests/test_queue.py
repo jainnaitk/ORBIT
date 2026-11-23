@@ -193,3 +193,56 @@ async def test_queue_sqlite_persistence(temp_db: Path, sample_tracks: list[Track
     loaded_sync = qm3.load_from_db_sync()
     assert loaded_sync is True
     assert qm3.current_index == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_consecutive_errors_limit(sample_tracks: list[Track]) -> None:
+    """Test consecutive error tracking and max 2 consecutive error skips limit."""
+    qm = QueueManager(autoplay_radio=False)
+    qm.set_queue(sample_tracks, start_index=0)
+    assert qm.consecutive_errors == 0
+    assert qm.can_skip_on_error() is True
+
+    # Error skip 1: allowed
+    qm.record_error()
+    t1 = await qm.next_track(is_error=True)
+    assert t1 is not None
+    assert t1.video_id == "vid_2"
+    assert qm.consecutive_errors == 1
+    assert qm.can_skip_on_error() is True
+
+    # Error skip 2: allowed
+    qm.record_error()
+    t2 = await qm.next_track(is_error=True)
+    assert t2 is not None
+    assert t2.video_id == "vid_3"
+    assert qm.consecutive_errors == 2
+    assert qm.can_skip_on_error() is True
+
+    # Error skip 3: exceeds limit of 2, auto-advance halted
+    qm.record_error()
+    t3 = await qm.next_track(is_error=True)
+    assert t3 is None
+    assert qm.consecutive_errors == 3
+    assert qm.can_skip_on_error() is False
+    assert qm.current_index == 2  # did not advance
+
+    # Normal playback advancement resets error count
+    t_normal = await qm.next_track(is_error=False)
+    assert t_normal is not None
+    assert t_normal.video_id == "vid_4"
+    assert qm.consecutive_errors == 0
+    assert qm.can_skip_on_error() is True
+
+    # Manual reset
+    qm.record_error()
+    assert qm.consecutive_errors == 1
+    qm.reset_errors()
+    assert qm.consecutive_errors == 0
+
+    # set_queue resets error count
+    qm.record_error()
+    qm.record_error()
+    assert qm.consecutive_errors == 2
+    qm.set_queue(sample_tracks[:2])
+    assert qm.consecutive_errors == 0

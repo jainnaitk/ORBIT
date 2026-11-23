@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -471,3 +472,96 @@ async def test_downloader_restart_persistence(tmp_path: Path) -> None:
     dls = await mgr2.list_downloads()
     assert len(dls) == 1
     assert dls[0]["video_id"] == "persisted_track"
+
+
+@pytest.mark.asyncio
+async def test_download_track_without_ffmpeg_saves_actual_container(
+    download_mgr: DownloadManager,
+) -> None:
+    """Verify that when ffmpeg is not on PATH, download saves cleanly with actual container (.m4a) and tracks.local_path is updated."""
+    fake_file = download_mgr.downloads_dir / "dl_no_ffmpeg.m4a"
+
+    def mock_extract(url: str, download: bool = True) -> dict[str, Any]:
+        fake_file.write_bytes(b"dummy m4a audio bytes")
+        return {
+            "id": "dl_no_ffmpeg",
+            "title": "M4A Anthem",
+            "artist": "AAC Artist",
+            "album": "Uncompressed",
+            "duration": 180,
+            "ext": "m4a",
+            "_filename": str(fake_file),
+            "requested_downloads": [{"filepath": str(fake_file)}],
+        }
+
+    with patch("shutil.which", return_value=None), patch("yt_dlp.YoutubeDL") as mock_ydl_cls:
+        ydl_instance = MagicMock()
+        ydl_instance.extract_info.side_effect = mock_extract
+        mock_ydl_cls.return_value.__enter__.return_value = ydl_instance
+
+        resolved_path = await download_mgr.download_track("dl_no_ffmpeg")
+        assert Path(resolved_path).is_file()
+        assert Path(resolved_path).name == "dl_no_ffmpeg.m4a"
+        assert resolved_path.endswith(".m4a")
+
+    from metrolite.store.db import get_connection
+
+    async with get_connection(download_mgr.db_path) as conn:
+        cursor = await conn.execute(
+            "SELECT local_path, file_size_bytes FROM tracks WHERE video_id = ?;",
+            ("dl_no_ffmpeg",),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["local_path"] == resolved_path
+        assert row["local_path"].endswith(".m4a")
+        assert row["file_size_bytes"] == len(b"dummy m4a audio bytes")
+
+    resolver = StreamResolver(db_path=download_mgr.db_path)
+    res_source = await resolver.resolve("dl_no_ffmpeg")
+    assert res_source == resolved_path
+
+
+@pytest.mark.asyncio
+async def test_download_track_with_ffmpeg_extracts_opus(
+    download_mgr: DownloadManager,
+) -> None:
+    """Verify that when ffmpeg is available, download extracts to .opus and tracks.local_path is updated."""
+    fake_file = download_mgr.downloads_dir / "dl_with_ffmpeg.opus"
+
+    def mock_extract(url: str, download: bool = True) -> dict[str, Any]:
+        fake_file.write_bytes(b"dummy opus audio bytes")
+        return {
+            "id": "dl_with_ffmpeg",
+            "title": "Opus Anthem",
+            "artist": "Opus Artist",
+            "duration": 200,
+            "ext": "opus",
+            "_filename": str(fake_file),
+            "requested_downloads": [{"filepath": str(fake_file)}],
+        }
+
+    with (
+        patch("shutil.which", return_value="C:\\ffmpeg\\bin\\ffmpeg.exe"),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+    ):
+        ydl_instance = MagicMock()
+        ydl_instance.extract_info.side_effect = mock_extract
+        mock_ydl_cls.return_value.__enter__.return_value = ydl_instance
+
+        resolved_path = await download_mgr.download_track("dl_with_ffmpeg")
+        assert Path(resolved_path).is_file()
+        assert Path(resolved_path).name == "dl_with_ffmpeg.opus"
+        assert resolved_path.endswith(".opus")
+
+    from metrolite.store.db import get_connection
+
+    async with get_connection(download_mgr.db_path) as conn:
+        cursor = await conn.execute(
+            "SELECT local_path, file_size_bytes FROM tracks WHERE video_id = ?;",
+            ("dl_with_ffmpeg",),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["local_path"] == resolved_path
+        assert row["local_path"].endswith(".opus")

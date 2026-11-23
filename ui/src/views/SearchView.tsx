@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { memo, useEffect, useState, useCallback, useRef } from 'react';
 import { Search as SearchIcon, Loader2 } from 'lucide-react';
 import { TrackList } from '../components/TrackList';
 import type { Track, DownloadProgress } from '../api/types';
@@ -9,9 +9,12 @@ interface SearchViewProps {
   currentTrackId?: string | null;
   isPlaying?: boolean;
   downloads?: Record<string, DownloadProgress>;
-  onPlay: (track: Track, index: number, allTracks: Track[]) => void;
+  likedIds?: Set<string>;
+  downloadedIds?: Set<string>;
+  onPlay: (track: Track, index: number, allTracks?: Track[]) => void;
   onToggleLike: (track: Track) => void;
   onDownload: (track: Track) => void;
+  onDeleteDownload: (track: Track) => void;
   onAddNext: (track: Track) => void;
   onAppendQueue: (track: Track) => void;
   onOpenAddToPlaylist: (track: Track) => void;
@@ -19,97 +22,110 @@ interface SearchViewProps {
 
 const FILTER_TYPES = [
   { id: 'songs', label: 'Songs' },
-  { id: 'albums', label: 'Albums' },
-  { id: 'playlists', label: 'Playlists' },
-  { id: 'artists', label: 'Artists' },
-  { id: 'all', label: 'All' },
+  { id: 'videos', label: 'Videos' },
+  { id: 'all', label: 'All Tracks' },
 ];
 
-export const SearchView = ({
+export const SearchView = memo(({
   initialQuery = '',
   currentTrackId,
   isPlaying,
   downloads = {},
+  likedIds,
+  downloadedIds,
   onPlay,
   onToggleLike,
   onDownload,
+  onDeleteDownload,
   onAddNext,
   onAppendQueue,
   onOpenAddToPlaylist,
 }: SearchViewProps) => {
-  const [query, setQuery] = useState<string>(initialQuery);
   const [filterType, setFilterType] = useState<string>('songs');
   const [results, setResults] = useState<Track[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [settledKey, setSettledKey] = useState<string>('');
   const debounceTimerRef = useRef<number | null>(null);
+  const reqSeqRef = useRef<number>(0);
 
-  useEffect(() => {
-    if (initialQuery !== undefined) {
-      setQuery(initialQuery);
-    }
-  }, [initialQuery]);
+  const trimmedQuery = initialQuery.trim();
+  const activeKey = `${trimmedQuery}::${filterType}`;
 
-  const executeSearch = useCallback(async (q: string, filter: string) => {
-    const trimmed = q.trim();
-    if (!trimmed) {
+  const executeSearch = useCallback(async (q: string, filter: string, key: string) => {
+    const mySeq = ++reqSeqRef.current;
+    if (!q) {
       setResults([]);
       setIsLoading(false);
+      setSettledKey(key);
       return;
     }
     setIsLoading(true);
     try {
-      const data = await bridgeApi.search(trimmed, filter === 'all' ? 'songs' : filter, 30);
+      const data = await bridgeApi.search(q, filter, 30);
+      if (mySeq !== reqSeqRef.current) return;
       setResults(data);
     } catch {
+      if (mySeq !== reqSeqRef.current) return;
       setResults([]);
     } finally {
-      setIsLoading(false);
+      if (mySeq === reqSeqRef.current) {
+        setIsLoading(false);
+        setSettledKey(key);
+      }
     }
   }, []);
 
-  // Debounce search query by 250ms per UI_SPEC.md
   useEffect(() => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    if (!trimmedQuery) {
+      reqSeqRef.current += 1;
+      setResults([]);
+      setIsLoading(false);
+      setSettledKey(activeKey);
+      return;
     }
+    setIsLoading(true);
     debounceTimerRef.current = window.setTimeout(() => {
-      executeSearch(query, filterType);
-    }, 250);
-
+      void executeSearch(trimmedQuery, filterType, activeKey);
+    }, 240);
     return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     };
-  }, [query, filterType, executeSearch]);
+  }, [trimmedQuery, filterType, activeKey, executeSearch]);
+
+  const showSkeleton = isLoading || (Boolean(trimmedQuery) && settledKey !== activeKey);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden select-none">
-      {/* Search Header & Filter Chips */}
-      <div className="flex-none p-4 border-b border-border-subtle bg-bg-surface flex flex-col gap-3">
-        <div className="flex items-center gap-2 px-3 py-2 bg-bg-base border border-border-subtle rounded-lg focus-within:border-accent transition-colors">
-          <SearchIcon size={16} className="text-text-2 flex-none" />
-          <input
-            type="text"
-            placeholder="Search tracks, albums, artists..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="w-full bg-transparent text-sm text-text-1 placeholder-text-2 focus:outline-none"
-            autoFocus
-          />
-          {isLoading && <Loader2 size={16} className="text-accent animate-spin flex-none" />}
+    <div className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel eh-page-in rounded-[26px] my-1">
+      <div className="flex-none px-5 py-4 border-b border-white/[0.08] bg-white/[0.02] flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <SearchIcon size={16} style={{ color: 'var(--dynamic-accent)' }} className="flex-none" />
+            <h1 className="text-base sm:text-lg font-bold text-[#F4F6FF] truncate">
+              {trimmedQuery ? `Results for “${trimmedQuery}”` : 'Search ORBIT'}
+            </h1>
+          </div>
+          {showSkeleton ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-[#A6B0CF] flex-none">
+              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
+              <span>Searching...</span>
+            </div>
+          ) : trimmedQuery && results.length > 0 ? (
+            <span className="text-[11px] font-mono tabular-nums text-[#8E99BA] flex-none">
+              {results.length} matches
+            </span>
+          ) : null}
         </div>
 
-        {/* Filter Chips */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+        <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
           {FILTER_TYPES.map((chip) => (
             <button
               key={chip.id}
               onClick={() => setFilterType(chip.id)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+              className={`px-3.5 py-1 rounded-full text-xs font-medium transition-all ${
                 filterType === chip.id
-                  ? 'bg-accent text-bg-base font-semibold'
-                  : 'bg-bg-hover text-text-2 hover:text-text-1 border border-border-subtle'
+                  ? 'bg-[#F1F4FA] text-[#06080F] font-semibold shadow-sm'
+                  : 'ios-liquid-pill text-[#9AA5C4] hover:text-white'
               }`}
             >
               {chip.label}
@@ -118,24 +134,27 @@ export const SearchView = ({
         </div>
       </div>
 
-      {/* Results TrackList */}
       <TrackList
-        tracks={results}
+        tracks={showSkeleton && results.length === 0 ? [] : results}
+        loading={showSkeleton}
         currentTrackId={currentTrackId}
         isPlaying={isPlaying}
         downloads={downloads}
+        likedIds={likedIds}
+        downloadedIds={downloadedIds}
         onPlay={(track, index) => onPlay(track, index, results)}
         onToggleLike={onToggleLike}
         onDownload={onDownload}
+        onDeleteDownload={onDeleteDownload}
         onAddNext={onAddNext}
         onAppendQueue={onAppendQueue}
         onOpenAddToPlaylist={onOpenAddToPlaylist}
         emptyMessage={
-          query.trim()
+          trimmedQuery
             ? 'No matches found. Try another search query.'
-            : 'Type above to search songs, albums, and playlists on YouTube Music.'
+            : 'Type in the top search bar (Ctrl+K) to find songs, albums, and artists.'
         }
       />
     </div>
   );
-};
+});

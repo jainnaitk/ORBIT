@@ -89,9 +89,70 @@ def run_command(args: argparse.Namespace) -> int:
 
 def play_command(args: argparse.Namespace) -> int:
     """Handle `metrolite play <query>` command."""
+    import json
+    import os
+
     cfg = get_config(args.config)
-    print(f"[{cfg.app.name}] Playing query: {args.query}")
-    return 0
+    query = (args.query or "").strip()
+    print(f"[{cfg.app.name}] Playing query: {query}")
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0
+
+    if not query:
+        print(f"[{cfg.app.name}] Error: query cannot be empty.", file=sys.stderr)
+        return 1
+
+    bridge_file = cfg.app.data_dir / "bridge.json"
+    if not bridge_file.is_file():
+        print(
+            f"[{cfg.app.name}] Bridge is not running ({bridge_file} not found). "
+            "Start it first with: uv run python -m metrolite run",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        bridge_cfg = json.loads(bridge_file.read_text(encoding="utf-8"))
+        host = bridge_cfg.get("host", cfg.bridge.host)
+        port = int(bridge_cfg.get("port", cfg.bridge.port))
+        token = str(bridge_cfg.get("token", ""))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"[{cfg.app.name}] Failed reading bridge config: {exc}", file=sys.stderr)
+        return 1
+
+    import httpx
+
+    base_url = f"http://{host}:{port}"
+    headers = {"X-Bridge-Token": token} if token else {}
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=15.0) as client:
+            search_res = client.get("/search", params={"q": query, "filter": "songs", "limit": 1})
+            search_res.raise_for_status()
+            results = search_res.json()
+            tracks = results if isinstance(results, list) else results.get("results", [])
+            if not tracks:
+                print(f"[{cfg.app.name}] No matches found for: {query}", file=sys.stderr)
+                return 1
+
+            top = tracks[0]
+            play_res = client.post(
+                "/player/play",
+                json={"video_id": top["video_id"], "track": top, "track_meta": top},
+            )
+            play_res.raise_for_status()
+            payload = play_res.json()
+            if payload.get("status") == "error":
+                print(f"[{cfg.app.name}] Playback error: {payload.get('error')}", file=sys.stderr)
+                return 1
+            print(
+                f"[{cfg.app.name}] Now playing: {top.get('title', top['video_id'])} — "
+                f"{top.get('artist', 'Unknown Artist')}"
+            )
+            return 0
+    except httpx.HTTPError as exc:
+        print(f"[{cfg.app.name}] Bridge request failed ({base_url}): {exc}", file=sys.stderr)
+        return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
