@@ -1,6 +1,6 @@
 [package]
 name = "orbit"
-version = "1.0.0"
+version = "1.1.0"
 description = "ORBIT — Ad-free offline desktop music player for Windows"
 authors = ["Naitik Jain"]
 edition = "2021"
