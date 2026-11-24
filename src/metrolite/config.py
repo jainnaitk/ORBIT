@@ -118,7 +118,7 @@ class YTMConfig(BaseModel):
 class UpdatesConfig(BaseModel):
     enabled: bool = True
     github_repo: str = "jainnaitk/ORBIT"
-    current_version: str = "0.1.0"
+    current_version: str = "1.0.0"
     check_on_startup: bool = True
 
 
