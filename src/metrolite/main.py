@@ -158,9 +158,16 @@ def play_command(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entry point."""
     parser = build_parser()
-    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    raw_args = argv if argv is not None else sys.argv[1:]
+    args = parser.parse_args(raw_args)
 
     if not args.command:
+        # If running as PyInstaller frozen sidecar or launched with no arguments, default to "run"
+        if getattr(sys, "frozen", False) or len(raw_args) == 0:
+            args.command = "run"
+            args.host = None
+            args.port = None
+            return run_command(args)
         parser.print_help()
         return 0
 

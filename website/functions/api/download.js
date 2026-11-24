@@ -9,7 +9,7 @@ const GITHUB_REPO = "ORBIT";
 const DEFAULT_ASSET = "ORBIT-Setup.exe";
 const SAFE_ASSET_RE = /^[A-Za-z0-9._-]+\.exe$/i;
 
-export async function onRequestGet(context) {
+async function handleDownload(context, headOnly) {
   const reqUrl = new URL(context.request.url);
   const requested = (reqUrl.searchParams.get("asset") || "").trim();
   const filename = SAFE_ASSET_RE.test(requested) ? requested : DEFAULT_ASSET;
@@ -17,17 +17,21 @@ export async function onRequestGet(context) {
   const upstream = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download/${encodeURIComponent(filename)}`;
 
   const res = await fetch(upstream, {
+    method: headOnly ? "HEAD" : "GET",
     redirect: "follow",
     headers: {
       "User-Agent": "ORBIT-Website-Downloader/1.0",
     },
   });
 
-  if (!res.ok || !res.body) {
-    return new Response("Latest ORBIT Windows installer not found on GitHub Releases yet.", {
-      status: 404,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
+  if (!res.ok || (!headOnly && !res.body)) {
+    return new Response(
+      headOnly ? null : "Latest ORBIT Windows installer not found on GitHub Releases yet.",
+      {
+        status: 404,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      }
+    );
   }
 
   const headers = new Headers();
@@ -39,5 +43,13 @@ export async function onRequestGet(context) {
     headers.set("Content-Length", contentLen);
   }
 
-  return new Response(res.body, { status: 200, headers });
+  return new Response(headOnly ? null : res.body, { status: 200, headers });
+}
+
+export async function onRequestGet(context) {
+  return handleDownload(context, false);
+}
+
+export async function onRequestHead(context) {
+  return handleDownload(context, true);
 }

@@ -22,6 +22,7 @@
         "decorations": false,
         "transparent": true,
         "shadow": false,
+        "visible": false,
         "dragDropEnabled": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,Translate,SpareRendererForSitePerProcess,msEdgeShopping,msEdgeSidebar,msEdgeCollections,InterestFeedContentSuggestions,AudioServiceOutOfProcess --disable-background-networking --disable-component-update --disable-extensions --disable-sync --disable-3d-apis --disk-cache-size=4194304 --media-cache-size=4194304 --renderer-process-limit=1 --js-flags=--max-old-space-size=64"
       }
@@ -32,7 +33,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "externalBin": [
+      "binaries/orbit-backend"
+    ],
+    "resources": [
+      "resources/libmpv-2.dll"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

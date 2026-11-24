@@ -58,10 +58,24 @@ def ensure_mpv_dll() -> None:
         pass
 
     if sys.platform == "win32":
-        repo_bin = Path(__file__).resolve().parent.parent.parent.parent / "bin"
-        cwd_bin = Path.cwd() / "bin"
-        for candidate in (repo_bin, cwd_bin):
-            if (candidate / "libmpv-2.dll").is_file():
+        candidates: list[Path] = []
+        exe_path = Path(sys.executable).resolve()
+        candidates.append(exe_path.parent)
+        candidates.append(exe_path.parent / "resources")
+        candidates.append(exe_path.parent.parent)
+        candidates.append(exe_path.parent.parent / "resources")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass))
+            candidates.append(Path(meipass) / "resources")
+        repo_root = Path(__file__).resolve().parent.parent.parent.parent
+        candidates.append(repo_root / "bin")
+        candidates.append(repo_root / "ui" / "src-tauri" / "resources")
+        candidates.append(Path.cwd() / "bin")
+        candidates.append(Path.cwd())
+
+        for candidate in candidates:
+            if candidate.is_dir() and (candidate / "libmpv-2.dll").is_file():
                 bin_str = str(candidate.resolve())
                 if bin_str not in os.environ.get("PATH", ""):
                     os.environ["PATH"] = bin_str + os.pathsep + os.environ.get("PATH", "")

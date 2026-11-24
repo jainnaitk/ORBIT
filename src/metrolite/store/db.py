@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 
 import aiosqlite
@@ -82,51 +82,61 @@ def get_default_db_path() -> Path:
 
 
 def init_db_sync(db_path: Path | str | None = None) -> Path:
-    """Initialize database tables synchronously."""
+    """Initialize database tables synchronously with crash-safe WAL recovery."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     try:
         conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         with conn:
             conn.executescript(SCHEMA_SQL)
+        with suppress(Exception):
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     finally:
         conn.close()
     return path
 
 
 async def init_db(db_path: Path | str | None = None) -> Path:
-    """Initialize database tables asynchronously using aiosqlite."""
+    """Initialize database tables asynchronously using aiosqlite with WAL recovery."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(str(path), timeout=5.0) as conn:
         await conn.execute("PRAGMA busy_timeout = 5000;")
+        await conn.execute("PRAGMA journal_mode = WAL;")
+        await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.executescript(SCHEMA_SQL)
         await conn.commit()
+        with suppress(Exception):
+            await conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     return path
 
 
 @asynccontextmanager
 async def get_connection(db_path: Path | str | None = None) -> AsyncIterator[aiosqlite.Connection]:
-    """Yield an async SQLite connection configured with busy_timeout and foreign keys."""
+    """Yield an async SQLite connection configured with busy_timeout, WAL synchronous and foreign keys."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(str(path), timeout=5.0) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA busy_timeout = 5000;")
+        await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.execute("PRAGMA foreign_keys = ON;")
         yield conn
 
 
 @contextmanager
 def get_sync_connection(db_path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
-    """Yield a synchronous SQLite connection configured with busy_timeout and foreign keys."""
+    """Yield a synchronous SQLite connection configured with busy_timeout, WAL synchronous and foreign keys."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         yield conn
     finally:

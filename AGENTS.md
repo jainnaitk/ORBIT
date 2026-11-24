@@ -35,8 +35,26 @@ Single user, local-first, no login required (optional browser cookies for person
 ## Progress (update after every phase)
 - [x] P0 scaffold       - [x] P1 audio & YTM core   - [x] P2 downloads & library
 - [x] P3 bridge & SMTC  - [x] P4 UI design          - [x] P5 Tauri player UI
-- [x] P6 tray & RAM opt - [ ] P7 ship
+- [x] P6 tray & RAM opt - [x] P7 ship
 
 ## Handoff (when another agent takes over)
 Read this file, inspect the files of the first unchecked phase, finish what is missing,
 run its Done-when checks (including RAM measurement), then update the checklist above.
+
+## Cloudflare deployment (website)
+
+Public site: `website/` → Cloudflare Pages project **`orbit-music`** (`https://orbit-music.pages.dev`).
+
+- **ORBIT website rule:** always run Wrangler from `C:\ai_work\ORBIT\website` and deploy `.`:
+  `npx wrangler@4 pages deploy . --project-name orbit-music --branch main`.
+  Wrangler resolves `functions/` from the current directory; deploying the repo root (or
+  `website` from the root) silently skips `website/functions/api/download.js` and breaks
+  `/api/download`.
+- Skill: `.opencode/skills/cloudflare-pages-deploy/SKILL.md`.
+- Helper: `scripts/deploy_website.ps1` (cds into `website`, validates the Function, deploys, verifies).
+- Never drag-and-drop `website/` (drops Functions). Never deploy the repo root.
+- Verify after deploy: `GET /` = 200; `/api/download` = 404 until v1.0.0 is published on
+  GitHub Releases, then 200 with `content-disposition: attachment; filename="ORBIT-Setup.exe"`.
+- CI: `.github/workflows/deploy-website.yml` needs repo secrets `CLOUDFLARE_API_TOKEN`
+  (Pages: Edit) and `CLOUDFLARE_ACCOUNT_ID`. Do not also enable dashboard Git integration.
+- No secrets or env vars belong in `website/`.

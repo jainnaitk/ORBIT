@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
+
+static SIDECAR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 const ISLAND_PILL_W: f64 = 380.0;
 const ISLAND_PILL_H: f64 = 142.0;
@@ -519,6 +522,243 @@ fn send_bridge_request(path: &str, method: &str) {
     });
 }
 
+#[cfg(windows)]
+mod win_job {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+    #[repr(C)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    struct JobobjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    struct JobobjectExtendedLimitInformation {
+        basic_limit_information: JobobjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(lp_job_attributes: *mut c_void, lp_name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(
+            h_job: *mut c_void,
+            job_object_info_class: i32,
+            lp_job_object_info: *const c_void,
+            cb_job_object_info_length: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(h_job: *mut c_void, h_process: *mut c_void) -> i32;
+    }
+
+    pub struct WindowsJob {
+        handle: *mut c_void,
+    }
+
+    unsafe impl Send for WindowsJob {}
+    unsafe impl Sync for WindowsJob {}
+
+    impl WindowsJob {
+        pub fn create() -> Option<Self> {
+            unsafe {
+                let h_job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if h_job.is_null() {
+                    return None;
+                }
+                let mut info: JobobjectExtendedLimitInformation = std::mem::zeroed();
+                info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let res = SetInformationJobObject(
+                    h_job,
+                    9, // JobObjectExtendedLimitInformation
+                    &info as *const _ as *const c_void,
+                    size_of::<JobobjectExtendedLimitInformation>() as u32,
+                );
+                if res == 0 {
+                    return None;
+                }
+                Some(WindowsJob { handle: h_job })
+            }
+        }
+
+        pub fn assign(&self, handle: *mut c_void) {
+            if !self.handle.is_null() && !handle.is_null() {
+                unsafe {
+                    let _ = AssignProcessToJobObject(self.handle, handle);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+static WINDOWS_JOB: std::sync::OnceLock<Option<win_job::WindowsJob>> = std::sync::OnceLock::new();
+
+fn find_sidecar_binary() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("orbit-backend.exe"));
+            candidates.push(exe_dir.join("binaries").join("orbit-backend.exe"));
+            candidates.push(exe_dir.join("orbit-backend-x86_64-pc-windows-msvc.exe"));
+            candidates.push(exe_dir.join("binaries").join("orbit-backend-x86_64-pc-windows-msvc.exe"));
+        }
+    }
+
+    candidates.push(PathBuf::from("binaries/orbit-backend-x86_64-pc-windows-msvc.exe"));
+    candidates.push(PathBuf::from("ui/src-tauri/binaries/orbit-backend-x86_64-pc-windows-msvc.exe"));
+    candidates.push(PathBuf::from("../ui/src-tauri/binaries/orbit-backend-x86_64-pc-windows-msvc.exe"));
+    candidates.push(PathBuf::from("orbit-backend.exe"));
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_bridge_healthy() -> bool {
+    let bridge_cfg = match get_bridge_config() {
+        Ok(cfg) => cfg,
+        Err(_) => return false,
+    };
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr = match format!("{}:{}", bridge_cfg.host, bridge_cfg.port).parse::<SocketAddr>() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+        bridge_cfg.host, bridge_cfg.port
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    if let Ok(n) = stream.read(&mut buf) {
+        if n > 12 {
+            let resp = String::from_utf8_lossy(&buf[..n]);
+            return resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200");
+        }
+    }
+    false
+}
+
+fn remove_stale_bridge_file() {
+    let path = get_bridge_path();
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn spawn_sidecar_if_needed() {
+    if is_bridge_healthy() {
+        eprintln!("Bridge server is already running and healthy.");
+        return;
+    }
+
+    remove_stale_bridge_file();
+
+    let sidecar_path = match find_sidecar_binary() {
+        Some(path) => path,
+        None => {
+            eprintln!("Sidecar binary not found. Dev mode or existing bridge expected.");
+            return;
+        }
+    };
+
+    eprintln!("Spawning sidecar: {}", sidecar_path.display());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let mut cmd = std::process::Command::new(&sidecar_path);
+        cmd.arg("run");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.spawn() {
+            Ok(child) => {
+                let job = WINDOWS_JOB.get_or_init(|| win_job::WindowsJob::create());
+                if let Some(j) = job.as_ref() {
+                    j.assign(child.as_raw_handle() as *mut std::ffi::c_void);
+                }
+                if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+                    *lock = Some(child);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to spawn sidecar binary: {e}");
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new(&sidecar_path);
+        cmd.arg("run");
+        if let Ok(child) = cmd.spawn() {
+            if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+                *lock = Some(child);
+            }
+        }
+    }
+}
+
+fn wait_for_bridge_ready(timeout_duration: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout_duration {
+        if is_bridge_healthy() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    false
+}
+
+fn terminate_sidecar() {
+    if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+        if let Some(mut child) = lock.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn quit_application(app: &AppHandle) {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
 
@@ -533,12 +773,13 @@ fn quit_application(app: &AppHandle) {
                 let _ = client
                     .post(&url)
                     .header("X-Bridge-Token", cfg.token)
-                    .timeout(std::time::Duration::from_millis(600))
+                    .timeout(Duration::from_millis(600))
                     .send()
                     .await;
             });
         }
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(150));
+        terminate_sidecar();
         app_handle.exit(0);
     });
 }
@@ -632,10 +873,18 @@ fn main() {
             ensure_main_window(app);
         }))
         .setup(|app| {
-            // Disable DWM hide/show transition ghosting on frameless transparent window
+            // Spawn sidecar silently if not already running
+            spawn_sidecar_if_needed();
+
+            // Wait gracefully for bridge to be ready before surfacing UI
+            let _ = wait_for_bridge_ready(Duration::from_secs(12));
+
+            // Surface main window once backend is ready
             if let Some(main_win) = app.get_webview_window("main") {
                 disable_window_transitions(&main_win);
                 attach_window_close_handler(&main_win);
+                let _ = main_win.show();
+                let _ = main_win.set_focus();
             }
 
             // Create Windows System Tray
@@ -728,6 +977,9 @@ fn main() {
                         api.prevent_exit();
                         spawn_memory_trim();
                     }
+                }
+                tauri::RunEvent::Exit => {
+                    terminate_sidecar();
                 }
                 _ => {}
             }

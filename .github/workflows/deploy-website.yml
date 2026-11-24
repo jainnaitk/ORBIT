@@ -1,0 +1,63 @@
+name: Deploy ORBIT Website
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "website/**"
+      - ".github/workflows/deploy-website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orbit-website-production
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Deploy must run inside website/ so Wrangler bundles functions/api/download.js.
+      - name: Ensure Pages project exists
+        working-directory: website
+        run: npx wrangler@4 pages project create orbit-music --production-branch main || true
+
+      - name: Deploy website + Functions to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: website
+          command: pages deploy . --project-name=orbit-music --branch=main
+
+      - name: Verify live site
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" https://orbit-music.pages.dev || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "GET / -> $code"
+          [ "$code" = "200" ] || exit 1
+
+          # HEAD avoids downloading the installer. 404 is expected before v1.0.0 exists.
+          dl=$(curl -sI -o /dev/null -w "%{http_code}" https://orbit-music.pages.dev/api/download || true)
+          echo "HEAD /api/download -> $dl"
+          case "$dl" in
+            200|404) ;;
+            *) echo "Unexpected /api/download status"; exit 1 ;;
+          esac

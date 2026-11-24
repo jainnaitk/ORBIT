@@ -32,12 +32,15 @@ def main() -> None:
                 continue
 
             # Check if it's the backend daemon
-            if ("-m metrolite" in cmd or "metrolite run" in cmd) and ("python" in name or "uv" in name):
+            if (
+                ("-m metrolite" in cmd or "metrolite run" in cmd or "orbit-backend" in cmd or "orbit-backend" in name)
+                and ("python" in name or "uv" in name or "orbit-backend" in name)
+            ):
                 backend_procs.append(proc)
-            elif name == "metrolite.exe":
+            elif name in ["metrolite.exe", "orbit.exe"]:
                 tauri_procs.append(proc)
             elif "msedgewebview2" in name and any(
-                "metrolite" in arg.lower() or "1420" in arg.lower() for arg in cmd_list
+                "metrolite" in arg.lower() or "orbit" in arg.lower() or "1420" in arg.lower() for arg in cmd_list
             ):
                 webview_procs.append(proc)
             elif name in ["node.exe", "esbuild.exe"] and any("vite" in arg.lower() or "1420" in arg.lower() or "metrolite" in arg.lower() for arg in cmd_list):
