@@ -1,14 +1,22 @@
-# metrolite
+# ORBIT
 
-Lightweight, 60fps Windows desktop YouTube Music player under 185 MB RAM (~50 MB in tray).
-Supports streaming, gapless queue, radio autoplay, liked songs, custom playlists, and offline downloads.
+Ad-free, offline-ready desktop music player for Windows.  
+Created by **Naitik Jain**.
 
-## Prerequisites
-1. Python 3.11 or 3.12 + `uv` (`winget install astral-sh.uv`)
-2. Rust + Node.js 20+ (for Tauri 2 UI in Phase 5)
-3. `libmpv-2.dll`: place in `bin/libmpv-2.dll` (download from shinchiro/mpv-winbuild-cmake or `scoop install mpv` and add to PATH).
+## Download
 
-## Start here
-1. Read `AGENTS.md` and `docs/PHASES.md`.
-2. Check your environment: `uv run python scripts/check_env.py`.
-3. Build step by step: tell your agent `"Do Phase 0 from docs/PHASES.md"`.
+Download the latest Windows installer (`.exe`) from [GitHub Releases](https://github.com/jainnaitk/ORBIT/releases/latest).
+
+## Features
+
+- **Ad-Free Gapless Playback** — Uninterrupted listening with smooth transitions between tracks.
+- **Offline Downloads** — Save tracks with cover artwork and metadata for instant offline listening.
+- **Synced Lyrics** — Real-time line-by-line lyrics with tap-to-seek.
+- **Dynamic Island Mini Player** — Always-on-top compact pill that expands on hover or click.
+- **Artwork-Driven Themes** — Interface accents adapt automatically to the active track's cover art, with **3D**, **Static**, and **OLED** visual modes.
+- **Smart Queue & Playlists** — Reorder upcoming tracks, shuffle, repeat, and build custom playlists.
+- **Built for Windows** — Global media keys, automatic update checks, and lightweight background playback.
+
+## License
+
+Released under the [MIT License](LICENSE).
