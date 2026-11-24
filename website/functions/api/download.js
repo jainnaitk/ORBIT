@@ -1,13 +1,13 @@
 /**
  * Cloudflare Pages Function — Same-Origin GitHub Release Installer Streamer
- * Enables the browser's native "Save As" File Explorer dialog (showSaveFilePicker)
- * directly from the ORBIT website without navigating to GitHub.
+ * Streams the latest ORBIT Windows (.exe) installer so Chromium/Edge opens the
+ * native OS "Save As" File Explorer dialog directly from the ORBIT website.
  */
 
 const GITHUB_OWNER = "jainnaitk";
 const GITHUB_REPO = "ORBIT";
 const DEFAULT_ASSET = "ORBIT-Setup.exe";
-const SAFE_ASSET_RE = /^[A-Za-z0-9._-]+\.(exe|msi)$/i;
+const SAFE_ASSET_RE = /^[A-Za-z0-9._-]+\.exe$/i;
 
 export async function onRequestGet(context) {
   const reqUrl = new URL(context.request.url);
