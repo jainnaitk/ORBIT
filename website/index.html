@@ -129,6 +129,64 @@
     }
     [data-effects="oled"] #webgl-root { opacity: 0; }
 
+    /* True-black OLED deep-space starfield (only visible in OLED mode) */
+    #oled-stars {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 360ms ease;
+    }
+    [data-effects="oled"] #oled-stars { opacity: 1; }
+
+    /* Footer Brand Marquee */
+    .marquee-wrap {
+      overflow: hidden;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: #010205;
+      padding: 26px 0;
+      user-select: none;
+    }
+    [data-effects="oled"] .marquee-wrap { background: #000000; }
+    .marquee-track {
+      display: flex;
+      width: max-content;
+      will-change: transform;
+      animation: orbitMarquee 26s linear infinite;
+      font-size: clamp(36px, 6vw, 76px);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      color: rgba(255, 255, 255, 0.14);
+    }
+    .marquee-seg {
+      display: flex;
+      align-items: center;
+      gap: 34px;
+      padding: 0 17px;
+      white-space: nowrap;
+    }
+    .marquee-dash {
+      display: inline-block;
+      width: clamp(28px, 4.2vw, 54px);
+      height: clamp(6px, 0.8vw, 10px);
+      border-radius: 2px;
+      background: var(--accent);
+      opacity: 0.82;
+      flex: none;
+    }
+    @keyframes orbitMarquee {
+      from { transform: translate3d(0, 0, 0); }
+      to   { transform: translate3d(-50%, 0, 0); }
+    }
+    [data-effects="static"] .marquee-track { animation-play-state: paused !important; }
+    @media (prefers-reduced-motion: reduce) {
+      .marquee-track { animation: none !important; }
+    }
+
     .void-vignette {
       position: fixed;
       inset: 0;
@@ -278,6 +336,14 @@
 
     #hero-window {
       contain: layout style paint;
+      transform-origin: center center;
+    }
+
+    /* Pause nested vinyl/ring/eq micro-animations while Hero 3D launch is actively moving */
+    #hero-stage-3d.is-animating .eh-vinyl,
+    #hero-stage-3d.is-animating .eh-accretion,
+    #hero-stage-3d.is-animating .eh-bar {
+      animation-play-state: paused !important;
     }
 
     /* Hero Stage Manager Wings (3D fanned wings behind center window on xl+) */
@@ -288,7 +354,7 @@
       width: 248px;
       height: 454px;
       margin-top: -227px;
-      opacity: 0;
+      opacity: 0.001;
       transform-origin: right center;
       will-change: transform, opacity;
     }
@@ -299,7 +365,7 @@
       width: 248px;
       height: 454px;
       margin-top: -227px;
-      opacity: 0;
+      opacity: 0.001;
       transform-origin: left center;
       will-change: transform, opacity;
     }
@@ -515,6 +581,7 @@
     </div>
   </div>
   <div class="void-vignette" aria-hidden="true"></div>
+  <canvas id="oled-stars" aria-hidden="true"></canvas>
 
   <!-- Toast Feedback Container -->
   <div id="toast-host" class="fixed bottom-5 right-5 z-[130] flex flex-col gap-2 pointer-events-none"></div>
@@ -567,9 +634,10 @@
           <h1 class="text-5xl sm:text-7xl lg:text-[104px] font-black tracking-[-0.05em] leading-[0.94]">
             <span class="hero-enter-text">Enter the</span> <span class="hero-orbit-text">Orbit.</span>
           </h1>
-          <p class="mt-4 text-sm sm:text-base text-[#939DBB] max-w-md leading-relaxed">
-            Ad-free, offline-ready music for Windows.
-          </p>
+          <div class="mt-5 inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-[#05070E]/90 border border-white/[0.11] text-xs sm:text-sm font-medium tracking-[0.16em] uppercase text-[#939DBB]">
+            <span class="w-1.5 h-1.5 rounded-full" style="background: var(--accent);"></span>
+            <span>Created by <strong class="text-[#F4F6FF] font-semibold">Naitik Jain</strong></span>
+          </div>
         </div>
 
         <!-- Animated Bottom Scroll Cue -->
@@ -581,7 +649,7 @@
         </div>
 
         <!-- Cursor-Reactive 3D Stage Holding Center macOS Launch Window + Fanned Stage Manager Wings -->
-        <div id="hero-stage-3d" class="gpu-node w-full max-w-[1400px] mx-auto relative z-20 flex items-center justify-center" style="pointer-events: none; transform-style: preserve-3d;">
+        <div id="hero-stage-3d" class="gpu-node w-full max-w-[1400px] mx-auto relative z-20 flex items-center justify-center" style="pointer-events: none;">
 
           <!-- LEFT 3D WING: Singularity Stage & Live Synced Lyrics -->
           <div id="hero-wing-left" class="hidden xl:flex flex-col rounded-[22px] obs-panel overflow-hidden z-10 select-none">
@@ -591,20 +659,28 @@
             </div>
             <div class="p-4 flex flex-col items-center border-b border-white/[0.07]">
               <div class="relative w-24 h-24 flex items-center justify-center">
-                <div class="eh-accretion absolute -inset-2.5 rounded-full opacity-95"
-                     style="background: conic-gradient(from 0deg, transparent 0%, rgba(var(--accent-rgb), 0.85) 30%, rgba(var(--secondary-rgb), 0.45) 58%, transparent 84%); -webkit-mask: radial-gradient(farthest-side, transparent 84%, #000 86%, #000 96%, transparent 100%); mask: radial-gradient(farthest-side, transparent 84%, #000 86%, #000 96%, transparent 100%);"></div>
+                <svg class="eh-accretion absolute -inset-2.5 w-[calc(100%+20px)] h-[calc(100%+20px)] pointer-events-none" viewBox="0 0 120 120" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="wingRingG" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.9" />
+                      <stop offset="55%" stop-color="var(--secondary)" stop-opacity="0.45" />
+                      <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <circle cx="60" cy="60" r="54" fill="none" stroke="url(#wingRingG)" stroke-width="3" stroke-linecap="round" stroke-dasharray="220 120" />
+                </svg>
                 <div id="wing-left-art" class="relative w-20 h-20 rounded-xl overflow-hidden border border-white/15"></div>
               </div>
               <div id="wing-left-title" class="text-xs font-semibold text-[#F4F6FF] mt-2.5 truncate max-w-full">Event Horizon</div>
               <div id="wing-left-artist" class="text-[10px] text-[#939DBB] truncate max-w-full">Aether &amp; Sol</div>
             </div>
-            <div id="wing-left-lyrics" class="flex-1 overflow-y-auto no-scrollbar px-3 py-2.5 space-y-1.5"></div>
+            <div id="wing-left-lyrics" class="flex-1 overflow-hidden px-3 py-2.5 space-y-1.5"></div>
           </div>
 
-          <!-- CENTER INTERACTIVE ORBIT DESKTOP APP (Underdamped macOS Launch Spring) -->
+          <!-- CENTER INTERACTIVE ORBIT DESKTOP APP (Smooth 3D Launch) -->
           <div id="hero-window"
                class="gpu-node w-full max-w-[764px] rounded-[24px] border border-white/[0.13] bg-[#05070E] overflow-hidden relative z-20 select-none"
-               style="opacity: 0; transform: perspective(1200px) translate3d(0, 140px, 0) rotateX(22deg) scale3d(0.05, 0.05, 1); box-shadow: 0 32px 72px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.14);">
+               style="opacity: 0.001; transform: perspective(1200px) translate3d(0, 76px, 0) rotateX(14deg) scale3d(0.84, 0.84, 1); box-shadow: 0 20px 48px rgba(0, 0, 0, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.14);">
 
             <!-- Animated Diagonal Specular Sheen Sweeping Across Frame on Open -->
             <div id="hero-specular-sheen"></div>
@@ -723,8 +799,8 @@
                   </button>
                 </aside>
 
-                <!-- Active Desktop View -->
-                <div id="app-main-view" class="flex-1 min-w-0 flex flex-col overflow-y-auto no-scrollbar px-2 py-1"></div>
+                <!-- Active Desktop View (overflow-hidden so wheel scroll never gets trapped in hero) -->
+                <div id="app-main-view" class="flex-1 min-w-0 flex flex-col overflow-hidden px-2 py-1"></div>
               </div>
 
               <!-- Live Floating PlayerBar Dock -->
@@ -819,7 +895,7 @@
                 <span class="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#F4F6FF]">Queue</span>
                 <span class="text-[9px] font-mono" style="color: var(--accent);">Up next</span>
               </div>
-              <div id="wing-right-queue" class="flex-1 overflow-y-auto no-scrollbar divide-y divide-white/[0.04] p-1.5"></div>
+              <div id="wing-right-queue" class="flex-1 overflow-hidden divide-y divide-white/[0.04] p-1.5"></div>
             </div>
           </div>
 
@@ -871,14 +947,22 @@
                  style="transform: perspective(1100px) rotateY(-28deg) rotateX(16deg) scale3d(0.82, 0.82, 1);">
 
               <div class="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-[#080B14] border border-white/[0.10] text-[10px] font-mono text-[#F4F6FF]">
-                <span class="w-1.5 h-1.5 rounded-full animate-pulse" style="background: var(--accent);"></span>
+                <span class="w-1.5 h-1.5 rounded-full" style="background: var(--accent);"></span>
                 <span>Seamless</span>
               </div>
 
-              <!-- Rotating Glowing Accretion Ring + Live Circular SVG Progress + Spinning Vinyl -->
+              <!-- Rotating Glowing Accretion Ring (Pure SVG, zero CSS mask overhead) + Live Circular SVG Progress + Spinning Vinyl -->
               <div class="relative w-32 h-32 sm:w-52 sm:h-52 flex items-center justify-center">
-                <div class="eh-accretion absolute -inset-3.5 rounded-full opacity-95"
-                     style="background: conic-gradient(from 0deg, transparent 0%, rgba(var(--accent-rgb), 0.88) 28%, rgba(var(--secondary-rgb), 0.48) 58%, transparent 86%); -webkit-mask: radial-gradient(farthest-side, transparent 85%, #000 87%, #000 96%, transparent 100%); mask: radial-gradient(farthest-side, transparent 85%, #000 87%, #000 96%, transparent 100%);"></div>
+                <svg class="eh-accretion absolute -inset-3.5 w-[calc(100%+28px)] h-[calc(100%+28px)] pointer-events-none" viewBox="0 0 220 220" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="afRingG" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.92" />
+                      <stop offset="55%" stop-color="var(--secondary)" stop-opacity="0.52" />
+                      <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <circle cx="110" cy="110" r="102" fill="none" stroke="url(#afRingG)" stroke-width="5" stroke-linecap="round" stroke-dasharray="390 250" />
+                </svg>
 
                 <svg class="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 200 200" aria-hidden="true">
                   <circle cx="100" cy="100" r="88" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="2.5" />
@@ -1176,7 +1260,19 @@
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6" style="perspective: 1200px;">
 
-          <!-- BENTO 1: Mini player -->
+          <!-- BENTO 1: Synced lyrics -->
+          <div class="bento-tilt-card obs-panel rounded-[24px] sm:rounded-[26px] p-4 sm:p-6 flex flex-col justify-between gap-4">
+            <div class="relative z-10 flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <h3 class="text-lg font-bold text-[#F4F6FF]">Synced lyrics</h3>
+                <p class="text-xs text-[#939DBB] mt-0.5">Tap any line to jump to that moment.</p>
+              </div>
+              <span class="text-[10px] font-mono uppercase tracking-[0.16em] text-[#5A6482]">Line by line</span>
+            </div>
+            <div id="bento-lyrics-list" class="relative z-10 h-[214px] overflow-y-auto no-scrollbar rounded-2xl bg-[#010205] border border-white/[0.08] p-4 space-y-2"></div>
+          </div>
+
+          <!-- BENTO 2: Mini player (centered) -->
           <div class="bento-tilt-card obs-panel rounded-[24px] sm:rounded-[26px] p-4 sm:p-6 flex flex-col justify-between gap-4 sm:gap-5">
             <div class="relative z-10 flex items-center justify-between gap-2">
               <div>
@@ -1241,18 +1337,6 @@
                 </div>
               </div>
             </div>
-          </div>
-
-          <!-- BENTO 2: Synced lyrics -->
-          <div class="bento-tilt-card obs-panel rounded-[24px] sm:rounded-[26px] p-4 sm:p-6 flex flex-col justify-between gap-4">
-            <div class="relative z-10 flex items-center justify-between gap-2 flex-wrap">
-              <div>
-                <h3 class="text-lg font-bold text-[#F4F6FF]">Synced lyrics</h3>
-                <p class="text-xs text-[#939DBB] mt-0.5">Tap any line to jump to that moment.</p>
-              </div>
-              <span class="text-[10px] font-mono uppercase tracking-[0.16em] text-[#5A6482]">Line by line</span>
-            </div>
-            <div id="bento-lyrics-list" class="relative z-10 h-[214px] overflow-y-auto no-scrollbar rounded-2xl bg-[#010205] border border-white/[0.08] p-4 space-y-2"></div>
           </div>
 
           <!-- BENTO 3: Queue -->
@@ -1337,8 +1421,32 @@
       </div>
     </section>
 
-    <!-- Minimal footer -->
+    <!-- Minimal footer + Brand Marquee -->
     <footer class="border-t border-white/[0.08] bg-[#010205]">
+      <div class="marquee-wrap" aria-hidden="true">
+        <div class="marquee-track">
+          <div class="marquee-seg">
+            <span>NAITIK JAIN</span><span class="marquee-dash"></span>
+            <span>ORBIT</span><span class="marquee-dash"></span>
+            <span>SOUND UNBOUND</span><span class="marquee-dash"></span>
+          </div>
+          <div class="marquee-seg">
+            <span>NAITIK JAIN</span><span class="marquee-dash"></span>
+            <span>ORBIT</span><span class="marquee-dash"></span>
+            <span>SOUND UNBOUND</span><span class="marquee-dash"></span>
+          </div>
+          <div class="marquee-seg">
+            <span>NAITIK JAIN</span><span class="marquee-dash"></span>
+            <span>ORBIT</span><span class="marquee-dash"></span>
+            <span>SOUND UNBOUND</span><span class="marquee-dash"></span>
+          </div>
+          <div class="marquee-seg">
+            <span>NAITIK JAIN</span><span class="marquee-dash"></span>
+            <span>ORBIT</span><span class="marquee-dash"></span>
+            <span>SOUND UNBOUND</span><span class="marquee-dash"></span>
+          </div>
+        </div>
+      </div>
       <div class="max-w-5xl mx-auto px-4 sm:px-6 py-7 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#939DBB]">
         <button type="button" onclick="scrollToSection('#hero-track')" class="flex items-center gap-2 hover:text-white transition-colors">
           <span class="w-5 h-5 rounded-full bg-black ring-1 ring-white/20 overflow-hidden flex items-center justify-center flex-none">
@@ -1351,7 +1459,7 @@
           <button type="button" onclick="scrollToSection('#accent-section')" class="hover:text-white transition-colors">Themes</button>
           <button type="button" onclick="scrollToSection('#download-section')" class="hover:text-white transition-colors">Download</button>
         </div>
-        <div class="font-mono text-[11px] text-[#5A6482]">© 2026 ORBIT</div>
+        <div class="font-mono text-[11px] text-[#5A6482]">© 2026 ORBIT • Created by Naitik Jain</div>
       </div>
     </footer>
   </main>
@@ -1638,6 +1746,7 @@
           this.resizeTimer = setTimeout(() => {
             this.precompute();
             threeEngine.resize();
+            oledStars.resize();
             motionEngine.invalidate();
           }, 140);
         }, { passive: true });
@@ -1681,6 +1790,12 @@
         const m = this.metrics[id];
         if (!m) return 0;
         return clamp01((this.smoothY - m.top) / m.stickySpan);
+      },
+
+      rawStickyP(id) {
+        const m = this.metrics[id];
+        if (!m) return 0;
+        return clamp01((this.y - m.top) / m.stickySpan);
       },
 
       viewP(id) {
@@ -1761,7 +1876,7 @@
         try {
           const w = window.innerWidth, h = window.innerHeight;
           const isMobile = w < 768;
-          const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.0 : 1.25);
+          const dpr = 1.0;
 
           const scene = new THREE.Scene();
           const camera = new THREE.PerspectiveCamera(46, w / h, 0.1, 240);
@@ -2028,7 +2143,7 @@
       resize() {
         if (!this.ready) return;
         const w = window.innerWidth, h = window.innerHeight;
-        const dpr = Math.min(window.devicePixelRatio || 1, w < 768 ? 1.0 : 1.25);
+        const dpr = 1.0;
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
@@ -2134,11 +2249,12 @@
       lastProgressX: -1,
       lastKeys: { hero: '', af: '', off: '', st: '', bento: '', iso: '' },
       springs: {
-        heroTitle:   new Spring1D(0, 240, 28),
-        heroLaunch:  new Spring1D(0, 260, 27),
-        heroWings:   new Spring1D(0, 240, 26),
-        stageTiltX:  new Spring1D(0, 150, 22),
-        stageTiltY:  new Spring1D(0, 150, 22),
+        // Critically damped springs for zero mouse-wheel overshoot/jitter
+        heroTitle:   new Spring1D(0, 170, 27),
+        heroLaunch:  new Spring1D(0, 165, 27),
+        heroWings:   new Spring1D(0, 160, 26),
+        stageTiltX:  new Spring1D(0, 140, 24),
+        stageTiltY:  new Spring1D(0, 140, 24),
 
         adfreeP:     new Spring1D(0, 220, 27),
         offlineP:    new Spring1D(0, 230, 26),
@@ -2233,22 +2349,20 @@
         }
 
         // =================================================================
-        // 1. HERO (220vh): TITLE FLY-PAST -> MACOS SPRING POP-UP -> 3D WINGS
+        // 1. HERO (220vh): TITLE FLY-PAST -> SILKY 3D LAUNCH -> 3D WINGS
         // =================================================================
-        const pHero = scrollEngine.stickyP('hero-track');
+        const pHero = scrollEngine.rawStickyP('hero-track');
         this.springs.heroTitle.setTarget(smoothstep(0.0, 0.24, pHero));
-        this.springs.heroLaunch.setTarget(clamp01((pHero - 0.14) / 0.34));
-        this.springs.heroWings.setTarget(clamp01((pHero - 0.46) / 0.38));
+        this.springs.heroLaunch.setTarget(clamp01((pHero - 0.10) / 0.36));
+        this.springs.heroWings.setTarget(clamp01((pHero - 0.42) / 0.38));
 
-        if (scrollEngine.isNear('hero-track') || !this.springs.heroTitle.isSettled() || !this.springs.heroLaunch.isSettled() || !this.springs.heroWings.isSettled()) {
-          if (pHero >= 0.14 && !state.heroShockFired) {
-            state.heroShockFired = true;
-            threeEngine.triggerShockwave();
-          } else if (pHero < 0.07 && state.heroShockFired) {
-            state.heroShockFired = false;
-          }
+        const heroMoving = !this.springs.heroTitle.isSettled() || !this.springs.heroLaunch.isSettled() || !this.springs.heroWings.isSettled();
+        if (this.els.heroStage3D) {
+          this.els.heroStage3D.classList.toggle('is-animating', heroMoving);
+        }
 
-          if (pHero >= 0.42 && !state.heroSheenFired) {
+        if (scrollEngine.isNear('hero-track') || heroMoving) {
+          if (pHero >= 0.44 && !state.heroSheenFired) {
             state.heroSheenFired = true;
             this.triggerHeroSheen();
           } else if (pHero < 0.22 && state.heroSheenFired) {
@@ -2260,11 +2374,10 @@
           const wVal = this.springs.heroWings.step(dt);
 
           let stX = 0, stY = 0;
-          const allowTilt = !this.isCoarse && scrollEngine.vw >= 768;
+          const allowTilt = !this.isCoarse && scrollEngine.vw >= 768 && lVal > 0.94 && !heroMoving;
           if (allowTilt) {
-            const tiltWeight = clamp01((lVal - 0.7) * 3.3);
-            this.springs.stageTiltX.setTarget(-threeEngine.mouseY * 3.0 * tiltWeight);
-            this.springs.stageTiltY.setTarget(threeEngine.mouseX * 4.0 * tiltWeight);
+            this.springs.stageTiltX.setTarget(-threeEngine.mouseY * 2.4);
+            this.springs.stageTiltY.setTarget(threeEngine.mouseX * 3.2);
             stX = this.springs.stageTiltX.step(dt);
             stY = this.springs.stageTiltY.step(dt);
           }
@@ -2273,29 +2386,29 @@
           if (heroKey !== this.lastKeys.hero) {
             this.lastKeys.hero = heroKey;
 
-            const titleScale = lerp(1.0, 1.38, tOut);
-            const titleY = lerp(0, -96, tOut);
-            const titleOp = clamp01(1 - tOut * 1.15);
+            const titleScale = lerp(1.0, 1.28, tOut);
+            const titleY = lerp(0, -82, tOut);
+            const titleOp = clamp01(1 - tOut * 1.18);
             this.els.heroOpening.style.transform = `translate3d(0, ${titleY.toFixed(2)}px, 0) scale3d(${titleScale.toFixed(4)}, ${titleScale.toFixed(4)}, 1)`;
             this.els.heroOpening.style.opacity = titleOp.toFixed(3);
             this.els.heroCue.style.opacity = clamp01(1 - pHero * 9).toFixed(3);
 
-            const winScale = Math.max(0.05, lerp(0.08, 1.0, lVal));
-            const winY = lerp(120, 0, lVal);
-            const winRotX = lerp(scrollEngine.vw < 768 ? 10 : 20, 0, lVal);
-            const winOp = clamp01(lVal * 3.8);
+            const winScale = lerp(0.84, 1.0, lVal);
+            const winY = lerp(76, 0, lVal);
+            const winRotX = lerp(scrollEngine.vw < 768 ? 7 : 14, 0, lVal);
+            const winOp = Math.max(0.001, clamp01(lVal * 2.2));
 
             this.els.heroWin.style.transform = `perspective(1200px) translate3d(0, ${winY.toFixed(2)}px, 0) rotateX(${winRotX.toFixed(2)}deg) scale3d(${winScale.toFixed(4)}, ${winScale.toFixed(4)}, 1)`;
             this.els.heroWin.style.opacity = winOp.toFixed(3);
             this.els.heroStage3D.style.pointerEvents = lVal > 0.65 ? 'auto' : 'none';
 
             if (scrollEngine.vw >= 1280) {
-              const wingScale = Math.max(0.68, lerp(0.72, 0.94, wVal));
-              const wingOp = clamp01(wVal * 1.45);
-              const leftX = lerp(170, -14, wVal);
-              const rightX = lerp(-170, 14, wVal);
-              const leftRotY = lerp(4, 26, wVal);
-              const rightRotY = lerp(-4, -26, wVal);
+              const wingScale = lerp(0.84, 0.94, wVal);
+              const wingOp = Math.max(0.001, clamp01(wVal * 1.45));
+              const leftX = lerp(120, -14, wVal);
+              const rightX = lerp(-120, 14, wVal);
+              const leftRotY = lerp(8, 26, wVal);
+              const rightRotY = lerp(-8, -26, wVal);
 
               this.els.wingLeft.style.transform  = `perspective(1100px) translate3d(${leftX.toFixed(2)}px, 0, 0) rotateY(${leftRotY.toFixed(2)}deg) scale3d(${wingScale.toFixed(4)}, ${wingScale.toFixed(4)}, 1)`;
               this.els.wingLeft.style.opacity    = wingOp.toFixed(3);
@@ -2314,7 +2427,7 @@
         // =================================================================
         // 2. AD-FREE GAPLESS AUDIO (155vh STICKY 3D STAGE)
         // =================================================================
-        const pAf = scrollEngine.stickyP('adfree-track');
+        const pAf = scrollEngine.rawStickyP('adfree-track');
         this.springs.adfreeP.setTarget(pAf);
         if (scrollEngine.isNear('adfree-track') || !this.springs.adfreeP.isSettled()) {
           const af = this.springs.adfreeP.step(dt);
@@ -2863,6 +2976,7 @@
           : 'cmode-btn px-2 sm:px-2.5 py-1 rounded-full text-[#939DBB] hover:text-white transition-colors whitespace-nowrap';
       });
       if (mode === 'static' && threeEngine.ready) threeEngine.renderer.render(threeEngine.scene, threeEngine.camera);
+      if (mode === 'oled') oledStars.draw(performance.now(), 0.016, scrollEngine.smoothGlobalP, true);
       if (mode === 'full') {
         threeEngine.lastRender = 0;
         if (!threeBooted && window.THREE) bootThree();
@@ -2935,33 +3049,33 @@
         const filtered = state.activeMood === 'for_you' ? indexed : indexed.filter((t) => t.moods.includes(state.activeMood));
         const shown = filtered.length ? filtered : indexed;
         box.innerHTML = `
-          <div class="space-y-4">
-            <div class="space-y-2.5 max-w-md">
+          <div class="space-y-2.5">
+            <div class="space-y-1.5 max-w-md">
               <div class="text-[9px] font-mono uppercase tracking-[0.22em] text-[#939DBB]">Personal Orbit</div>
-              <h2 class="text-xl sm:text-2xl font-bold tracking-tight text-[#F4F6FF]">${greet}</h2>
-              <div class="flex items-center gap-1.5 flex-wrap">
+              <h2 class="text-lg sm:text-xl font-bold tracking-tight text-[#F4F6FF]">${greet}</h2>
+              <div class="flex items-center gap-1 flex-wrap">
                 ${MOOD_PRESETS.map((m) => `
                   <button type="button" onclick="selectMood('${m.id}')"
-                    class="px-2.5 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${m.id === state.activeMood ? 'bg-[#F4F6FF] text-[#010205] border-[#F4F6FF] font-semibold' : 'bg-[#080B14] text-[#939DBB] border-white/[0.09] hover:text-white'}">${m.label}</button>
+                    class="px-2 py-0.5 rounded-full text-[9.5px] font-medium border transition-colors ${m.id === state.activeMood ? 'bg-[#F4F6FF] text-[#010205] border-[#F4F6FF] font-semibold' : 'bg-[#080B14] text-[#939DBB] border-white/[0.09] hover:text-white'}">${m.label}</button>
                 `).join('')}
               </div>
             </div>
 
-            <div class="space-y-1.5">
+            <div class="space-y-1">
               <div class="text-[9px] font-mono uppercase tracking-[0.2em] text-[#939DBB]">Jump Back In</div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
                 ${shown.map((t) => `
                   <div onclick="playTrackByIndex(${t.origIdx}, true)"
                        class="group obs-card-hover flex items-center gap-2 pr-2 rounded-xl overflow-hidden cursor-pointer"
                        style="${t.origIdx === activeIdx ? 'border-color: rgba(var(--accent-rgb), 0.78); background: #0C1426;' : ''}">
-                    <div class="w-11 h-11 flex-none relative overflow-hidden">
+                    <div class="w-10 h-10 flex-none relative overflow-hidden">
                       ${t.artSvg}
                       <div class="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="#FFFFFF"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="#FFFFFF"><polygon points="6 3 20 12 6 21 6 3"/></svg>
                       </div>
                     </div>
-                    <div class="min-w-0 flex-1 py-1">
-                      <div class="text-[11px] font-semibold truncate" style="${t.origIdx === activeIdx ? 'color: var(--accent);' : 'color: #F4F6FF;'}">${t.title}</div>
+                    <div class="min-w-0 flex-1 py-0.5">
+                      <div class="text-[10.5px] font-semibold truncate" style="${t.origIdx === activeIdx ? 'color: var(--accent);' : 'color: #F4F6FF;'}">${t.title}</div>
                       <div class="text-[9px] text-[#939DBB] truncate">${t.artist}</div>
                     </div>
                   </div>
@@ -2969,20 +3083,20 @@
               </div>
             </div>
 
-            <div class="space-y-1.5">
+            <div class="space-y-1">
               <div class="text-[9px] font-mono uppercase tracking-[0.2em] text-[#939DBB]">Quick Picks</div>
-              <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <div class="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                 ${indexed.map((t) => `
                   <div onclick="playTrackByIndex(${t.origIdx}, true)"
-                       class="group obs-card-hover rounded-xl p-2 cursor-pointer flex flex-col gap-1.5"
+                       class="group obs-card-hover rounded-xl p-1.5 cursor-pointer flex flex-col gap-1"
                        style="${t.origIdx === activeIdx ? 'border-color: rgba(var(--accent-rgb), 0.68);' : ''}">
                     <div class="relative aspect-square rounded-lg overflow-hidden border border-white/10">
                       ${t.artSvg}
-                      <span class="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-full bg-[#F4F6FF] text-[#010205] opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="ml-0.5"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                      <span class="absolute bottom-1 right-1 w-5 h-5 rounded-full bg-[#F4F6FF] text-[#010205] opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                        <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" class="ml-0.5"><polygon points="6 3 20 12 6 21 6 3"/></svg>
                       </span>
                     </div>
-                    <div class="text-[10px] font-semibold truncate text-[#F4F6FF]">${t.title}</div>
+                    <div class="text-[9.5px] font-semibold truncate text-[#F4F6FF]">${t.title}</div>
                   </div>
                 `).join('')}
               </div>
@@ -3521,6 +3635,136 @@
     }
 
     /* =====================================================================
+     * 8B. TRUE-BLACK OLED DEEP-SPACE STARFIELD (ONLY DRAWS IN OLED MODE)
+     * ===================================================================== */
+    const oledStars = {
+      canvas: null,
+      ctx: null,
+      w: 0,
+      h: 0,
+      stars: [],
+      meteor: null,
+      nextMeteorAt: 0,
+      lastDraw: 0,
+      inited: false,
+
+      init() {
+        if (this.inited) return;
+        const canvas = document.getElementById('oled-stars');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return;
+        this.canvas = canvas;
+        this.ctx = ctx;
+        this.inited = true;
+        this.resize();
+        this.nextMeteorAt = performance.now() + 2600 + Math.random() * 4000;
+      },
+
+      resize() {
+        if (!this.inited) return;
+        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+        this.w = window.innerWidth;
+        this.h = window.innerHeight;
+        this.canvas.width = Math.max(1, Math.round(this.w * dpr));
+        this.canvas.height = Math.max(1, Math.round(this.h * dpr));
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const count = this.w < 768 ? 85 : 150;
+        this.stars = Array.from({ length: count }, (_, i) => {
+          const depth = i % 3 === 0 ? 1.0 : i % 3 === 1 ? 0.62 : 0.34;
+          return {
+            x: Math.random() * this.w,
+            y: Math.random() * this.h,
+            r: depth > 0.8 ? 1.45 : depth > 0.5 ? 1.05 : 0.75,
+            base: 0.25 + Math.random() * 0.65,
+            sp: 0.0007 + Math.random() * 0.0014,
+            ph: Math.random() * Math.PI * 2,
+            tinted: i % 9 === 0,
+            depth,
+          };
+        });
+        if (state.cosmicMode === 'oled') this.draw(performance.now(), 0.016, scrollEngine.smoothGlobalP, true);
+      },
+
+      draw(now, dt, globalP, force = false) {
+        if (state.cosmicMode !== 'oled' || state.modalOpen) return;
+        if (!this.inited) this.init();
+        if (!this.ctx) return;
+        if (!force && now - this.lastDraw < 34) return;
+        this.lastDraw = now;
+
+        const ctx = this.ctx;
+        const w = this.w, h = this.h;
+        const trk = getActiveTrack();
+
+        // True #000000 OLED black background
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, w, h);
+
+        // Subtle fine orbital hairline ring in deep space
+        ctx.save();
+        ctx.translate(w * 0.5, h * 0.48);
+        ctx.rotate(-0.22 + globalP * 0.35);
+        ctx.strokeStyle = `rgba(${trk.accentRgb}, 0.11)`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, Math.min(w, h) * 0.44, Math.min(w, h) * 0.13, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+
+        // Crisp twinkling pinpoint stars with gentle scroll parallax
+        const driftY = globalP * h * 0.28;
+        for (let i = 0; i < this.stars.length; i++) {
+          const s = this.stars[i];
+          const tw = 0.58 + 0.42 * Math.sin(now * s.sp + s.ph);
+          const alpha = (s.base * tw).toFixed(2);
+          let sy = (s.y - driftY * s.depth) % h;
+          if (sy < 0) sy += h;
+
+          ctx.fillStyle = s.tinted ? `rgba(${trk.accentRgb}, ${alpha})` : `rgba(242, 246, 255, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(s.x, sy, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Occasional delicate shooting star
+        if (!this.meteor && now >= this.nextMeteorAt) {
+          this.meteor = {
+            x: w * (0.15 + Math.random() * 0.65),
+            y: h * (0.08 + Math.random() * 0.35),
+            vx: 520 + Math.random() * 240,
+            vy: 180 + Math.random() * 120,
+            life: 0,
+            maxLife: 0.65,
+          };
+        }
+        if (this.meteor) {
+          const m = this.meteor;
+          m.life += dt;
+          m.x += m.vx * dt;
+          m.y += m.vy * dt;
+          const p = clamp01(m.life / m.maxLife);
+          const op = Math.sin(p * Math.PI) * 0.65;
+          const grad = ctx.createLinearGradient(m.x, m.y, m.x - m.vx * 0.14, m.y - m.vy * 0.14);
+          grad.addColorStop(0, `rgba(255, 255, 255, ${op.toFixed(2)})`);
+          grad.addColorStop(0.45, `rgba(${trk.accentRgb}, ${(op * 0.6).toFixed(2)})`);
+          grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(m.x, m.y);
+          ctx.lineTo(m.x - m.vx * 0.14, m.y - m.vy * 0.14);
+          ctx.stroke();
+          if (m.life >= m.maxLife) {
+            this.meteor = null;
+            this.nextMeteorAt = now + 4500 + Math.random() * 5500;
+          }
+        }
+      },
+    };
+
+    /* =====================================================================
      * 9. SINGLE MASTER 60–120FPS RAF LOOP (AUTO-PAUSES WHEN TAB IS HIDDEN)
      * ===================================================================== */
     let lastTime = 0;
@@ -3536,6 +3780,9 @@
       scrollEngine.update(dt);
       motionEngine.update(dt);
       threeEngine.update(dt, now, scrollEngine.smoothGlobalP, scrollEngine.smoothVel, scrollEngine.stickyP('hero-track'));
+      if (state.cosmicMode === 'oled') {
+        oledStars.draw(now, dt, scrollEngine.smoothGlobalP, false);
+      }
 
       if (state.isPlaying) {
         const trk = getActiveTrack();
