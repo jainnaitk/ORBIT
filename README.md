@@ -1,7 +1,8 @@
-# ORBIT
-
-Ad-free, offline-ready desktop music player for Windows.  
-Created by **Naitik Jain**.
+<div align="center">
+  <img src="ui/public/orbit-logo.png" alt="ORBIT Logo" width="112" />
+  <h1>ORBIT</h1>
+  <p>Ad-free, offline-ready desktop music player for Windows.<br />Created by <strong>Naitik Jain</strong>.</p>
+</div>
 
 ## Download
 
