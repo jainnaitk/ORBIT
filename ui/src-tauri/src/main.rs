@@ -19,10 +19,13 @@ static SIDECAR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 const ISLAND_PILL_W: f64 = 380.0;
 const ISLAND_PILL_H: f64 = 142.0;
 const ISLAND_CIRCLE_SIZE: f64 = 78.0;
+const ISLAND_CARD_SIZE: f64 = 236.0;
 const ISLAND_TOP_MARGIN: f64 = 20.0;
 
 static LAST_TRIM_MS: AtomicU64 = AtomicU64::new(0);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static ISLAND_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ISLAND_PINNED: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -66,11 +69,16 @@ mod win_mem {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
+    pub const SWP_NOSIZE: u32 = 0x0001;
+    pub const SWP_NOMOVE: u32 = 0x0002;
     pub const SWP_NOZORDER: u32 = 0x0004;
     pub const SWP_NOACTIVATE: u32 = 0x0010;
     pub const SWP_FRAMECHANGED: u32 = 0x0020;
+    pub const SWP_SHOWWINDOW: u32 = 0x0040;
     pub const SWP_NOCOPYBITS: u32 = 0x0100;
     pub const SW_SHOWNOACTIVATE: i32 = 4;
+    const HWND_TOPMOST: *mut c_void = -1isize as *mut c_void;
+    const HWND_NOTOPMOST: *mut c_void = -2isize as *mut c_void;
     const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
 
     #[link(name = "dwmapi")]
@@ -180,6 +188,40 @@ mod win_mem {
         }
     }
 
+    pub fn set_window_topmost(hwnd: *mut c_void, topmost: bool) {
+        if hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    pub fn set_window_bounds_restore(hwnd: *mut c_void, x: i32, y: i32, w: i32, h: i32) {
+        if hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                x,
+                y,
+                w,
+                h,
+                SWP_SHOWWINDOW,
+            );
+        }
+    }
+
     pub fn show_window_no_activate(hwnd: *mut c_void) {
         if hwnd.is_null() {
             return;
@@ -282,6 +324,28 @@ fn apply_bounds_smooth(window: &WebviewWindow, x: i32, y: i32, w: i32, h: i32) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
+fn apply_bounds_restore(window: &WebviewWindow, x: i32, y: i32, w: i32, h: i32) {
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            win_mem::set_window_bounds_restore(hwnd.0 as *mut std::ffi::c_void, x, y, w, h);
+            return;
+        }
+    }
+    let _ = window.set_size(PhysicalSize::new(w.max(1) as u32, h.max(1) as u32));
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn enforce_topmost(window: &WebviewWindow, topmost: bool) {
+    let _ = window.set_always_on_top(topmost);
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            win_mem::set_window_topmost(hwnd.0 as *mut std::ffi::c_void, topmost);
+        }
+    }
+}
+
 #[tauri::command]
 fn get_bridge_config() -> Result<BridgeConfig, String> {
     let path = get_bridge_path();
@@ -363,21 +427,43 @@ fn enter_dynamic_island(window: WebviewWindow) -> Result<SavedWindowBounds, Stri
         (pos.x.max(0), top_margin)
     };
 
+    ISLAND_ACTIVE.store(true, Ordering::SeqCst);
+    let pinned = ISLAND_PINNED.load(Ordering::SeqCst);
     let _ = window.set_shadow(false);
     let _ = window.set_min_size(Some(LogicalSize::new(64.0, 64.0)));
     let _ = window.set_resizable(false);
-    let _ = window.set_always_on_top(true);
+    let _ = window.set_skip_taskbar(pinned);
+    enforce_topmost(&window, pinned);
 
     apply_bounds_atomic(&window, target_x, target_y, phys_w, phys_h);
+    if pinned {
+        enforce_topmost(&window, true);
+    }
 
     spawn_memory_trim();
     Ok(saved)
 }
 
-/// Smoothly resizes and horizontally re-centers Dynamic Island (Pill <-> Circle) in place
-/// without hiding the window, clamping safely inside the monitor work area.
+/// Pin or unpin Dynamic Island on top of all windows while keeping it freely movable anywhere.
 #[tauri::command]
-fn resize_dynamic_island(window: WebviewWindow, expanded: bool) -> Result<(), String> {
+fn set_island_pinned(window: WebviewWindow, pinned: bool) -> Result<(), String> {
+    ISLAND_PINNED.store(pinned, Ordering::SeqCst);
+    if !ISLAND_ACTIVE.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let _ = window.set_skip_taskbar(pinned);
+    enforce_topmost(&window, pinned);
+    Ok(())
+}
+
+/// Smoothly resizes and horizontally re-centers Dynamic Island (Pill <-> Circle <-> Art-Card)
+/// in place without hiding the window, clamping safely inside the monitor work area.
+#[tauri::command]
+fn resize_dynamic_island(
+    window: WebviewWindow,
+    expanded: Option<bool>,
+    mode: Option<String>,
+) -> Result<(), String> {
     let scale = window.scale_factor().unwrap_or(1.0);
     let cur_pos = window
         .outer_position()
@@ -389,8 +475,27 @@ fn resize_dynamic_island(window: WebviewWindow, expanded: bool) -> Result<(), St
             (ISLAND_PILL_H * scale).round() as u32,
         ));
 
-    let next_w = ((if expanded { ISLAND_PILL_W } else { ISLAND_CIRCLE_SIZE }) * scale).round() as i32;
-    let next_h = ((if expanded { ISLAND_PILL_H } else { ISLAND_CIRCLE_SIZE }) * scale).round() as i32;
+    let resolved_mode = match mode.as_deref() {
+        Some("card") => "card",
+        Some("circle") => "circle",
+        Some("pill") => "pill",
+        _ => {
+            if expanded.unwrap_or(true) {
+                "pill"
+            } else {
+                "circle"
+            }
+        }
+    };
+
+    let (logical_w, logical_h) = match resolved_mode {
+        "card" => (ISLAND_CARD_SIZE, ISLAND_CARD_SIZE),
+        "circle" => (ISLAND_CIRCLE_SIZE, ISLAND_CIRCLE_SIZE),
+        _ => (ISLAND_PILL_W, ISLAND_PILL_H),
+    };
+
+    let next_w = (logical_w * scale).round() as i32;
+    let next_h = (logical_h * scale).round() as i32;
 
     let center_x = cur_pos.x + (cur_size.width as i32) / 2;
     let mut next_x = center_x - next_w / 2;
@@ -413,55 +518,64 @@ fn resize_dynamic_island(window: WebviewWindow, expanded: bool) -> Result<(), St
 
     let _ = window.set_shadow(false);
     apply_bounds_smooth(&window, next_x, next_y, next_w, next_h);
+    if ISLAND_PINNED.load(Ordering::SeqCst) {
+        enforce_topmost(&window, true);
+    }
 
-    if !expanded {
+    if resolved_mode == "circle" {
         spawn_memory_trim();
     }
     Ok(())
 }
 
-/// Restores saved main window geometry while the WebView2 surface is blank transparent
-/// (no SW_HIDE / SW_SHOW so WebView2 never freezes or flashes a stale Dynamic Island frame).
+/// Restores saved main window geometry cleanly in a single non-flashing step and focuses immediately.
 #[tauri::command]
 fn exit_dynamic_island(
     window: WebviewWindow,
     saved: Option<SavedWindowBounds>,
 ) -> Result<(), String> {
+    ISLAND_ACTIVE.store(false, Ordering::SeqCst);
     disable_window_transitions(&window);
+    let _ = window.set_skip_taskbar(false);
     let _ = window.set_always_on_top(false);
     let _ = window.set_resizable(true);
     let _ = window.set_shadow(false);
     let _ = window.set_min_size(Some(LogicalSize::new(380.0, 320.0)));
 
     if let Some(bounds) = saved {
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let min_w = (380.0 * scale).round() as u32;
-        let min_h = (320.0 * scale).round() as u32;
-        let mut w = bounds.width.max(min_w) as i32;
-        let mut h = bounds.height.max(min_h) as i32;
-        let mut x = bounds.x;
-        let mut y = bounds.y;
-
-        // Clamp restored geometry cleanly inside the active monitor work area
-        if let Ok(Some(mon)) = window.current_monitor() {
-            let wa = mon.work_area();
-            w = w.min(wa.size.width as i32);
-            h = h.min(wa.size.height as i32);
-            let max_x = wa.position.x + (wa.size.width as i32 - w).max(0);
-            let max_y = wa.position.y + (wa.size.height as i32 - h).max(0);
-            x = x.clamp(wa.position.x, max_x);
-            y = y.clamp(wa.position.y, max_y);
-        }
-
-        apply_bounds_atomic(&window, x, y, w, h);
-
         if bounds.was_maximized {
             let _ = window.maximize();
+            let _ = window.set_focus();
+            return Ok(());
+        } else {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let min_w = (380.0 * scale).round() as u32;
+            let min_h = (320.0 * scale).round() as u32;
+            let mut w = bounds.width.max(min_w) as i32;
+            let mut h = bounds.height.max(min_h) as i32;
+            let mut x = bounds.x;
+            let mut y = bounds.y;
+
+            if let Ok(Some(mon)) = window.current_monitor() {
+                let wa = mon.work_area();
+                w = w.min(wa.size.width as i32);
+                h = h.min(wa.size.height as i32);
+                let max_x = wa.position.x + (wa.size.width as i32 - w).max(0);
+                let max_y = wa.position.y + (wa.size.height as i32 - h).max(0);
+                x = x.clamp(wa.position.x, max_x);
+                y = y.clamp(wa.position.y, max_y);
+            }
+
+            apply_bounds_restore(&window, x, y, w, h);
+            let _ = window.set_focus();
+            return Ok(());
         }
     } else {
         let _ = window.set_size(LogicalSize::new(1120.0, 700.0));
     }
 
+    let _ = window.show();
+    let _ = window.set_focus();
     Ok(())
 }
 
@@ -786,11 +900,24 @@ fn quit_application(app: &AppHandle) {
 
 fn attach_window_close_handler(window: &WebviewWindow) {
     let app = window.app_handle().clone();
+    let win_clone = window.clone();
     window.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { .. } = event {
-            if !should_close_to_tray() {
-                quit_application(&app);
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                if !should_close_to_tray() {
+                    quit_application(&app);
+                }
             }
+            tauri::WindowEvent::Focused(false) => {
+                // Keep pinned Dynamic Island fixed at top across Alt+Tab / app switching
+                if ISLAND_ACTIVE.load(Ordering::SeqCst) && ISLAND_PINNED.load(Ordering::SeqCst) {
+                    if win_clone.is_minimized().unwrap_or(false) {
+                        let _ = win_clone.unminimize();
+                    }
+                    enforce_topmost(&win_clone, true);
+                }
+            }
+            _ => {}
         }
     });
 }
@@ -802,6 +929,8 @@ pub fn ensure_main_window(app: &AppHandle) {
         let _ = main_win.set_focus();
         return;
     }
+
+    ISLAND_ACTIVE.store(false, Ordering::SeqCst);
 
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .title("ORBIT")
@@ -957,6 +1086,7 @@ fn main() {
             show_main_window,
             enter_dynamic_island,
             resize_dynamic_island,
+            set_island_pinned,
             exit_dynamic_island
         ])
         .build(tauri::generate_context!())
@@ -969,6 +1099,7 @@ fn main() {
                     ..
                 } => {
                     if label == "main" {
+                        ISLAND_ACTIVE.store(false, Ordering::SeqCst);
                         spawn_memory_trim();
                     }
                 }

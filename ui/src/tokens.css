@@ -300,10 +300,9 @@ textarea:focus-visible {
     inset 0 -1px 0 rgba(255, 255, 255, 0.09);
 }
 
-/* Off-screen shelf rendering optimization: skips layout/decode for shelves outside viewport */
+/* Shelf layout containment without content-visibility scrollbar jumping */
 .eh-shelf-section {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 270px;
+  contain: layout style;
 }
 
 [data-effects="oled"] .ios-liquid-panel,
@@ -411,8 +410,8 @@ input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
 }
 
 @keyframes appRestore {
-  from { opacity: 0; transform: scale(0.99); }
-  to   { opacity: 1; transform: scale(1); }
+  from { opacity: 0.85; }
+  to   { opacity: 1; }
 }
 
 @keyframes modalBackdropIn {
@@ -473,13 +472,13 @@ input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
   50%      { transform: scaleY(1); }
 }
 
-.eh-page-in      { animation: pageEnter 180ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
-.eh-app-restore  { animation: appRestore 180ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-page-in      { animation: pageEnter 140ms ease-out backwards; }
+.eh-app-restore  { animation: appRestore 110ms ease-out backwards; }
 .eh-modal-backdrop { animation: modalBackdropIn 140ms ease-out both; }
 .eh-modal-in     { animation: modalPopIn 200ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
 .eh-popover-in   { animation: popoverPopIn 150ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
-.eh-island-in    { animation: islandPopIn 200ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
-.eh-island-circle-in { animation: islandCirclePopIn 180ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.eh-island-in    { animation: islandPopIn 200ms cubic-bezier(0.22, 1, 0.36, 1) backwards; will-change: transform, opacity; }
+.eh-island-circle-in { animation: islandCirclePopIn 180ms cubic-bezier(0.22, 1, 0.36, 1) backwards; will-change: transform, opacity; }
 .eh-skeleton     { animation: skeletonShimmer 1.3s ease-in-out infinite; }
 .eh-suck-card    { animation: ehBlackHoleSuck 1020ms cubic-bezier(0.45, 0.02, 0.65, 0.98) forwards; will-change: transform, opacity; }
 .eh-rise-card    { animation: ehCardRiseBelow 240ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
@@ -502,18 +501,15 @@ input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
 /* === ORBIT 60FPS SMOOTHNESS PASS === */
 @keyframes ehTabEnter {
   from {
-    opacity: 0;
-    transform: translate3d(0, 6px, 0);
+    opacity: 0.84;
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0);
   }
 }
 
 .eh-tab-enter {
-  animation: ehTabEnter 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  will-change: transform, opacity;
+  animation: ehTabEnter 110ms ease-out backwards;
 }
 
 @keyframes ehBufferSpin {
@@ -530,3 +526,39 @@ input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
 .eh-scroll-isolate {
   contain: layout style paint;
 }
+
+/* Pure CSS GPU-composited marquee (activates only when overflowing; pauses on blur/static/oled) */
+@keyframes ehMarqueePingPong {
+  0%, 16%   { transform: translate3d(0, 0, 0); }
+  48%, 64%  { transform: translate3d(var(--marquee-shift, 0px), 0, 0); }
+  94%, 100% { transform: translate3d(0, 0, 0); }
+}
+
+.eh-marquee-wrap {
+  overflow: hidden;
+  position: relative;
+}
+
+.eh-marquee-track {
+  display: inline-block;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.eh-marquee-active {
+  animation: ehMarqueePingPong var(--marquee-duration, 9s) ease-in-out infinite;
+}
+
+.eh-marquee-wrap:hover .eh-marquee-active,
+.window-paused .eh-marquee-active,
+[data-effects="static"] .eh-marquee-active,
+[data-effects="oled"] .eh-marquee-active {
+  animation-play-state: paused !important;
+}
+
+.eh-play-morph {
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+              border-radius 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+

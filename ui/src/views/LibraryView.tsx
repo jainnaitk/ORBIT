@@ -38,6 +38,8 @@ interface LibraryViewProps {
   onAppendQueue: (track: Track) => void;
   onOpenAddToPlaylist: (track: Track) => void;
   onPlaylistDeleted: (playlistId: string) => void;
+  onOpenArtist?: (artistName: string, artistId?: string | null) => void;
+  onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
 }
 
 const __ORBIT_LIB_CACHE__: Record<string, Track[]> = {};
@@ -73,6 +75,8 @@ export const LibraryView = memo(({
   onAppendQueue,
   onOpenAddToPlaylist,
   onPlaylistDeleted,
+  onOpenArtist,
+  onOpenAlbum,
 }: LibraryViewProps) => {
   const [historySort, setHistorySort] = useState<'recent' | 'most_played'>('recent');
   const needsFetch = tab === 'history' || (tab === 'playlist' && !!playlistId);
@@ -225,7 +229,7 @@ export const LibraryView = memo(({
   return (
     <div
       style={{ contain: 'layout style' }}
-      className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel eh-page-in rounded-[26px] my-1"
+      className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
     >
       <div className="flex-none p-5 sm:p-6 border-b border-white/[0.08] bg-white/[0.02] space-y-4">
         <div className="flex items-end justify-between gap-4 flex-wrap">
@@ -345,6 +349,8 @@ export const LibraryView = memo(({
         onAddNext={onAddNext}
         onAppendQueue={onAppendQueue}
         onOpenAddToPlaylist={onOpenAddToPlaylist}
+        onOpenArtist={onOpenArtist}
+        onOpenAlbum={onOpenAlbum}
         emptyMessage={
           tab === 'liked'
             ? 'No liked tracks yet. Heart songs from Home, Search, or the Player dock.'

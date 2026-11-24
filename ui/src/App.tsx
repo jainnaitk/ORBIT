@@ -11,9 +11,13 @@ import { Sidebar, type NavTab } from './components/Sidebar';
 import { PlayerBar } from './components/PlayerBar';
 import { QueueDrawer } from './components/QueueDrawer';
 import { LyricsDrawer } from './components/LyricsDrawer';
+import { FullscreenStage, type FullscreenTab } from './components/FullscreenStage';
+import { ToastHost, toast } from './components/ToastHost';
 import { HomeView } from './views/HomeView';
 import { SearchView } from './views/SearchView';
 import { LibraryView } from './views/LibraryView';
+import { ArtistView, type ArtistNavTarget, type AlbumNavTarget } from './views/ArtistView';
+import { AlbumView } from './views/AlbumView';
 import {
   CreatePlaylistModal,
   AddToPlaylistModal,
@@ -25,7 +29,6 @@ import {
   bridgeSocket,
   enterDynamicIslandWindow,
   exitDynamicIslandWindow,
-  showMainWindow,
   trimProcessMemory,
   waitForNextPaint,
   type SavedWindowBounds,
@@ -53,6 +56,7 @@ export default function App() {
   const [isUpdateTabOpen, setIsUpdateTabOpen] = useState<boolean>(false);
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState<boolean>(false);
   const promptedUpdateVersionRef = useRef<string | null>(null);
+  const toastedReadyUpdateRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (
@@ -63,6 +67,14 @@ export default function App() {
     ) {
       promptedUpdateVersionRef.current = updateState.latest_version;
       setIsUpdateModalOpen(true);
+    }
+    if (
+      updateState?.status === 'ready' &&
+      updateState.latest_version &&
+      toastedReadyUpdateRef.current !== updateState.latest_version
+    ) {
+      toastedReadyUpdateRef.current = updateState.latest_version;
+      toast.show(`Update v${updateState.latest_version} downloaded`, 'success', 3600);
     }
   }, [updateState?.update_available, updateState?.latest_version, updateState?.status]);
 
@@ -84,17 +96,26 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
-  const [historyStack, setHistoryStack] = useState<{ tab: NavTab; playlistId?: string | null }[]>([
-    { tab: 'home' },
-  ]);
+  const [activeArtist, setActiveArtist] = useState<ArtistNavTarget | null>(null);
+  const [activeAlbum, setActiveAlbum] = useState<AlbumNavTarget | null>(null);
+  const [historyStack, setHistoryStack] = useState<
+    {
+      tab: NavTab;
+      playlistId?: string | null;
+      artist?: ArtistNavTarget | null;
+      album?: AlbumNavTarget | null;
+    }[]
+  >([{ tab: 'home' }]);
   const [historyIndex, setHistoryIndex] = useState<number>(0);
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [submittedSearch, setSubmittedSearch] = useState<string>('');
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(true);
-  // Queue and Lyrics share the exact same right-hand drawer slot (mutually exclusive)
+  // Queue and Docked Lyrics share the right-hand slot (mutually exclusive)
   const [rightDrawer, setRightDrawer] = useState<RightDrawerTab>('none');
+  const [isFullscreenStageOpen, setIsFullscreenStageOpen] = useState<boolean>(false);
+  const [stageInitialTab, setStageInitialTab] = useState<FullscreenTab>('lyrics');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState<boolean>(false);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
@@ -110,9 +131,9 @@ export default function App() {
   const [playerRiseKey, setPlayerRiseKey] = useState<number>(0);
   const lastTrackRef = useRef<Track | null>(null);
   const isIslandModeRef = useRef<boolean>(isIslandMode);
-  const rightDrawerRef = useRef<RightDrawerTab>(rightDrawer);
+  const isFullscreenStageOpenRef = useRef<boolean>(isFullscreenStageOpen);
   isIslandModeRef.current = isIslandMode;
-  rightDrawerRef.current = rightDrawer;
+  isFullscreenStageOpenRef.current = isFullscreenStageOpen;
 
   const [cosmicMode, setCosmicMode] = useState<CosmicEffectsMode>('full');
   const [autoDownloadLiked, setAutoDownloadLiked] = useState<boolean>(false);
@@ -187,10 +208,10 @@ export default function App() {
     if (prev && prev.video_id !== activeVideoId) {
       setPlayerRiseKey((k) => k + 1);
 
-      // Suppress BlackHole suck-in animation when Lyrics or Dynamic Island obscures the canvas
+      // Suppress BlackHole suck-in animation when Fullscreen Stage or Dynamic Island obscures the canvas
       if (
         !isIslandModeRef.current &&
-        rightDrawerRef.current !== 'lyrics' &&
+        !isFullscreenStageOpenRef.current &&
         cosmicModeRef.current === 'full'
       ) {
         const nowId = Date.now();
@@ -208,13 +229,13 @@ export default function App() {
   }, [activeVideoId]);
 
   useEffect(() => {
-    if (isIslandMode || rightDrawer === 'lyrics') {
+    if (isIslandMode || isFullscreenStageOpen) {
       setSuckPayload(null);
       if (activeTrackRef.current) {
         lastTrackRef.current = activeTrackRef.current;
       }
     }
-  }, [isIslandMode, rightDrawer]);
+  }, [isIslandMode, isFullscreenStageOpen]);
 
   useEffect(() => {
     document.title = activeTrack?.title
@@ -252,13 +273,27 @@ export default function App() {
   }, [activeVideoId, activeThumb]);
 
   const navigateTo = useCallback(
-    (tab: NavTab, playlistId?: string | null) => {
-      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+    (
+      tab: NavTab,
+      playlistId?: string | null,
+      artist?: ArtistNavTarget | null,
+      album?: AlbumNavTarget | null
+    ) => {
       setActiveTab(tab);
       setActivePlaylistId(playlistId || null);
+      if (tab === 'artist') setActiveArtist(artist || null);
+      if (tab === 'album') setActiveAlbum(album || null);
       setHistoryStack((prev) => {
         const nextStack = prev.slice(0, historyIndex + 1);
-        return [...nextStack, { tab, playlistId: playlistId || null }];
+        return [
+          ...nextStack,
+          {
+            tab,
+            playlistId: playlistId || null,
+            artist: tab === 'artist' ? artist || null : null,
+            album: tab === 'album' ? album || null : null,
+          },
+        ];
       });
       setHistoryIndex((prev) => prev + 1);
     },
@@ -267,25 +302,78 @@ export default function App() {
 
   const handleGoBack = useCallback(() => {
     if (historyIndex > 0) {
-      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
       const nextIdx = historyIndex - 1;
       const target = historyStack[nextIdx];
       setHistoryIndex(nextIdx);
       setActiveTab(target.tab);
       setActivePlaylistId(target.playlistId || null);
+      if (target.artist) setActiveArtist(target.artist);
+      if (target.album) setActiveAlbum(target.album);
     }
   }, [historyIndex, historyStack]);
 
   const handleGoForward = useCallback(() => {
     if (historyIndex < historyStack.length - 1) {
-      setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
       const nextIdx = historyIndex + 1;
       const target = historyStack[nextIdx];
       setHistoryIndex(nextIdx);
       setActiveTab(target.tab);
       setActivePlaylistId(target.playlistId || null);
+      if (target.artist) setActiveArtist(target.artist);
+      if (target.album) setActiveAlbum(target.album);
     }
   }, [historyIndex, historyStack]);
+
+  const handleOpenArtist = useCallback(
+    (target: ArtistNavTarget) => {
+      const cleaned = target.name.split(',')[0].trim();
+      if (!cleaned) return;
+      setIsFullscreenStageOpen(false);
+      navigateTo('artist', null, { name: cleaned, channelId: target.channelId || null }, null);
+    },
+    [navigateTo]
+  );
+
+  const handleOpenAlbum = useCallback(
+    (target: AlbumNavTarget) => {
+      setIsFullscreenStageOpen(false);
+      navigateTo('album', null, null, target);
+    },
+    [navigateTo]
+  );
+
+  const handleOpenTrackArtist = useCallback(
+    (track: Track) => {
+      handleOpenArtist({
+        name: track.artist.split(',')[0].trim(),
+        channelId: track.artist_id || null,
+      });
+    },
+    [handleOpenArtist]
+  );
+
+  const handleOpenTrackAlbum = useCallback(
+    (track: Track) => {
+      handleOpenAlbum({
+        browseId: track.album_id || null,
+        title: track.album || track.title,
+        artist: track.artist,
+        videoId: track.video_id,
+      });
+    },
+    [handleOpenAlbum]
+  );
+
+  const handleCloseSearch = useCallback(() => {
+    setSearchQuery('');
+    setSubmittedSearch('');
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    if (activeTab === 'search') {
+      navigateTo('home');
+    }
+  }, [activeTab, navigateTo]);
 
   const applySettingsPayload = useCallback(
     (settingsObj: Record<string, unknown> | null | undefined) => {
@@ -458,6 +546,7 @@ export default function App() {
     if (islandSwitchingRef.current) return;
     islandSwitchingRef.current = true;
     try {
+      setIsFullscreenStageOpen(false);
       setRightDrawer('none');
       setSuckPayload(null);
       if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
@@ -472,10 +561,7 @@ export default function App() {
     }
   }, [waitForViewportCondition]);
 
-  // Zero-hide, zero-ghost transition back to Full App:
-  // 1) Paint 100% transparent frame so the Pill can NEVER flash at top-left of main window.
-  // 2) Restore main window bounds (DWM transitions disabled).
-  // 3) Wait until WebView2 commits restored viewport width, then reveal Full App cleanly.
+  // Instant, zero-remount transition back to Full App (main shell stays mounted in DOM):
   const handleExitIsland = useCallback(async () => {
     if (islandSwitchingRef.current) return;
     islandSwitchingRef.current = true;
@@ -483,18 +569,18 @@ export default function App() {
       setSuckPayload(null);
       if (activeTrackRef.current) lastTrackRef.current = activeTrackRef.current;
       setIsWindowTransitioning(true);
-      await waitForNextPaint();
       await exitDynamicIslandWindow(savedBoundsRef.current);
-      await waitForViewportCondition(() => window.innerWidth >= 420, 160);
+      await waitForViewportCondition(() => window.innerWidth >= 420, 40);
       setRestoreSeq((s) => s + 1);
       setIsIslandMode(false);
       setIsWindowTransitioning(false);
-      await showMainWindow(true);
-      window.setTimeout(() => void trimProcessMemory(), 800);
+      window.setTimeout(() => void trimProcessMemory(), 900);
     } finally {
       islandSwitchingRef.current = false;
     }
   }, [waitForViewportCondition]);
+
+  const MAX_QUEUE_BATCH = 25;
 
   const handlePlayTrack = useCallback(
     async (track: Track, index: number = 0, trackList?: Track[]) => {
@@ -508,7 +594,16 @@ export default function App() {
 
       try {
         if (trackList && trackList.length > 0) {
-          await api.setQueue(trackList, index, true);
+          // Keep queue compact (<= 25 tracks) so clicking a song in a large catalog/history never dumps 150 items
+          let batch = trackList;
+          let startIdx = Math.max(0, Math.min(index, trackList.length - 1));
+          if (trackList.length > MAX_QUEUE_BATCH) {
+            const after = trackList.slice(startIdx, startIdx + MAX_QUEUE_BATCH);
+            const needed = MAX_QUEUE_BATCH - after.length;
+            batch = needed > 0 ? [...after, ...trackList.slice(0, needed)] : after;
+            startIdx = 0;
+          }
+          await api.setQueue(batch, startIdx, true);
         } else {
           await api.play(track);
         }
@@ -522,8 +617,23 @@ export default function App() {
   const handlePlayAll = useCallback(
     async (tracks: Track[], shuffle: boolean = false) => {
       if (tracks.length === 0) return;
-      const startIndex = shuffle ? Math.floor(Math.random() * tracks.length) : 0;
-      const firstTrack = tracks[startIndex];
+      let batch = tracks;
+      if (tracks.length > MAX_QUEUE_BATCH) {
+        if (shuffle) {
+          const pool = [...tracks];
+          for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+          }
+          batch = pool.slice(0, MAX_QUEUE_BATCH);
+        } else {
+          batch = tracks.slice(0, MAX_QUEUE_BATCH);
+        }
+      }
+      const startIndex = shuffle && batch.length === tracks.length
+        ? Math.floor(Math.random() * batch.length)
+        : 0;
+      const firstTrack = batch[startIndex];
       setPlayback((prev) => ({
         time_pos: 0,
         duration: firstTrack.duration_s,
@@ -534,7 +644,7 @@ export default function App() {
       setQueue((prev) => (prev ? { ...prev, shuffle } : prev));
       try {
         await api.setShuffle(shuffle);
-        await api.setQueue(tracks, startIndex, true);
+        await api.setQueue(batch, startIndex, true);
       } catch {
         // Handled via socket broadcast
       }
@@ -683,6 +793,10 @@ export default function App() {
 
       try {
         await api.toggleLike(track.video_id, track);
+        toast.show(
+          nextLiked ? `Liked "${track.title}"` : `Removed from Liked`,
+          nextLiked ? 'success' : 'info'
+        );
       } catch {
         setLikedIds((prev) => {
           const next = new Set(prev);
@@ -708,6 +822,7 @@ export default function App() {
           total_bytes: 0,
         },
       }));
+      toast.show(`Download queued: ${track.title}`, 'info');
       try { await api.startDownload(track.video_id, track); } catch { /* Ignore */ }
     },
     [api, setDownloads]
@@ -723,6 +838,7 @@ export default function App() {
       });
       try {
         await api.deleteDownload(track.video_id);
+        toast.show('Removed offline download', 'info');
         await refreshLibraryStats();
       } catch {
         await refreshLibraryStats();
@@ -733,17 +849,50 @@ export default function App() {
 
   const handleDownloadAll = useCallback(
     async (tracksToDownload: Track[]) => {
-      for (const t of tracksToDownload) void handleDownload(t);
+      const pending = tracksToDownload.filter((t) => !downloadedIds.has(t.video_id));
+      if (pending.length === 0) {
+        toast.show('All tracks already downloaded offline', 'info');
+        return;
+      }
+      setDownloads((prev) => {
+        const next = { ...prev };
+        for (const t of pending) {
+          next[t.video_id] = {
+            video_id: t.video_id,
+            status: 'queued',
+            percent: 0,
+            progress_pct: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+          };
+        }
+        return next;
+      });
+      toast.show(
+        pending.length === 1
+          ? `Download queued: ${pending[0].title}`
+          : `Queued ${pending.length} downloads`,
+        'info'
+      );
+      for (const t of pending) {
+        void api.startDownload(t.video_id, t).catch(() => {});
+      }
     },
-    [handleDownload]
+    [api, downloadedIds, setDownloads]
   );
 
   const handleAddNext = useCallback(async (track: Track) => {
-    try { await api.addNextQueue(track); } catch { /* Ignore */ }
+    try {
+      await api.addNextQueue(track);
+      toast.show(`Playing next: ${track.title}`, 'accent');
+    } catch { /* Ignore */ }
   }, [api]);
 
   const handleAppendQueue = useCallback(async (track: Track) => {
-    try { await api.appendQueue(track); } catch { /* Ignore */ }
+    try {
+      await api.appendQueue(track);
+      toast.show('Added to queue', 'accent');
+    } catch { /* Ignore */ }
   }, [api]);
 
   const handleRemoveQueueItem = useCallback(async (index: number) => {
@@ -755,7 +904,10 @@ export default function App() {
   }, [api]);
 
   const handleClearQueue = useCallback(async () => {
-    try { await api.clearQueue(); } catch { /* Ignore */ }
+    try {
+      await api.clearQueue();
+      toast.show('Queue cleared', 'info');
+    } catch { /* Ignore */ }
   }, [api]);
 
   const handleCreatePlaylist = useCallback(
@@ -763,6 +915,7 @@ export default function App() {
       try {
         const created = await api.createPlaylist(name, description);
         setPlaylists((prev) => [...prev, created]);
+        toast.show(`Playlist "${created.name}" created`, 'success');
         navigateTo('playlist', created.id);
       } catch { /* Ignore */ }
     },
@@ -773,6 +926,7 @@ export default function App() {
     async (playlistId: string, track: Track) => {
       try {
         await api.addPlaylistTracks(playlistId, [track]);
+        toast.show('Added to playlist', 'success');
         await refreshLibraryStats();
       } catch { /* Ignore */ }
     },
@@ -824,6 +978,7 @@ export default function App() {
         if (isCreatePlaylistOpen) return setIsCreatePlaylistOpen(false);
         if (addToPlaylistTrack) return setAddToPlaylistTrack(null);
         if (isSettingsOpen) return setIsSettingsOpen(false);
+        if (isFullscreenStageOpen) return setIsFullscreenStageOpen(false);
         if (rightDrawer !== 'none') return setRightDrawer('none');
       }
     };
@@ -840,6 +995,7 @@ export default function App() {
     isCreatePlaylistOpen,
     addToPlaylistTrack,
     isSettingsOpen,
+    isFullscreenStageOpen,
     rightDrawer,
   ]);
 
@@ -871,6 +1027,7 @@ export default function App() {
 
   const handleOpenUpdateDownloadTabFromModal = useCallback(() => {
     setIsUpdateModalOpen(false);
+    setIsFullscreenStageOpen(false);
     setIsUpdateTabOpen(true);
   }, []);
 
@@ -911,7 +1068,6 @@ export default function App() {
       setSearchQuery(q);
       setSubmittedSearch(q);
       if (q.trim().length > 0) {
-        setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
         if (activeTab !== 'search') navigateTo('search');
       }
     },
@@ -922,7 +1078,6 @@ export default function App() {
     (q: string) => {
       setSubmittedSearch(q);
       if (q.trim().length > 0) {
-        setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
         if (activeTab !== 'search') navigateTo('search');
       }
     },
@@ -930,9 +1085,26 @@ export default function App() {
   );
 
   const handleFocusSearchTab = useCallback(() => {
-    setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : prev));
+    setIsFullscreenStageOpen(false);
     if (activeTab !== 'search') navigateTo('search');
   }, [activeTab, navigateTo]);
+
+  const handleOpenFullscreenFromLyrics = useCallback(() => {
+    setRightDrawer('none');
+    setStageInitialTab('lyrics');
+    setIsFullscreenStageOpen(true);
+  }, []);
+
+  const handleToggleFullscreenStage = useCallback(() => {
+    setIsFullscreenStageOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setStageInitialTab('lyrics');
+        setRightDrawer('none');
+      }
+      return next;
+    });
+  }, []);
 
   const handlePlaySingleHomeTrack = useCallback(
     (t: Track) => {
@@ -967,44 +1139,84 @@ export default function App() {
     void handleExitIsland();
   }, [handleExitIsland]);
 
-  if (isWindowTransitioning) {
-    return <div className="w-screen h-screen bg-transparent pointer-events-none" />;
-  }
+  const handleShellPointerDown = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (activeTab !== 'search') return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Keep search open when interacting with search capsule/panel, nav sidebar, player dock, modals, or buttons
+      if (
+        target.closest('[data-search-surface="true"]') ||
+        target.closest('aside') ||
+        target.closest('footer') ||
+        target.closest('button') ||
+        target.closest('input') ||
+        target.closest('textarea') ||
+        target.closest('[role="dialog"]')
+      ) {
+        return;
+      }
+      handleCloseSearch();
+    },
+    [activeTab, handleCloseSearch]
+  );
 
-  if (isIslandMode) {
-    return (
-      <DynamicIsland
-        playback={playback}
-        queue={queue}
-        likedIds={likedIds}
-        onTogglePlay={handleTogglePlay}
-        onNext={handleNext}
-        onPrev={handlePrev}
-        onSeek={handleSeek}
-        onToggleLike={handleToggleLike}
-        onExitIsland={handleExitIslandAction}
-      />
-    );
-  }
+  const isLibraryTab =
+    activeTab === 'library' ||
+    activeTab === 'liked' ||
+    activeTab === 'downloads' ||
+    activeTab === 'history' ||
+    activeTab === 'playlist';
+
+  // Keep LibraryView mounted across Liked/Offline/History/Playlist for instant 1-frame tab switching
+  const tabAnimKey = isLibraryTab
+    ? 'library-shell'
+    : activeTab === 'artist'
+    ? `artist:${activeArtist?.channelId || ''}:${activeArtist?.name || ''}`
+    : activeTab === 'album'
+    ? `album:${activeAlbum?.browseId || ''}:${activeAlbum?.title || ''}`
+    : activeTab;
+
+  const hideMainShell = isWindowTransitioning || isIslandMode;
 
   return (
-    <div
-      className={`relative flex flex-col h-screen w-screen overflow-hidden select-none text-[#F1F4FA] bg-[#06080F] ${
-        restoreSeq > 0 ? 'eh-app-restore' : ''
-      }`}
-    >
-      {/* Subtle Top-Right Black Hole + Starfield */}
+    <>
+      {isWindowTransitioning && (
+        <div className="fixed inset-0 w-screen h-screen bg-transparent pointer-events-none z-[100]" />
+      )}
+
+      {!isWindowTransitioning && isIslandMode && (
+        <DynamicIsland
+          playback={playback}
+          queue={queue}
+          likedIds={likedIds}
+          onTogglePlay={handleTogglePlay}
+          onNext={handleNext}
+          onPrev={handlePrev}
+          onSeek={handleSeek}
+          onToggleLike={handleToggleLike}
+          onExitIsland={handleExitIslandAction}
+        />
+      )}
+
+      <div
+        onMouseDown={handleShellPointerDown}
+        className={`relative flex-col h-screen w-screen overflow-hidden select-none text-[#F1F4FA] bg-[#06080F] ${
+          hideMainShell ? 'hidden' : 'flex'
+        } ${restoreSeq > 0 ? 'eh-app-restore' : ''}`}
+      >
+      {/* Subtle Top-Right Black Hole + Starfield (paused in Stage or Dynamic Island) */}
       <StarfieldBg
         mode={cosmicMode}
         absorbPulseKey={absorbPulseKey}
         isPlaying={playback?.state === 'playing' || playback?.state === 'buffering'}
-        paused={rightDrawer === 'lyrics'}
+        paused={isFullscreenStageOpen || hideMainShell}
       />
 
-      {/* Outgoing Song Card Spiraling into the Black Hole (Full mode only, suppressed when Lyrics/Island active) */}
+      {/* Outgoing Song Card Spiraling into the Black Hole (Full mode only, suppressed when Stage/Island active) */}
       <BlackHoleTransition
         payload={suckPayload}
-        enabled={cosmicMode === 'full' && !isIslandMode && rightDrawer !== 'lyrics'}
+        enabled={cosmicMode === 'full' && !isIslandMode && !isFullscreenStageOpen}
       />
 
       <div className="relative z-10 flex flex-col h-full w-full overflow-hidden">
@@ -1028,7 +1240,7 @@ export default function App() {
           onDownloadAndInstallUpdate={handleDownloadAndInstallUpdate}
         />
 
-        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 sm:gap-3 px-2 sm:px-3 pb-2">
+        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 sm:gap-3 px-2 sm:px-3 pb-2 relative">
           <Sidebar
             activeTab={activeTab}
             activePlaylistId={activePlaylistId}
@@ -1045,89 +1257,156 @@ export default function App() {
             className="flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent"
             style={{ contain: 'layout style' }}
           >
-            {activeTab === 'home' && (
-              <HomeView
-                currentTrackId={activeVideoId}
-                likedIds={likedIds}
-                onPlayTrack={handlePlaySingleHomeTrack}
-                onPlayAll={handlePlayAll}
-                onToggleLike={handleToggleLike}
-                onAddNext={handleAddNext}
-              />
-            )}
+            <div key={tabAnimKey} className="flex-1 min-h-0 flex flex-col eh-tab-enter">
+              {activeTab === 'home' && (
+                <HomeView
+                  currentTrackId={activeVideoId}
+                  likedIds={likedIds}
+                  onPlayTrack={handlePlaySingleHomeTrack}
+                  onPlayAll={handlePlayAll}
+                  onToggleLike={handleToggleLike}
+                  onAddNext={handleAddNext}
+                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+                />
+              )}
 
-            {activeTab === 'search' && (
-              <SearchView
-                initialQuery={submittedSearch}
-                currentTrackId={activeVideoId}
-                isPlaying={playback?.state === 'playing'}
-                downloads={downloads}
-                likedIds={likedIds}
-                downloadedIds={downloadedIds}
-                onPlay={handlePlayTrack}
-                onToggleLike={handleToggleLike}
-                onDownload={handleDownload}
-                onDeleteDownload={handleDeleteDownload}
-                onAddNext={handleAddNext}
-                onAppendQueue={handleAppendQueue}
-                onOpenAddToPlaylist={handleOpenAddToPlaylist}
-              />
-            )}
+              {activeTab === 'search' && (
+                <SearchView
+                  initialQuery={submittedSearch}
+                  currentTrackId={activeVideoId}
+                  isPlaying={playback?.state === 'playing'}
+                  downloads={downloads}
+                  likedIds={likedIds}
+                  downloadedIds={downloadedIds}
+                  onPlay={handlePlayTrack}
+                  onToggleLike={handleToggleLike}
+                  onDownload={handleDownload}
+                  onDeleteDownload={handleDeleteDownload}
+                  onAddNext={handleAddNext}
+                  onAppendQueue={handleAppendQueue}
+                  onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+                  onOpenAlbum={(albumName, albumId, track) =>
+                    handleOpenAlbum({
+                      browseId: albumId,
+                      title: albumName,
+                      artist: track.artist,
+                      videoId: track.video_id,
+                    })
+                  }
+                  onCloseSearch={handleCloseSearch}
+                />
+              )}
 
-            {(activeTab === 'library' ||
-              activeTab === 'liked' ||
-              activeTab === 'downloads' ||
-              activeTab === 'history' ||
-              activeTab === 'playlist') && (
-              <LibraryView
-                tab={activeTab}
-                playlistId={activePlaylistId}
-                playlists={playlists}
-                likedTracks={likedTracks}
-                downloadTracks={downloadTracks}
-                currentTrackId={activeVideoId}
-                isPlaying={playback?.state === 'playing'}
-                downloads={downloads}
-                likedIds={likedIds}
-                downloadedIds={downloadedIds}
-                libraryVersion={libraryVersion}
-                onPlay={handlePlayTrack}
-                onPlayAll={handlePlayAll}
-                onToggleLike={handleToggleLike}
-                onDownload={handleDownload}
-                onDeleteDownload={handleDeleteDownload}
-                onDownloadAll={handleDownloadAll}
-                onAddNext={handleAddNext}
-                onAppendQueue={handleAppendQueue}
-                onOpenAddToPlaylist={handleOpenAddToPlaylist}
-                onPlaylistDeleted={handlePlaylistDeleted}
-              />
-            )}
-            {/* Mutually-Exclusive Split-Pane Lyrics Stage */}
-            <LyricsDrawer
-              isOpen={rightDrawer === 'lyrics'}
-              playback={playback}
-              queue={queue}
-              downloads={downloads}
-              likedIds={likedIds}
-              downloadedIds={downloadedIds}
-              onClose={handleCloseRightDrawer}
-              onSeek={handleSeek}
-              onToggleLike={handleToggleLike}
-              onDownload={handleDownload}
-            />
-            {/* Smooth GPU Slide-Over Queue Drawer (Zero Main-Pane Reflow) */}
-            <QueueDrawer
-              isOpen={rightDrawer === 'queue'}
-              queue={queue}
-              onClose={handleCloseRightDrawer}
-              onPlayQueueItem={handlePlayQueueItem}
-              onRemoveQueueItem={handleRemoveQueueItem}
-              onMoveQueueItem={handleMoveQueueItem}
-              onClearQueue={handleClearQueue}
-              onToggleAutoplayRadio={handleToggleAutoplayRadio}
-            />
+              {activeTab === 'artist' && activeArtist && (
+                <ArtistView
+                  target={activeArtist}
+                  currentTrackId={activeVideoId}
+                  isPlaying={playback?.state === 'playing'}
+                  downloads={downloads}
+                  likedIds={likedIds}
+                  downloadedIds={downloadedIds}
+                  onPlay={handlePlayTrack}
+                  onPlayAll={handlePlayAll}
+                  onToggleLike={handleToggleLike}
+                  onDownload={handleDownload}
+                  onDeleteDownload={handleDeleteDownload}
+                  onAddNext={handleAddNext}
+                  onAppendQueue={handleAppendQueue}
+                  onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                  onOpenAlbum={handleOpenAlbum}
+                  onOpenArtist={handleOpenArtist}
+                  onClose={handleGoBack}
+                />
+              )}
+
+              {activeTab === 'album' && activeAlbum && (
+                <AlbumView
+                  target={activeAlbum}
+                  currentTrackId={activeVideoId}
+                  isPlaying={playback?.state === 'playing'}
+                  downloads={downloads}
+                  likedIds={likedIds}
+                  downloadedIds={downloadedIds}
+                  onPlay={handlePlayTrack}
+                  onPlayAll={handlePlayAll}
+                  onToggleLike={handleToggleLike}
+                  onDownload={handleDownload}
+                  onDeleteDownload={handleDeleteDownload}
+                  onDownloadAll={handleDownloadAll}
+                  onAddNext={handleAddNext}
+                  onAppendQueue={handleAppendQueue}
+                  onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                  onOpenArtist={handleOpenArtist}
+                  onClose={handleGoBack}
+                />
+              )}
+
+              {isLibraryTab && (
+                <LibraryView
+                  tab={activeTab}
+                  playlistId={activePlaylistId}
+                  playlists={playlists}
+                  likedTracks={likedTracks}
+                  downloadTracks={downloadTracks}
+                  currentTrackId={activeVideoId}
+                  isPlaying={playback?.state === 'playing'}
+                  downloads={downloads}
+                  likedIds={likedIds}
+                  downloadedIds={downloadedIds}
+                  libraryVersion={libraryVersion}
+                  onPlay={handlePlayTrack}
+                  onPlayAll={handlePlayAll}
+                  onToggleLike={handleToggleLike}
+                  onDownload={handleDownload}
+                  onDeleteDownload={handleDeleteDownload}
+                  onDownloadAll={handleDownloadAll}
+                  onAddNext={handleAddNext}
+                  onAppendQueue={handleAppendQueue}
+                  onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                  onPlaylistDeleted={handlePlaylistDeleted}
+                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+                  onOpenAlbum={(albumName, albumId, track) =>
+                    handleOpenAlbum({
+                      browseId: albumId,
+                      title: albumName,
+                      artist: track.artist,
+                      videoId: track.video_id,
+                    })
+                  }
+                />
+              )}
+            </div>
           </main>
+
+          {/* Docked 360px Right Side-Panel Queue (Shifts & resizes main pane cleanly, identical to Lyrics) */}
+          <QueueDrawer
+            isOpen={rightDrawer === 'queue'}
+            queue={queue}
+            onClose={handleCloseRightDrawer}
+            onPlayQueueItem={handlePlayQueueItem}
+            onRemoveQueueItem={handleRemoveQueueItem}
+            onMoveQueueItem={handleMoveQueueItem}
+            onClearQueue={handleClearQueue}
+            onToggleAutoplayRadio={handleToggleAutoplayRadio}
+          />
+
+          {/* Docked 360px Right Side-Panel Lyrics (Browse Home/Search/Library alongside live lyrics) */}
+          <LyricsDrawer
+            isOpen={rightDrawer === 'lyrics'}
+            playback={playback}
+            queue={queue}
+            downloads={downloads}
+            likedIds={likedIds}
+            downloadedIds={downloadedIds}
+            onClose={handleCloseRightDrawer}
+            onExpandFullscreen={handleOpenFullscreenFromLyrics}
+            onOpenAlbum={handleOpenTrackAlbum}
+            onOpenArtist={handleOpenTrackArtist}
+            onSeek={handleSeek}
+            onToggleLike={handleToggleLike}
+            onDownload={handleDownload}
+          />
         </div>
 
         {/* Floating Liquid Glass Player Dock */}
@@ -1141,6 +1420,7 @@ export default function App() {
             eqPreset={eqPreset}
             isQueueOpen={rightDrawer === 'queue'}
             isLyricsOpen={rightDrawer === 'lyrics'}
+            isFullscreenOpen={isFullscreenStageOpen}
             transitionKey={playerRiseKey}
             onChangeEqPreset={handleChangeEqPreset}
             onToggleQueue={() =>
@@ -1149,6 +1429,10 @@ export default function App() {
             onToggleLyrics={() =>
               setRightDrawer((prev) => (prev === 'lyrics' ? 'none' : 'lyrics'))
             }
+            onToggleFullscreen={handleToggleFullscreenStage}
+            onOpenFullLyrics={handleOpenFullscreenFromLyrics}
+            onOpenAlbum={handleOpenTrackAlbum}
+            onOpenArtist={handleOpenTrackArtist}
             onTogglePlay={handleTogglePlay}
             onNext={handleNext}
             onPrev={handlePrev}
@@ -1161,6 +1445,34 @@ export default function App() {
           />
         </div>
       </div>
+
+      <FullscreenStage
+        isOpen={isFullscreenStageOpen}
+        initialTab={stageInitialTab}
+        playback={playback}
+        queue={queue}
+        downloads={downloads}
+        likedIds={likedIds}
+        downloadedIds={downloadedIds}
+        onClose={() => setIsFullscreenStageOpen(false)}
+        onTogglePlay={handleTogglePlay}
+        onNext={handleNext}
+        onPrev={handlePrev}
+        onSeek={handleSeek}
+        onToggleShuffle={handleToggleShuffle}
+        onCycleRepeat={handleCycleRepeat}
+        onToggleLike={handleToggleLike}
+        onDownload={handleDownload}
+        onPlayQueueItem={handlePlayQueueItem}
+        onRemoveQueueItem={handleRemoveQueueItem}
+        onMoveQueueItem={handleMoveQueueItem}
+        onClearQueue={handleClearQueue}
+        onToggleAutoplayRadio={handleToggleAutoplayRadio}
+        onOpenAlbum={handleOpenTrackAlbum}
+        onOpenArtist={handleOpenTrackArtist}
+      />
+
+      <ToastHost />
 
       <CreatePlaylistModal
         isOpen={isCreatePlaylistOpen}
@@ -1212,6 +1524,7 @@ export default function App() {
           </button>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

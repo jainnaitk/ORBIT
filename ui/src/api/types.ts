@@ -6,7 +6,9 @@ export interface Track {
   video_id: string;
   title: string;
   artist: string;
+  artist_id?: string | null;
   album?: string | null;
+  album_id?: string | null;
   duration_s: number;
   thumbnail_url?: string | null;
   is_liked?: boolean;
@@ -14,6 +16,41 @@ export interface Track {
   download_status?: 'none' | 'queued' | 'downloading' | 'completed' | 'failed';
   play_count?: number;
   last_played_at?: string | null;
+}
+
+export interface ArtistRelease {
+  browse_id: string;
+  title: string;
+  year?: string | null;
+  type?: string;
+  thumbnail_url?: string | null;
+  artist?: string;
+  artist_id?: string | null;
+}
+
+export interface ArtistProfile {
+  channel_id?: string | null;
+  name: string;
+  description?: string | null;
+  subscribers?: string | null;
+  views?: string | null;
+  thumbnail_url?: string | null;
+  popular_tracks: Track[];
+  all_tracks: Track[];
+  albums: ArtistRelease[];
+  singles: ArtistRelease[];
+}
+
+export interface AlbumDetails {
+  browse_id?: string | null;
+  title: string;
+  artist: string;
+  artist_id?: string | null;
+  year?: string | null;
+  type?: string;
+  description?: string | null;
+  thumbnail_url?: string | null;
+  tracks: Track[];
 }
 
 export type PlaybackState = 'idle' | 'playing' | 'paused' | 'buffering' | 'stopped';

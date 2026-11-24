@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, type CSSProperties } from 'react';
 import {
   Play,
   Pause,
@@ -16,10 +16,77 @@ import {
   VolumeX,
   AlignLeft,
   SlidersHorizontal,
+  Maximize2,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { bridgeSocket } from '../api/client';
 import type { PlaybackTick, QueueData, Track, DownloadProgress, EqPreset } from '../api/types';
+
+function MarqueeText({
+  text,
+  className = '',
+  onClick,
+}: {
+  text: string;
+  className?: string;
+  onClick?: () => void;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const spanRef = useRef<HTMLSpanElement>(null);
+  const [overflowPx, setOverflowPx] = useState<number>(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const measure = () => {
+      if (cancelled) return;
+      const wrap = wrapRef.current;
+      const span = spanRef.current;
+      if (!wrap || !span) return;
+      const diff = Math.ceil(span.scrollWidth - wrap.clientWidth);
+      setOverflowPx(diff > 2 ? diff : 0);
+    };
+    measure();
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      void document.fonts.ready.then(measure);
+    }
+    if (typeof ResizeObserver === 'undefined' || !wrapRef.current) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const ro = new ResizeObserver(measure);
+    ro.observe(wrapRef.current);
+    return () => {
+      cancelled = true;
+      ro.disconnect();
+    };
+  }, [text]);
+
+  const marqueeStyle =
+    overflowPx > 0
+      ? ({
+          '--marquee-shift': `-${overflowPx + 10}px`,
+          '--marquee-duration': `${Math.max(7, Math.min(18, overflowPx / 16 + 5)).toFixed(1)}s`,
+        } as CSSProperties)
+      : undefined;
+
+  return (
+    <div
+      ref={wrapRef}
+      onClick={onClick}
+      title={text}
+      className={`eh-marquee-wrap min-w-0 flex-1 ${className}`}
+    >
+      <span
+        ref={spanRef}
+        style={marqueeStyle}
+        className={`eh-marquee-track ${overflowPx > 0 ? 'eh-marquee-active' : ''}`}
+      >
+        {text}
+      </span>
+    </div>
+  );
+}
 
 const EQ_OPTIONS: { id: EqPreset; label: string; desc: string }[] = [
   { id: 'flat', label: 'Flat', desc: 'Original studio mix' },
@@ -38,10 +105,15 @@ interface PlayerBarProps {
   eqPreset: EqPreset;
   isQueueOpen: boolean;
   isLyricsOpen: boolean;
+  isFullscreenOpen?: boolean;
   transitionKey: number;
   onChangeEqPreset: (preset: EqPreset) => void;
   onToggleQueue: () => void;
   onToggleLyrics: () => void;
+  onToggleFullscreen: () => void;
+  onOpenFullLyrics: () => void;
+  onOpenAlbum: (track: Track) => void;
+  onOpenArtist: (track: Track) => void;
   onTogglePlay: () => void;
   onNext: () => void;
   onPrev: () => void;
@@ -69,10 +141,15 @@ export const PlayerBar = ({
   eqPreset,
   isQueueOpen,
   isLyricsOpen,
+  isFullscreenOpen = false,
   transitionKey,
   onChangeEqPreset,
   onToggleQueue,
   onToggleLyrics,
+  onToggleFullscreen,
+  onOpenFullLyrics,
+  onOpenAlbum,
+  onOpenArtist,
   onTogglePlay,
   onNext,
   onPrev,
@@ -336,9 +413,9 @@ export const PlayerBar = ({
         >
           <button
             type="button"
-            onClick={() => currentTrack && onToggleLyrics()}
-            title={currentTrack ? 'Show Album Art & Synced Lyrics' : 'Ready'}
-            className="group relative w-10 h-10 sm:w-[50px] sm:h-[50px] rounded-full p-[2px] flex-none transition-transform hover:scale-105"
+            onClick={() => currentTrack && onOpenAlbum(currentTrack)}
+            title={currentTrack ? `Open Album: ${currentTrack.album || currentTrack.title}` : 'Ready'}
+            className="group relative w-10 h-10 sm:w-[50px] sm:h-[50px] rounded-full p-[2px] flex-none transition-transform hover:scale-105 cursor-pointer"
             style={{
               background: isPlayingOrBuffering
                 ? 'conic-gradient(from 0deg, rgba(var(--dynamic-accent-rgb), 0.9), rgba(255,255,255,0.28), rgba(var(--dynamic-secondary-rgb), 0.75), rgba(var(--dynamic-accent-rgb), 0.9))'
@@ -360,14 +437,12 @@ export const PlayerBar = ({
           </button>
 
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <div
-                onClick={() => currentTrack && onToggleLyrics()}
-                title={currentTrack?.title}
-                className="text-xs sm:text-[13px] font-semibold text-[#F4F6FF] truncate hover:underline cursor-pointer"
-              >
-                {currentTrack?.title || 'Ready to orbit'}
-              </div>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <MarqueeText
+                text={currentTrack?.title || 'Ready to orbit'}
+                onClick={() => currentTrack && onOpenFullLyrics()}
+                className="text-xs sm:text-[13px] font-semibold text-[#F4F6FF] hover:underline cursor-pointer"
+              />
               {isActuallyPlaying && (
                 <div className="hidden sm:flex items-end gap-[2px] h-2.5 flex-none">
                   <span
@@ -381,7 +456,7 @@ export const PlayerBar = ({
                 </div>
               )}
             </div>
-            <div className="text-[10px] sm:text-[11px] text-[#9BA4C4] truncate flex items-center gap-1 mt-0.5">
+            <div className="text-[10px] sm:text-[11px] text-[#9BA4C4] flex items-center gap-1 mt-0.5 min-w-0">
               {isDownloaded && (
                 <span
                   title="Downloaded offline"
@@ -390,9 +465,11 @@ export const PlayerBar = ({
                   <CheckCircle2 size={11} />
                 </span>
               )}
-              <span title={currentTrack?.artist} className="truncate">
-                {currentTrack?.artist || 'ORBIT Desktop'}
-              </span>
+              <MarqueeText
+                text={currentTrack?.artist || 'ORBIT Desktop'}
+                onClick={() => currentTrack && onOpenArtist(currentTrack)}
+                className={currentTrack ? 'hover:text-white hover:underline cursor-pointer' : ''}
+              />
             </div>
           </div>
 
@@ -410,14 +487,32 @@ export const PlayerBar = ({
 
       {/* Center: Sculpted Liquid Glass Transport Pill + Precision Orbital Scrubber */}
       <div className="flex flex-col items-center gap-1.5 flex-none sm:flex-1 sm:max-w-[440px]">
-        <div className="flex items-center gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1 rounded-full ios-liquid-pill">
+        <div
+          className="flex items-center gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1 rounded-full ios-liquid-pill"
+          style={
+            isPlayingOrBuffering
+              ? {
+                  borderColor: 'rgba(var(--dynamic-accent-rgb), 0.36)',
+                  boxShadow:
+                    'inset 0 1px 0 rgba(255,255,255,0.24), 0 0 18px rgba(var(--dynamic-accent-rgb), 0.14)',
+                }
+              : undefined
+          }
+        >
           <button
             onClick={onToggleShuffle}
             title={queue?.shuffle ? 'Shuffle On' : 'Shuffle Off'}
             className={`hidden sm:flex w-7 h-7 rounded-full items-center justify-center transition-colors ${
               queue?.shuffle ? 'bg-white/12' : 'text-[#9BA4C4] hover:text-white'
             }`}
-            style={queue?.shuffle ? { color: 'var(--dynamic-accent)' } : undefined}
+            style={
+              queue?.shuffle
+                ? {
+                    color: 'var(--dynamic-accent)',
+                    background: 'rgba(var(--dynamic-accent-rgb), 0.16)',
+                  }
+                : undefined
+            }
           >
             <Shuffle size={13} />
           </button>
@@ -433,8 +528,19 @@ export const PlayerBar = ({
           <button
             onClick={onTogglePlay}
             title={playback?.state === 'buffering' ? 'Buffering...' : isPlayingOrBuffering ? 'Pause' : 'Play'}
-            className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+            className={`relative w-8 h-8 sm:w-9 sm:h-9 ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 eh-play-morph ${
+              isActuallyPlaying ? 'rounded-[11px]' : 'rounded-[20px]'
+            }`}
           >
+            {playback?.state === 'buffering' && (
+              <span
+                className="pointer-events-none absolute -inset-[3px] rounded-full border-2 border-transparent eh-buffer-ring"
+                style={{
+                  borderTopColor: 'var(--dynamic-accent)',
+                  borderRightColor: 'rgba(var(--dynamic-accent-rgb), 0.45)',
+                }}
+              />
+            )}
             {playback?.state === 'buffering' ? (
               <Loader2 size={15} className="eh-buffer-ring" />
             ) : isPlayingOrBuffering ? (
@@ -462,7 +568,10 @@ export const PlayerBar = ({
             }`}
             style={
               queue?.repeat_mode && queue.repeat_mode !== 'off'
-                ? { color: 'var(--dynamic-accent)' }
+                ? {
+                    color: 'var(--dynamic-accent)',
+                    background: 'rgba(var(--dynamic-accent-rgb), 0.16)',
+                  }
                 : undefined
             }
           >
@@ -501,6 +610,7 @@ export const PlayerBar = ({
                     transform: 'scaleX(0)',
                     background:
                       'linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF)',
+                    boxShadow: '0 0 10px rgba(var(--dynamic-accent-rgb), 0.55)',
                   }}
                 />
               </div>
@@ -523,11 +633,11 @@ export const PlayerBar = ({
         </div>
       </div>
 
-      {/* Right: Utility Cluster (Lyrics, EQ, Download, Volume, Queue) */}
-      <div className="flex items-center gap-1 lg:gap-1.5 w-auto md:w-[235px] lg:w-[275px] justify-end relative flex-none">
+      {/* Right: Utility Cluster (Lyrics, Fullscreen Stage, EQ, Download, Volume, Queue) */}
+      <div className="flex items-center gap-1 lg:gap-1.5 w-auto md:w-[255px] lg:w-[295px] justify-end relative flex-none">
         <button
           onClick={onToggleLyrics}
-          title="Toggle Lyrics Drawer"
+          title="Toggle Docked Lyrics Panel"
           className={`w-8 h-8 rounded-full flex items-center justify-center transition-all border ${
             isLyricsOpen
               ? 'ios-liquid-pill border-[rgba(var(--dynamic-accent-rgb),0.55)]'
@@ -536,6 +646,19 @@ export const PlayerBar = ({
           style={isLyricsOpen ? { color: 'var(--dynamic-accent)' } : undefined}
         >
           <AlignLeft size={14} />
+        </button>
+
+        <button
+          onClick={onToggleFullscreen}
+          title="Toggle Fullscreen Stage"
+          className={`hidden sm:flex w-8 h-8 rounded-full items-center justify-center transition-all border ${
+            isFullscreenOpen
+              ? 'ios-liquid-pill border-[rgba(var(--dynamic-accent-rgb),0.55)]'
+              : 'border-transparent text-[#9AA5C4] hover:text-white hover:bg-white/[0.08]'
+          }`}
+          style={isFullscreenOpen ? { color: 'var(--dynamic-accent)' } : undefined}
+        >
+          <Maximize2 size={13} />
         </button>
 
         <div className="relative hidden sm:block">
@@ -594,7 +717,8 @@ export const PlayerBar = ({
 
         {currentTrack && (
           <button
-            onClick={() => !isDownloading && onDownload(currentTrack)}
+            onClick={() => !isDownloading && !isDownloaded && onDownload(currentTrack)}
+            disabled={isDownloading || isDownloaded}
             title={
               isDownloaded
                 ? 'Downloaded offline (+ .lrc lyrics)'
@@ -602,7 +726,11 @@ export const PlayerBar = ({
                 ? 'Downloading...'
                 : 'Download track & cache synced lyrics'
             }
-            className="hidden md:flex w-8 h-8 rounded-full items-center justify-center text-[#9AA5C4] hover:text-[#34D399] hover:bg-white/[0.08] transition-colors"
+            className={`hidden md:flex w-8 h-8 rounded-full items-center justify-center transition-colors ${
+              isDownloaded
+                ? 'text-[#34D399] cursor-default'
+                : 'text-[#9AA5C4] hover:text-[#34D399] hover:bg-white/[0.08]'
+            }`}
           >
             {isDownloaded ? (
               <CheckCircle2 size={15} className="text-[#34D399]" />

@@ -35,7 +35,9 @@ class Track(BaseModel):
     video_id: str = Field(description="Unique YouTube video identifier")
     title: str = Field(default="Unknown Title", description="Track title")
     artist: str = Field(default="Unknown Artist", description="Artist or comma-separated artists")
+    artist_id: str | None = Field(default=None, description="Primary YouTube Music artist channel ID")
     album: str | None = Field(default=None, description="Album name")
+    album_id: str | None = Field(default=None, description="YouTube Music album browse ID")
     duration_s: int = Field(default=0, description="Duration in seconds")
     thumbnail_url: str | None = Field(default=None, description="Preferred artwork URL")
 
@@ -154,6 +156,30 @@ def extract_title(raw: Any) -> str:
     return "Unknown Title"
 
 
+def extract_artist_id(raw: Any) -> str | None:
+    """Extract the primary artist browse/channel ID from ytmusicapi artists field."""
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and item.get("id"):
+                val = str(item["id"]).strip()
+                if val:
+                    return val
+    elif isinstance(raw, dict) and raw.get("id"):
+        val = str(raw["id"]).strip()
+        if val:
+            return val
+    return None
+
+
+def extract_album_id(raw: Any) -> str | None:
+    """Extract album browse ID from ytmusicapi album field."""
+    if isinstance(raw, dict) and raw.get("id"):
+        val = str(raw["id"]).strip()
+        if val:
+            return val
+    return None
+
+
 def normalize_track(raw: dict[str, Any], default_album: str | None = None) -> Track:
     """Normalize a raw dictionary from ytmusicapi into a clean Track model.
 
@@ -168,8 +194,12 @@ def normalize_track(raw: dict[str, Any], default_album: str | None = None) -> Tr
         raise ValueError(f"Empty videoId in track: {raw}")
 
     title = extract_title(raw.get("title"))
-    artist = extract_artist(raw.get("artists") or raw.get("artist"))
-    album = extract_album(raw.get("album")) or default_album
+    raw_artists = raw.get("artists") or raw.get("artist")
+    artist = extract_artist(raw_artists)
+    artist_id = raw.get("artist_id") or extract_artist_id(raw_artists)
+    raw_album = raw.get("album")
+    album = extract_album(raw_album) or default_album
+    album_id = raw.get("album_id") or extract_album_id(raw_album)
     duration_s = parse_duration(
         raw.get("duration_seconds") or raw.get("duration") or raw.get("length")
     )
@@ -179,7 +209,9 @@ def normalize_track(raw: dict[str, Any], default_album: str | None = None) -> Tr
         video_id=video_id_str,
         title=title,
         artist=artist,
+        artist_id=str(artist_id).strip() if artist_id else None,
         album=album,
+        album_id=str(album_id).strip() if album_id else None,
         duration_s=duration_s,
         thumbnail_url=thumbnail_url,
     )
@@ -323,6 +355,290 @@ class YTMusicClient:
     async def get_artist(self, channel_id: str) -> dict[str, Any]:
         """Fetch artist information and discography."""
         return await asyncio.to_thread(self._run_sync, self._get_artist_sync, channel_id)
+
+    def _get_artist_profile_sync(
+        self,
+        name: str | None = None,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_id = (channel_id or "").strip() or None
+        search_name = (name or "").split(",")[0].strip()
+
+        if not resolved_id and search_name:
+            try:
+                artist_hits = self._yt.search(query=search_name, filter="artists", limit=6) or []
+            except Exception:  # noqa: BLE001
+                artist_hits = []
+            lower_target = search_name.lower()
+            best_hit = None
+            for hit in artist_hits:
+                if not isinstance(hit, dict) or not hit.get("browseId"):
+                    continue
+                hit_name = str(hit.get("artist") or hit.get("title") or "").strip().lower()
+                if hit_name == lower_target:
+                    best_hit = hit
+                    break
+                if best_hit is None:
+                    best_hit = hit
+            if best_hit and best_hit.get("browseId"):
+                resolved_id = str(best_hit["browseId"]).strip()
+
+        artist_data: dict[str, Any] = {}
+        if resolved_id:
+            try:
+                artist_data = dict(self._yt.get_artist(resolved_id) or {})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("get_artist failed for %s: %s", resolved_id, e)
+
+        display_name = (
+            str(artist_data.get("name") or "").strip()
+            or search_name
+            or "Unknown Artist"
+        )
+        description = str(artist_data.get("description") or "").strip() or None
+        subscribers = str(artist_data.get("subscribers") or "").strip() or None
+        views = str(artist_data.get("views") or "").strip() or None
+        thumbnail_url = extract_thumbnail_url(artist_data.get("thumbnails"))
+
+        popular_tracks: list[Track] = []
+        seen_popular: set[str] = set()
+        songs_section = artist_data.get("songs")
+        songs_browse_id: str | None = None
+        if isinstance(songs_section, dict):
+            if songs_section.get("browseId"):
+                songs_browse_id = str(songs_section["browseId"]).strip()
+            for raw_song in songs_section.get("results") or []:
+                trk = try_normalize_track(raw_song)
+                if trk and trk.video_id not in seen_popular:
+                    if not trk.artist_id and resolved_id:
+                        trk.artist_id = resolved_id
+                    if trk.artist == "Unknown Artist":
+                        trk.artist = display_name
+                    seen_popular.add(trk.video_id)
+                    popular_tracks.append(trk)
+
+        all_tracks: list[Track] = list(popular_tracks)
+        seen_all: set[str] = set(seen_popular)
+        duration_by_id: dict[str, int] = {
+            t.video_id: t.duration_s for t in popular_tracks if t.duration_s > 0
+        }
+
+        if songs_browse_id:
+            try:
+                pl = self._yt.get_playlist(songs_browse_id, limit=60)
+                raw_pl_tracks = ((pl.get("tracks") or []) if isinstance(pl, dict) else [])[:60]
+                for raw_song in raw_pl_tracks:
+                    trk = try_normalize_track(raw_song)
+                    if not trk:
+                        continue
+                    if trk.duration_s > 0 and trk.video_id not in duration_by_id:
+                        duration_by_id[trk.video_id] = trk.duration_s
+                    if trk.video_id not in seen_all:
+                        if not trk.artist_id and resolved_id:
+                            trk.artist_id = resolved_id
+                        if trk.artist == "Unknown Artist":
+                            trk.artist = display_name
+                        seen_all.add(trk.video_id)
+                        all_tracks.append(trk)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Artist songs playlist fetch skipped for %s: %s", songs_browse_id, e)
+
+        # Supplement catalog via songs search so artists with partial browse pages still show catalog
+        if display_name and display_name != "Unknown Artist" and len(all_tracks) < 35:
+            try:
+                search_hits = self._yt.search(query=display_name, filter="songs", limit=35) or []
+            except Exception:  # noqa: BLE001
+                search_hits = []
+            artist_lc = display_name.lower()
+            for raw_song in search_hits:
+                trk = try_normalize_track(raw_song)
+                if not trk:
+                    continue
+                if trk.duration_s > 0 and trk.video_id not in duration_by_id:
+                    duration_by_id[trk.video_id] = trk.duration_s
+                if trk.video_id in seen_all:
+                    continue
+                if artist_lc in trk.artist.lower() or (resolved_id and trk.artist_id == resolved_id):
+                    seen_all.add(trk.video_id)
+                    all_tracks.append(trk)
+
+        # Backfill missing durations on popular tracks (get_artist songs.results often omits duration)
+        for trk in popular_tracks:
+            if trk.duration_s <= 0 and trk.video_id in duration_by_id:
+                trk.duration_s = duration_by_id[trk.video_id]
+        for trk in all_tracks:
+            if trk.duration_s <= 0 and trk.video_id in duration_by_id:
+                trk.duration_s = duration_by_id[trk.video_id]
+
+        # Cap artist catalog to 60 cleanest tracks so UI & Play/Shuffle stay snappy
+        all_tracks = all_tracks[:60]
+
+        if not popular_tracks and all_tracks:
+            popular_tracks = all_tracks[:10]
+
+        if not thumbnail_url and all_tracks:
+            thumbnail_url = all_tracks[0].thumbnail_url
+
+        def _parse_releases(section_key: str, default_type: str) -> list[dict[str, Any]]:
+            sec = artist_data.get(section_key)
+            if not isinstance(sec, dict):
+                return []
+            items: list[dict[str, Any]] = []
+            seen_rel: set[str] = set()
+            for raw_rel in sec.get("results") or []:
+                if not isinstance(raw_rel, dict):
+                    continue
+                bid = str(raw_rel.get("browseId") or "").strip()
+                title = str(raw_rel.get("title") or "").strip()
+                if not bid or not title or bid in seen_rel:
+                    continue
+                seen_rel.add(bid)
+                items.append(
+                    {
+                        "browse_id": bid,
+                        "title": title,
+                        "year": str(raw_rel.get("year") or "").strip() or None,
+                        "type": str(raw_rel.get("type") or default_type).strip(),
+                        "thumbnail_url": extract_thumbnail_url(raw_rel.get("thumbnails")),
+                        "artist": display_name,
+                        "artist_id": resolved_id,
+                    }
+                )
+            return items
+
+        albums = _parse_releases("albums", "Album")
+        singles = _parse_releases("singles", "Single")
+
+        return {
+            "channel_id": resolved_id,
+            "name": display_name,
+            "description": description,
+            "subscribers": subscribers,
+            "views": views,
+            "thumbnail_url": thumbnail_url,
+            "popular_tracks": [t.model_dump() for t in popular_tracks[:12]],
+            "all_tracks": [t.model_dump() for t in all_tracks],
+            "albums": albums,
+            "singles": singles,
+        }
+
+    async def get_artist_profile(
+        self,
+        name: str | None = None,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a complete Spotify-style artist profile with popular tracks, discography, and catalog."""
+        return await asyncio.to_thread(
+            self._run_sync, self._get_artist_profile_sync, name, channel_id
+        )
+
+    def _get_album_details_sync(
+        self,
+        browse_id: str | None = None,
+        title: str | None = None,
+        artist: str | None = None,
+        video_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_bid = (browse_id or "").strip() or None
+        search_title = (title or "").strip()
+        search_artist = (artist or "").split(",")[0].strip()
+
+        # If we have a video_id without album browseId, inspect watch playlist metadata first
+        if not resolved_bid and video_id:
+            try:
+                watch = self._yt.get_watch_playlist(videoId=video_id, limit=2)
+                w_tracks = watch.get("tracks", []) if isinstance(watch, dict) else []
+                for wt in w_tracks:
+                    if isinstance(wt, dict) and wt.get("videoId") == video_id:
+                        alb = wt.get("album")
+                        if isinstance(alb, dict) and alb.get("id"):
+                            resolved_bid = str(alb["id"]).strip()
+                        if not search_title and isinstance(alb, dict) and alb.get("name"):
+                            search_title = str(alb["name"]).strip()
+                        break
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Watch playlist album lookup skipped for %s: %s", video_id, e)
+
+        if not resolved_bid and search_title:
+            query = f"{search_title} {search_artist}".strip()
+            try:
+                hits = self._yt.search(query=query, filter="albums", limit=6) or []
+            except Exception:  # noqa: BLE001
+                hits = []
+            title_lc = search_title.lower()
+            best_hit = None
+            for hit in hits:
+                if not isinstance(hit, dict) or not hit.get("browseId"):
+                    continue
+                ht = str(hit.get("title") or "").strip().lower()
+                if ht == title_lc or title_lc in ht:
+                    best_hit = hit
+                    break
+                if best_hit is None:
+                    best_hit = hit
+            if best_hit and best_hit.get("browseId"):
+                resolved_bid = str(best_hit["browseId"]).strip()
+
+        if resolved_bid:
+            try:
+                album_data = self._get_album_sync(resolved_bid)
+                tracks = album_data.get("tracks") or []
+                album_artist_id = extract_artist_id(album_data.get("artists"))
+                dumped_tracks: list[dict[str, Any]] = []
+                for t in tracks:
+                    if isinstance(t, Track):
+                        if not t.album_id:
+                            t.album_id = resolved_bid
+                        if not t.artist_id and album_artist_id:
+                            t.artist_id = album_artist_id
+                        if not t.thumbnail_url and album_data.get("thumbnail_url"):
+                            t.thumbnail_url = album_data["thumbnail_url"]
+                        dumped_tracks.append(t.model_dump())
+                return {
+                    "browse_id": resolved_bid,
+                    "title": str(album_data.get("title") or search_title or "Album"),
+                    "artist": str(album_data.get("artist") or search_artist or "Unknown Artist"),
+                    "artist_id": album_artist_id,
+                    "year": str(album_data.get("year") or "").strip() or None,
+                    "type": str(album_data.get("type") or "Album"),
+                    "description": str(album_data.get("description") or "").strip() or None,
+                    "thumbnail_url": album_data.get("thumbnail_url"),
+                    "tracks": dumped_tracks,
+                }
+            except Exception as e:  # noqa: BLE001
+                logger.warning("get_album failed for %s: %s", resolved_bid, e)
+
+        # Fallback for singles or tracks without a YTM album browseId
+        fallback_tracks: list[Track] = []
+        q = f"{search_title} {search_artist}".strip()
+        if q:
+            try:
+                fallback_tracks = self._search_sync(q, "songs", 12)
+            except Exception:  # noqa: BLE001
+                fallback_tracks = []
+        return {
+            "browse_id": resolved_bid,
+            "title": search_title or "Single",
+            "artist": search_artist or (fallback_tracks[0].artist if fallback_tracks else "Unknown Artist"),
+            "artist_id": fallback_tracks[0].artist_id if fallback_tracks else None,
+            "year": None,
+            "type": "Single",
+            "description": None,
+            "thumbnail_url": fallback_tracks[0].thumbnail_url if fallback_tracks else None,
+            "tracks": [t.model_dump() for t in fallback_tracks],
+        }
+
+    async def get_album_details(
+        self,
+        browse_id: str | None = None,
+        title: str | None = None,
+        artist: str | None = None,
+        video_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch normalized album details and full tracklist, resolving by title/artist if needed."""
+        return await asyncio.to_thread(
+            self._run_sync, self._get_album_details_sync, browse_id, title, artist, video_id
+        )
 
     def _get_watch_radio_sync(self, video_id: str, limit: int) -> list[Track]:
         data = self._yt.get_watch_playlist(videoId=video_id, limit=limit, radio=True)

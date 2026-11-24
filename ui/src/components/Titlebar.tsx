@@ -117,7 +117,10 @@ export const Titlebar = memo(({
       </div>
 
       {/* Center: Ultra-Responsive Liquid-Glass Search Capsule */}
-      <div className="flex items-center flex-1 max-w-[400px] min-w-[90px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 ios-liquid-pill rounded-full text-xs no-drag focus-within:border-[rgba(var(--dynamic-accent-rgb),0.55)] transition-colors">
+      <div
+        data-search-surface="true"
+        className="flex items-center flex-1 max-w-[400px] min-w-[90px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 ios-liquid-pill rounded-full text-xs no-drag focus-within:border-[rgba(var(--dynamic-accent-rgb),0.55)] transition-colors"
+      >
         <Search size={13} className="mr-2 text-[#8E99BA] flex-none" />
         <input
           ref={searchInputRef}

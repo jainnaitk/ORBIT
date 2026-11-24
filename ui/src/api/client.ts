@@ -4,6 +4,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type {
+  AlbumDetails,
+  ArtistProfile,
   BridgeConfig,
   BridgeEventMap,
   DownloadProgress,
@@ -161,11 +163,27 @@ export async function enterDynamicIslandWindow(): Promise<SavedWindowBounds | nu
   }
 }
 
-export async function resizeDynamicIslandWindow(expanded: boolean): Promise<void> {
+export type IslandWindowMode = 'pill' | 'circle' | 'card';
+
+export async function resizeDynamicIslandWindow(
+  modeOrExpanded: IslandWindowMode | boolean
+): Promise<void> {
   if (!isTauri()) return;
   try {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('resize_dynamic_island', { expanded });
+    const mode: IslandWindowMode =
+      typeof modeOrExpanded === 'boolean' ? (modeOrExpanded ? 'pill' : 'circle') : modeOrExpanded;
+    await invoke('resize_dynamic_island', { expanded: mode !== 'circle', mode });
+  } catch {
+    // Ignore
+  }
+}
+
+export async function setDynamicIslandPinned(pinned: boolean): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('set_island_pinned', { pinned });
   } catch {
     // Ignore
   }
@@ -281,6 +299,27 @@ export class BridgeApiClient {
     const params = new URLSearchParams({ q: query, filter: filterType, limit: String(limit) });
     const res = await this.request<any>(`/search?${params.toString()}`);
     return Array.isArray(res) ? res : res.results || [];
+  }
+
+  public async getArtistProfile(name?: string, channelId?: string): Promise<ArtistProfile> {
+    const params = new URLSearchParams();
+    if (name && name.trim()) params.set('name', name.trim());
+    if (channelId && channelId.trim()) params.set('channel_id', channelId.trim());
+    return this.request<ArtistProfile>(`/artist?${params.toString()}`);
+  }
+
+  public async getAlbumDetails(opts: {
+    browseId?: string;
+    title?: string;
+    artist?: string;
+    videoId?: string;
+  }): Promise<AlbumDetails> {
+    const params = new URLSearchParams();
+    if (opts.browseId && opts.browseId.trim()) params.set('browse_id', opts.browseId.trim());
+    if (opts.title && opts.title.trim()) params.set('title', opts.title.trim());
+    if (opts.artist && opts.artist.trim()) params.set('artist', opts.artist.trim());
+    if (opts.videoId && opts.videoId.trim()) params.set('video_id', opts.videoId.trim());
+    return this.request<AlbumDetails>(`/album?${params.toString()}`);
   }
 
   public async play(track?: Track, videoId?: string): Promise<{ status: string }> {

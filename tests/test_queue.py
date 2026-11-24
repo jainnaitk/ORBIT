@@ -161,7 +161,7 @@ async def test_queue_radio_refill(sample_tracks: list[Track]) -> None:
     assert next_track is not None
     assert next_track.video_id == "vid_radio_1"
     assert len(qm.items) == 3
-    mock_ytm.get_watch_radio.assert_called_once_with("vid_1", limit=25)
+    mock_ytm.get_watch_radio.assert_called_once_with("vid_1", limit=15)
 
 
 @pytest.mark.asyncio
@@ -246,3 +246,39 @@ async def test_queue_consecutive_errors_limit(sample_tracks: list[Track]) -> Non
     assert qm.consecutive_errors == 2
     qm.set_queue(sample_tracks[:2])
     assert qm.consecutive_errors == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_radio_filters_remixes_and_duplicates() -> None:
+    """Test smart radio engine removes remix spam, duplicate canonical titles, and blends popular songs."""
+    mock_ytm = MagicMock()
+    mock_ytm.get_watch_radio = AsyncMock(
+        return_value=[
+            Track(video_id="dup_1", title="Kiliye Kiliye (Afrobeat Mix)", artist="Spam DJ", duration_s=210),
+            Track(video_id="dup_2", title="Kiliye Kiliye (Slowed + Reverb)", artist="Spam DJ", duration_s=220),
+            Track(video_id="ring_1", title="Short Ringtone", artist="Random", duration_s=20),
+            Track(video_id="clean_1", title="Tum Hi Ho", artist="Arijit Singh", duration_s=260),
+            Track(video_id="clean_dup", title="Tum Hi Ho (Official Video)", artist="Arijit Singh", duration_s=262),
+        ]
+    )
+    mock_ytm.search = AsyncMock(
+        return_value=[
+            Track(video_id="pop_1", title="Kesariya", artist="Arijit Singh", duration_s=268),
+            Track(video_id="pop_2", title="Channa Mereya", artist="Arijit Singh", duration_s=289),
+        ]
+    )
+
+    qm = QueueManager(ytm_client=mock_ytm, autoplay_radio=True)
+    qm.set_queue(
+        [Track(video_id="seed_1", title="Saiyaara", artist="Arijit Singh", duration_s=250)],
+        start_index=0,
+    )
+
+    added = await qm.refill_radio(limit=10)
+    assert added == 3
+    ids = [t.video_id for t in qm.items[1:]]
+    assert "dup_1" not in ids
+    assert "dup_2" not in ids
+    assert "ring_1" not in ids
+    assert "clean_dup" not in ids
+    assert set(ids) == {"clean_1", "pop_1", "pop_2"}

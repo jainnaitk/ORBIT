@@ -26,6 +26,7 @@ interface HomeViewProps {
   onPlayAll: (tracks: Track[]) => void;
   onToggleLike: (track: Track) => void;
   onAddNext: (track: Track) => void;
+  onOpenArtist?: (artistName: string, artistId?: string | null) => void;
 }
 
 const MOOD_PRESETS: { id: string; label: string }[] = [
@@ -58,6 +59,7 @@ const HorizontalShelf = ({
   onPlayAll,
   onToggleLike,
   onAddNext,
+  onOpenArtist,
 }: {
   title: string;
   subtitle?: string;
@@ -69,6 +71,7 @@ const HorizontalShelf = ({
   onPlayAll: (ts: Track[]) => void;
   onToggleLike: (t: Track) => void;
   onAddNext: (t: Track) => void;
+  onOpenArtist?: (artistName: string, artistId?: string | null) => void;
 }) => {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [fadeClass, setFadeClass] = useState<string>('shelf-fade-right');
@@ -213,7 +216,20 @@ const HorizontalShelf = ({
                 >
                   {item.title}
                 </div>
-                <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">{item.artist}</div>
+                {onOpenArtist ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenArtist(item.artist.split(',')[0].trim(), item.artist_id);
+                    }}
+                    className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
+                  >
+                    {item.artist}
+                  </button>
+                ) : (
+                  <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">{item.artist}</div>
+                )}
               </div>
             </div>
           );
@@ -230,6 +246,7 @@ export const HomeView = memo(({
   onPlayAll,
   onToggleLike,
   onAddNext,
+  onOpenArtist,
 }: HomeViewProps) => {
   const [activeMood, setActiveMood] = useState<string>('for_you');
   const [homeData, setHomeData] = useState<PersonalizedHomeResponse | null>(
@@ -240,28 +257,47 @@ export const HomeView = memo(({
   const [greeting] = useState<string>(() => getStableGreeting());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const reqSeqRef = useRef<number>(0);
+  const bhCanvasRef = useRef<HTMLElement | null>(null);
+  const scrollRafRef = useRef<number>(0);
+  const lastOpacityRef = useRef<number>(1);
 
   useEffect(() => {
     return () => {
       reqSeqRef.current += 1;
+      if (scrollRafRef.current) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = 0;
+      }
     };
   }, []);
 
-  // Subtly dim the black hole canvas as user scrolls down into shelves for crisp card readability
+  // Subtly dim ONLY the StarfieldBg canvas (never touch documentElement CSS vars during scroll!)
   useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty('--bh-scroll-opacity', '1');
+    const canvas = document.querySelector<HTMLElement>('[data-bh-canvas="true"]');
+    bhCanvasRef.current = canvas;
+    if (canvas) canvas.style.opacity = '1';
+    lastOpacityRef.current = 1;
     return () => {
-      root.style.setProperty('--bh-scroll-opacity', '1');
+      if (bhCanvasRef.current) bhCanvasRef.current.style.opacity = '1';
     };
   }, []);
 
   const handleScroll = useCallback(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const progress = Math.min(1, el.scrollTop / 240);
-    const nextOpacity = (1 - progress * 0.56).toFixed(3);
-    document.documentElement.style.setProperty('--bh-scroll-opacity', nextOpacity);
+    if (scrollRafRef.current) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = 0;
+      const el = scrollContainerRef.current;
+      if (!el) return;
+      const progress = Math.min(1, el.scrollTop / 240);
+      const next = Math.round((1 - progress * 0.56) * 100) / 100;
+      if (Math.abs(next - lastOpacityRef.current) < 0.01) return;
+      lastOpacityRef.current = next;
+      const canvas = bhCanvasRef.current || document.querySelector<HTMLElement>('[data-bh-canvas="true"]');
+      if (canvas) {
+        bhCanvasRef.current = canvas;
+        canvas.style.opacity = String(next);
+      }
+    });
   }, []);
 
   const loadFeed = useCallback(async (mood: string, forceRefresh: boolean) => {
@@ -353,7 +389,8 @@ export const HomeView = memo(({
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className="flex-1 overflow-y-auto select-none eh-page-in"
+      style={{ contain: 'strict', willChange: 'scroll-position' }}
+      className="flex-1 overflow-y-auto select-none"
     >
       <div className="px-6 pt-3 pb-10 space-y-7 max-w-[1440px] mx-auto">
         {/* Clean Dark Header — Top-right stays open for the subtle black hole */}
@@ -484,9 +521,22 @@ export const HomeView = memo(({
                           >
                             {track.title}
                           </div>
-                          <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
-                            {track.artist}
-                          </div>
+                          {onOpenArtist ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenArtist(track.artist.split(',')[0].trim(), track.artist_id);
+                              }}
+                              className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
+                            >
+                              {track.artist}
+                            </button>
+                          ) : (
+                            <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
+                              {track.artist}
+                            </div>
+                          )}
                         </div>
                         {(track.play_count ?? 0) > 1 && (
                           <span className="text-[10px] font-mono tabular-nums text-[#C8D1EE] bg-white/[0.08] px-2 py-0.5 rounded-full flex-none">
@@ -569,9 +619,22 @@ export const HomeView = memo(({
                               >
                                 {item.title}
                               </div>
-                              <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
-                                {item.artist}
-                              </div>
+                              {onOpenArtist ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenArtist(item.artist.split(',')[0].trim(), item.artist_id);
+                                  }}
+                                  className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
+                                >
+                                  {item.artist}
+                                </button>
+                              ) : (
+                                <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
+                                  {item.artist}
+                                </div>
+                              )}
                             </div>
                             <div className="flex items-center gap-0.5 flex-none">
                               <button
@@ -620,6 +683,7 @@ export const HomeView = memo(({
                   onPlayAll={onPlayAll}
                   onToggleLike={onToggleLike}
                   onAddNext={onAddNext}
+                  onOpenArtist={onOpenArtist}
                 />
               );
             })}

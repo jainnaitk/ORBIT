@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { X, Trash2, Radio, GripVertical, Play } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { useTwoFingerClose } from '../utils/gestures';
 import type { QueueData, Track } from '../api/types';
 
 interface QueueDrawerProps {
@@ -44,23 +45,25 @@ export const QueueDrawer = memo(({
   useEffect(() => {
     if (isOpen) {
       setRendered(true);
-      let raf2 = 0;
-      const raf1 = requestAnimationFrame(() => {
-        raf2 = requestAnimationFrame(() => setVisible(true));
-      });
-      return () => {
-        cancelAnimationFrame(raf1);
-        if (raf2) cancelAnimationFrame(raf2);
-      };
+      const raf1 = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(raf1);
     } else {
       setVisible(false);
-      const t = window.setTimeout(() => setRendered(false), 210);
-      return () => clearTimeout(t);
+      setRendered(false);
     }
   }, [isOpen]);
 
+  const asideRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const dragVisRef = useRef<number | null>(null);
+
+  useTwoFingerClose({
+    enabled: isOpen && rendered,
+    ready: visible,
+    settleMs: 420,
+    containerRef: asideRef,
+    onClose,
+  });
   const overVisRef = useRef<number | null>(null);
   const didDragRef = useRef<boolean>(false);
   const pointerYRef = useRef<number>(0);
@@ -113,7 +116,7 @@ export const QueueDrawer = memo(({
     count: rendered ? upNextEntries.length : 0,
     getScrollElement: () => listRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 3,
+    overscan: 6,
   });
 
   if (!rendered) return null;
@@ -271,13 +274,14 @@ export const QueueDrawer = memo(({
   return (
     <>
       <aside
+        ref={asideRef}
+        data-testid="queue-drawer"
         style={{
-          transform: visible ? 'translate3d(0, 0, 0)' : 'translate3d(30px, 0, 0)',
+          transform: visible ? 'translate3d(0, 0, 0)' : 'translate3d(24px, 0, 0)',
           opacity: visible ? 1 : 0,
-          transition: 'transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease',
-          willChange: 'transform, opacity',
+          transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease',
         }}
-        className="absolute top-1 right-0 bottom-1 w-[min(326px,100%)] ios-liquid-drawer rounded-[24px] flex flex-col z-40 select-none overflow-hidden"
+        className="absolute inset-2 z-30 md:static md:inset-auto md:w-[360px] md:flex-none ios-liquid-drawer rounded-[24px] md:my-1 flex flex-col select-none overflow-hidden"
       >
         <div className="h-12 flex-none px-4 flex items-center justify-between border-b border-white/[0.10]">
           <div className="flex items-center gap-2">

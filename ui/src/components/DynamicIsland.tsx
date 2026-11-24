@@ -7,13 +7,20 @@ import {
   SkipForward,
   Heart,
   Maximize2,
+  Square,
+  RectangleHorizontal,
+  Circle,
+  Pin,
+  PinOff,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { OrbitLogo } from './OrbitLogo';
 import {
   bridgeSocket,
   resizeDynamicIslandWindow,
+  setDynamicIslandPinned,
   waitForNextPaint,
+  type IslandWindowMode,
 } from '../api/client';
 import type { PlaybackTick, QueueData, Track } from '../api/types';
 
@@ -59,9 +66,13 @@ export const DynamicIsland = ({
   onToggleLike,
   onExitIsland,
 }: DynamicIslandProps) => {
-  const [isCircle, setIsCircle] = useState(false);
-  const isCircleRef = useRef<boolean>(false);
-  isCircleRef.current = isCircle;
+  const [islandMode, setIslandMode] = useState<IslandWindowMode>('pill');
+  const [isPinned, setIsPinned] = useState<boolean>(true);
+  const islandModeRef = useRef<IslandWindowMode>('pill');
+  islandModeRef.current = islandMode;
+  const isPinnedRef = useRef<boolean>(true);
+  isPinnedRef.current = isPinned;
+  const lastExpandedModeRef = useRef<'pill' | 'card'>('pill');
   const collapseTimerRef = useRef<number | null>(null);
   const morphTimerRef = useRef<number | null>(null);
   const hoveringRef = useRef<boolean>(false);
@@ -73,9 +84,13 @@ export const DynamicIsland = ({
   const elapsedTextRef = useRef<HTMLSpanElement>(null);
   const lastDisplayedSecRef = useRef<number>(-1);
 
+  const isCircle = islandMode === 'circle';
+  const isCard = islandMode === 'card';
+
   const currentTrack = playback?.current_track || queue?.current_track || null;
   const isBuffering = playback?.state === 'buffering';
-  const isPlaying = playback?.state === 'playing' || isBuffering;
+  const isActuallyPlaying = playback?.state === 'playing';
+  const isPlaying = isActuallyPlaying || isBuffering;
   const duration = playback?.duration || currentTrack?.duration_s || 0;
   const durationRef = useRef<number>(duration);
   durationRef.current = duration;
@@ -88,7 +103,7 @@ export const DynamicIsland = ({
 
   const paintProgress = useCallback((posSec: number, durSec: number, forceText: boolean = false) => {
     lastTimePosRef.current = posSec;
-    if (isCircleRef.current) return;
+    if (islandModeRef.current === 'circle') return;
     const ratio = durSec > 0 ? Math.min(1, Math.max(0, posSec / durSec)) : 0;
     if (progressFillRef.current) {
       progressFillRef.current.style.transform = `scaleX(${ratio.toFixed(4)})`;
@@ -108,7 +123,7 @@ export const DynamicIsland = ({
         ? bridgeSocket.latestTimePos
         : playback?.time_pos || 0;
     paintProgress(syncedPos, duration, true);
-  }, [playback?.time_pos, currentTrack?.video_id, duration, isCircle, paintProgress]);
+  }, [playback?.time_pos, currentTrack?.video_id, duration, islandMode, paintProgress]);
 
   useEffect(() => {
     const unsubTick = bridgeSocket.on('playback_tick', (tick) => {
@@ -154,19 +169,41 @@ export const DynamicIsland = ({
     };
   }, [clearCollapseTimer, clearMorphTimer]);
 
-  // Zero-clip GPU morph between Pill and Circle:
-  // - Collapsing: smooth scale/fade out Pill (130ms) -> render Circle -> wait 2 rAFs -> shrink HWND around centered Circle.
-  // - Expanding: grow HWND to 380x142 first -> wait until window.innerWidth >= 350 -> render Pill with smooth spring-in.
+  // Zero-clip GPU morph between Pill, Circle, and Square Art-Card (220x220):
+  // - Collapsing/shrinking: smooth scale/fade out (130ms) -> render target -> wait 2 rAFs -> resize HWND.
+  // - Expanding: grow HWND first -> wait until viewport commits required dimensions -> render target cleanly.
   const [morphPhase, setMorphPhase] = useState<'idle' | 'collapsing'>('idle');
 
+  const waitForMinViewport = useCallback((minW: number, minH: number, timeoutMs: number = 120) => {
+    return new Promise<void>((resolve) => {
+      const deadline = performance.now() + timeoutMs;
+      const check = () => {
+        if (
+          !mountedRef.current ||
+          (window.innerWidth >= minW && window.innerHeight >= minH) ||
+          performance.now() >= deadline
+        ) {
+          requestAnimationFrame(() => resolve());
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    });
+  }, []);
+
   const transitionMode = useCallback(
-    async (toCircle: boolean) => {
-      if (switchingRef.current || !mountedRef.current) return;
+    async (target: IslandWindowMode) => {
+      if (switchingRef.current || !mountedRef.current || islandModeRef.current === target) return;
       switchingRef.current = true;
       clearCollapseTimer();
       clearMorphTimer();
       try {
-        if (toCircle) {
+        if (target === 'pill' || target === 'card') {
+          lastExpandedModeRef.current = target;
+        }
+
+        if (target === 'circle') {
           setMorphPhase('collapsing');
           await new Promise<void>((resolve) => {
             morphTimerRef.current = window.setTimeout(() => {
@@ -175,53 +212,87 @@ export const DynamicIsland = ({
             }, 135);
           });
           if (!mountedRef.current) return;
-          setIsCircle(true);
+          setIslandMode('circle');
           setMorphPhase('idle');
           await waitForNextPaint();
           if (!mountedRef.current) return;
-          await resizeDynamicIslandWindow(false);
-        } else {
-          await resizeDynamicIslandWindow(true);
-          if (!mountedRef.current) return;
-          // Wait until WebView2 actually commits the expanded >=350px viewport before rendering the 364px Pill
+          await resizeDynamicIslandWindow('circle');
+        } else if (target === 'card') {
+          setMorphPhase('collapsing');
           await new Promise<void>((resolve) => {
-            const deadline = performance.now() + 110;
-            const check = () => {
-              if (!mountedRef.current || window.innerWidth >= 350 || performance.now() >= deadline) {
-                requestAnimationFrame(() => resolve());
-                return;
-              }
-              requestAnimationFrame(check);
-            };
-            requestAnimationFrame(check);
+            morphTimerRef.current = window.setTimeout(() => {
+              morphTimerRef.current = null;
+              resolve();
+            }, 110);
           });
           if (!mountedRef.current) return;
-          setIsCircle(false);
+          await resizeDynamicIslandWindow('card');
+          if (!mountedRef.current) return;
+          await waitForMinViewport(220, 220, 130);
+          if (!mountedRef.current) return;
+          setIslandMode('card');
+          setMorphPhase('idle');
+        } else {
+          // Target: 'pill'
+          if (islandModeRef.current === 'card') {
+            setMorphPhase('collapsing');
+            await new Promise<void>((resolve) => {
+              morphTimerRef.current = window.setTimeout(() => {
+                morphTimerRef.current = null;
+                resolve();
+              }, 110);
+            });
+            if (!mountedRef.current) return;
+          }
+          await resizeDynamicIslandWindow('pill');
+          if (!mountedRef.current) return;
+          await waitForMinViewport(350, 126, 130);
+          if (!mountedRef.current) return;
+          setIslandMode('pill');
+          setMorphPhase('idle');
         }
       } finally {
         switchingRef.current = false;
       }
     },
-    [clearCollapseTimer, clearMorphTimer]
+    [clearCollapseTimer, clearMorphTimer, waitForMinViewport]
   );
 
   const scheduleCollapse = useCallback(() => {
     clearCollapseTimer();
     collapseTimerRef.current = window.setTimeout(() => {
-      if (mountedRef.current && !hoveringRef.current && !switchingRef.current) {
-        void transitionMode(true);
+      if (
+        mountedRef.current &&
+        islandModeRef.current === 'pill' &&
+        !hoveringRef.current &&
+        !switchingRef.current
+      ) {
+        void transitionMode('circle');
       }
     }, AUTO_COLLAPSE_MS);
   }, [clearCollapseTimer, transitionMode]);
 
   useEffect(() => {
-    if (!isCircle) {
+    if (islandMode === 'pill') {
       scheduleCollapse();
     } else {
       clearCollapseTimer();
     }
     return clearCollapseTimer;
-  }, [isCircle, scheduleCollapse, clearCollapseTimer]);
+  }, [islandMode, scheduleCollapse, clearCollapseTimer]);
+
+  const handleTogglePin = useCallback(() => {
+    setIsPinned((prev) => {
+      const next = !prev;
+      isPinnedRef.current = next;
+      void setDynamicIslandPinned(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    void setDynamicIslandPinned(isPinnedRef.current);
+  }, []);
 
   const handleSeekClick = (e: React.MouseEvent) => {
     if (!barRef.current || duration <= 0) return;
@@ -265,7 +336,7 @@ export const DynamicIsland = ({
     const onUp = () => {
       cleanup();
       if (!startedDrag && mountedRef.current) {
-        void transitionMode(false);
+        void transitionMode(lastExpandedModeRef.current);
       }
     };
 
@@ -279,6 +350,10 @@ export const DynamicIsland = ({
     window.addEventListener('pointercancel', onCancel);
   };
 
+  const cardWidth = isCircle ? 58 : isCard ? 220 : 364;
+  const cardHeight = isCircle ? 58 : isCard ? 220 : 126;
+  const cardRadius = isCircle ? 9999 : isCard ? 26 : 28;
+
   return (
     <div className="w-screen h-screen bg-transparent flex items-start justify-center pt-2 select-none overflow-hidden">
       <div
@@ -290,21 +365,21 @@ export const DynamicIsland = ({
         }}
         onMouseLeave={() => {
           hoveringRef.current = false;
-          if (!isCircle) scheduleCollapse();
+          if (islandMode === 'pill') scheduleCollapse();
         }}
         title={
           isCircle
             ? currentTrack
-              ? `${currentTrack.title} — Click to expand, drag to move`
+              ? `${currentTrack.title} — Click to expand, drag anywhere to move${isPinned ? ' (Pinned on top)' : ''}`
               : 'Click to expand ORBIT'
             : undefined
         }
         style={{
-          width: isCircle ? 58 : 364,
-          height: isCircle ? 58 : 126,
-          borderRadius: isCircle ? 9999 : 28,
+          width: cardWidth,
+          height: cardHeight,
+          borderRadius: cardRadius,
           transformOrigin: 'top center',
-          transform: morphPhase === 'collapsing' ? 'scale3d(0.72, 0.72, 1)' : 'scale3d(1, 1, 1)',
+          transform: morphPhase === 'collapsing' ? 'scale3d(0.72, 0.72, 1)' : undefined,
           opacity: morphPhase === 'collapsing' ? 0 : 1,
           transition:
             'transform 130ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease',
@@ -319,8 +394,16 @@ export const DynamicIsland = ({
         }}
         className={
           isCircle
-            ? 'relative p-[2.5px] flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 overflow-hidden eh-island-circle-in'
-            : 'ios-liquid-island eh-island-in relative overflow-hidden flex flex-col justify-between px-3.5 py-2.5 titlebar-drag'
+            ? `relative p-[2.5px] flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 overflow-hidden ${
+                morphPhase === 'idle' ? 'eh-island-circle-in' : ''
+              }`
+            : isCard
+            ? `ios-liquid-island relative overflow-hidden flex flex-col justify-between titlebar-drag ${
+                morphPhase === 'idle' ? 'eh-island-in' : ''
+              }`
+            : `ios-liquid-island relative overflow-hidden flex flex-col justify-between px-3.5 py-2.5 titlebar-drag ${
+                morphPhase === 'idle' ? 'eh-island-in' : ''
+              }`
         }
       >
         {isCircle ? (
@@ -340,6 +423,172 @@ export const DynamicIsland = ({
             )}
             <span className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-inset ring-white/30" />
           </div>
+        ) : isCard ? (
+          /* Square Art-Card Mode (220x220) with full-bleed art, dark scrim & centered controls */
+          <div
+            data-tauri-drag-region
+            className="relative w-full h-full flex flex-col justify-between p-3 titlebar-drag"
+          >
+            {/* Full-bleed Album Art */}
+            <div className="pointer-events-none absolute inset-0 bg-[#05070E]">
+              {currentTrack ? (
+                <TrackImage
+                  src={currentTrack.thumbnail_url}
+                  videoId={currentTrack.video_id}
+                  size="lg"
+                  iconSize={48}
+                  eager
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <OrbitLogo size={76} />
+                </div>
+              )}
+            </div>
+
+            {/* Dark Obsidian Scrim for Contrast */}
+            <div
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background:
+                  'linear-gradient(180deg, rgba(5,7,14,0.68) 0%, rgba(5,7,14,0.36) 44%, rgba(5,7,14,0.92) 100%)',
+              }}
+            />
+
+            {/* Top Action Bar */}
+            <div className="relative z-10 flex items-center justify-between no-drag">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void transitionMode('circle')}
+                  title="Collapse to Album Circle"
+                  className="w-7 h-7 rounded-full bg-black/45 hover:bg-black/70 border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <Circle size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTogglePin}
+                  title={isPinned ? 'Pinned on top — drag anywhere to move (click to unpin)' : 'Pin on top across apps'}
+                  className={`w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${
+                    isPinned
+                      ? 'bg-black/65 border-[rgba(var(--dynamic-accent-rgb),0.65)]'
+                      : 'bg-black/45 hover:bg-black/70 border-white/20 text-[#DCE3FC] hover:text-white'
+                  }`}
+                  style={isPinned ? { color: 'var(--dynamic-accent)' } : undefined}
+                >
+                  {isPinned ? <Pin size={11} /> : <PinOff size={11} />}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void transitionMode('pill')}
+                  title="Switch to Compact Pill"
+                  className="w-7 h-7 rounded-full bg-black/45 hover:bg-black/70 border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <RectangleHorizontal size={12} />
+                </button>
+                <button
+                  type="button"
+                  onClick={onExitIsland}
+                  title="Expand to full ORBIT"
+                  className="w-7 h-7 rounded-full bg-black/45 hover:bg-black/70 border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <Maximize2 size={11} />
+                </button>
+              </div>
+            </div>
+
+            {/* Centered Transport Controls */}
+            <div className="relative z-10 flex items-center justify-center gap-3 no-drag my-auto">
+              <button
+                type="button"
+                onClick={onPrev}
+                title="Previous"
+                className="w-9 h-9 rounded-full bg-black/45 hover:bg-black/70 border border-white/15 text-white flex items-center justify-center transition-colors"
+              >
+                <SkipBack size={16} />
+              </button>
+
+              <button
+                type="button"
+                onClick={onTogglePlay}
+                title={isBuffering ? 'Buffering...' : isPlaying ? 'Pause' : 'Play'}
+                className={`relative w-12 h-12 ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 eh-play-morph ${
+                  isActuallyPlaying ? 'rounded-[14px]' : 'rounded-[24px]'
+                }`}
+              >
+                {isBuffering && (
+                  <span
+                    className="pointer-events-none absolute -inset-[3px] rounded-full border-2 border-transparent eh-buffer-ring"
+                    style={{
+                      borderTopColor: 'var(--dynamic-accent)',
+                      borderRightColor: 'rgba(var(--dynamic-accent-rgb), 0.45)',
+                    }}
+                  />
+                )}
+                {isBuffering ? (
+                  <Loader2 size={18} className="eh-buffer-ring" />
+                ) : isPlaying ? (
+                  <Pause size={18} className="fill-current" />
+                ) : (
+                  <Play size={18} className="fill-current ml-0.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={onNext}
+                title="Next"
+                className="w-9 h-9 rounded-full bg-black/45 hover:bg-black/70 border border-white/15 text-white flex items-center justify-center transition-colors"
+              >
+                <SkipForward size={16} />
+              </button>
+            </div>
+
+            {/* Bottom Metadata + Mini Scrubber */}
+            <div className="relative z-10 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-white truncate leading-tight">
+                    {currentTrack?.title || 'ORBIT'}
+                  </div>
+                  <div className="text-[10px] text-[#C8D1EE] truncate leading-tight mt-0.5">
+                    {currentTrack?.artist || 'Ready to play'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => currentTrack && onToggleLike(currentTrack)}
+                  disabled={!currentTrack}
+                  title={isLiked ? 'Unlike' : 'Like'}
+                  className="w-7 h-7 rounded-full flex items-center justify-center text-[#DCE3FC] hover:text-[#FF4D8D] hover:bg-white/10 disabled:opacity-30 transition-colors no-drag flex-none"
+                >
+                  <Heart size={13} className={isLiked ? 'fill-[#FF4D8D] text-[#FF4D8D]' : ''} />
+                </button>
+              </div>
+
+              <div
+                ref={barRef}
+                onClick={handleSeekClick}
+                className="w-full h-2.5 flex items-center cursor-pointer group no-drag"
+              >
+                <div className="w-full h-[3px] group-hover:h-[4.5px] bg-white/[0.22] rounded-full overflow-hidden transition-[height] duration-150">
+                  <div
+                    ref={progressFillRef}
+                    className="w-full h-full rounded-full origin-left will-change-transform"
+                    style={{
+                      transform: `scaleX(${(duration > 0 ? Math.min(1, Math.max(0, lastTimePosRef.current / duration)) : 0).toFixed(4)})`,
+                      background:
+                        'linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF)',
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="w-[336px] h-full flex flex-col justify-between">
             <div
@@ -353,7 +602,7 @@ export const DynamicIsland = ({
               <div className="flex items-center gap-2.5 min-w-0 flex-1">
                 <button
                   type="button"
-                  onClick={() => void transitionMode(true)}
+                  onClick={() => void transitionMode('circle')}
                   title="Collapse to Album Circle"
                   className="w-10 h-10 rounded-full p-[1.5px] flex-none no-drag hover:scale-105 transition-transform"
                   style={{
@@ -391,7 +640,7 @@ export const DynamicIsland = ({
 
               <div className="flex items-center gap-1.5 no-drag flex-none">
                 {isPlaying && (
-                  <div className="flex items-end gap-[2px] h-3 mr-1">
+                  <div className="flex items-end gap-[2px] h-3 mr-0.5">
                     <span
                       className="w-[2px] h-full rounded-full eh-eq-bar"
                       style={{ background: 'var(--dynamic-accent)', animationDelay: '0ms' }}
@@ -408,6 +657,30 @@ export const DynamicIsland = ({
                 )}
 
                 <button
+                  type="button"
+                  onClick={handleTogglePin}
+                  title={isPinned ? 'Pinned on top — drag anywhere to move (click to unpin)' : 'Pin on top across apps'}
+                  className={`w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${
+                    isPinned
+                      ? 'bg-white/[0.18] border-[rgba(var(--dynamic-accent-rgb),0.65)]'
+                      : 'bg-white/[0.12] hover:bg-white/[0.24] border-white/20 text-[#DCE3FC] hover:text-white'
+                  }`}
+                  style={isPinned ? { color: 'var(--dynamic-accent)' } : undefined}
+                >
+                  {isPinned ? <Pin size={11} /> : <PinOff size={11} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void transitionMode('card')}
+                  title="Switch to Square Art-Card (220x220)"
+                  className="w-7 h-7 rounded-full bg-white/[0.12] hover:bg-white/[0.24] border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <Square size={10} />
+                </button>
+
+                <button
+                  type="button"
                   onClick={onExitIsland}
                   title="Expand to full ORBIT"
                   className="w-7 h-7 rounded-full bg-white/[0.12] hover:bg-white/[0.24] border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
@@ -462,8 +735,19 @@ export const DynamicIsland = ({
                 <button
                   onClick={onTogglePlay}
                   title={isBuffering ? 'Buffering...' : isPlaying ? 'Pause' : 'Play'}
-                  className="w-8 h-8 rounded-full ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+                  className={`relative w-8 h-8 ios-liquid-orb text-[#020308] flex items-center justify-center hover:scale-105 active:scale-95 eh-play-morph ${
+                    isActuallyPlaying ? 'rounded-[10px]' : 'rounded-[16px]'
+                  }`}
                 >
+                  {isBuffering && (
+                    <span
+                      className="pointer-events-none absolute -inset-[3px] rounded-full border-2 border-transparent eh-buffer-ring"
+                      style={{
+                        borderTopColor: 'var(--dynamic-accent)',
+                        borderRightColor: 'rgba(var(--dynamic-accent-rgb), 0.45)',
+                      }}
+                    />
+                  )}
                   {isBuffering ? (
                     <Loader2 size={14} className="eh-buffer-ring" />
                   ) : isPlaying ? (

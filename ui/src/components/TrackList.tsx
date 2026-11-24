@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { memo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
@@ -13,6 +13,8 @@ import {
   PlusCircle,
   Music,
   Trash2,
+  UserRound,
+  Disc3,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import type { Track, DownloadProgress } from '../api/types';
@@ -35,6 +37,9 @@ interface TrackListProps {
   onAddNext: (track: Track) => void;
   onAppendQueue: (track: Track) => void;
   onOpenAddToPlaylist?: (track: Track) => void;
+  onOpenArtist?: (artistName: string, artistId?: string | null) => void;
+  onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
+  onEmptyAreaClick?: () => void;
   emptyMessage?: string;
 }
 
@@ -45,7 +50,7 @@ interface MenuPosition {
   isDownloaded: boolean;
 }
 
-export const TrackList = ({
+export const TrackList = memo(({
   tracks,
   loading = false,
   scrollKey,
@@ -63,6 +68,9 @@ export const TrackList = ({
   onAddNext,
   onAppendQueue,
   onOpenAddToPlaylist,
+  onOpenArtist,
+  onOpenAlbum,
+  onEmptyAreaClick,
   emptyMessage = 'No tracks found.',
 }: TrackListProps) => {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -72,7 +80,7 @@ export const TrackList = ({
     count: tracks.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 58,
-    overscan: 3,
+    overscan: 8,
   });
 
   useEffect(() => {
@@ -137,7 +145,10 @@ export const TrackList = ({
 
   if (tracks.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-[#A6B0CF] bg-transparent">
+      <div
+        onClick={() => onEmptyAreaClick?.()}
+        className="flex-1 flex flex-col items-center justify-center p-8 text-center text-[#A6B0CF] bg-transparent"
+      >
         <Music size={32} className="mb-2 opacity-35" />
         <p className="text-xs">{emptyMessage}</p>
       </div>
@@ -161,10 +172,16 @@ export const TrackList = ({
 
       <div
         ref={parentRef}
-        className="flex-1 overflow-y-auto w-full select-none bg-transparent"
-        style={{ contain: 'strict', scrollbarGutter: 'stable' }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onEmptyAreaClick?.();
+        }}
+        className="flex-1 overflow-y-auto w-full select-none bg-transparent eh-scroll-isolate"
+        style={{ contain: 'strict', scrollbarGutter: 'stable', willChange: 'scroll-position' }}
       >
         <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onEmptyAreaClick?.();
+          }}
           style={{
             height: `${rowVirtualizer.getTotalSize()}px`,
             width: '100%',
@@ -199,9 +216,10 @@ export const TrackList = ({
                   left: 0,
                   width: '100%',
                   height: `${virtualRow.size}px`,
-                  transform: `translateY(${virtualRow.start}px)`,
+                  transform: `translate3d(0, ${virtualRow.start}px, 0)`,
+                  contain: 'layout style paint',
                 }}
-                className={`flex items-center px-3 sm:px-5 gap-2.5 sm:gap-3.5 border-b border-white/[0.045] hover:bg-white/[0.06] transition-colors group cursor-pointer ${
+                className={`flex items-center px-3 sm:px-5 gap-2.5 sm:gap-3.5 border-b border-white/[0.045] hover:bg-white/[0.06] group cursor-pointer ${
                   isCurrent ? 'bg-white/[0.08]' : ''
                 }`}
                 onClick={() => onPlay(track, virtualRow.index)}
@@ -268,7 +286,20 @@ export const TrackList = ({
                   >
                     {track.title}
                   </div>
-                  <div className="text-[11px] text-[#A6B0CF] truncate">{track.artist}</div>
+                  {onOpenArtist ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenArtist(track.artist.split(',')[0].trim(), track.artist_id);
+                      }}
+                      className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate"
+                    >
+                      {track.artist}
+                    </button>
+                  ) : (
+                    <div className="text-[11px] text-[#A6B0CF] truncate">{track.artist}</div>
+                  )}
                 </div>
 
                 {showPlayCount && (track.play_count ?? 0) > 0 && (
@@ -278,7 +309,20 @@ export const TrackList = ({
                 )}
 
                 <div className="hidden md:block w-40 text-xs text-[#A6B0CF] truncate pr-2">
-                  {track.album || '—'}
+                  {track.album && onOpenAlbum ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenAlbum(track.album!, track.album_id, track);
+                      }}
+                      className="block max-w-full text-left hover:text-white hover:underline truncate"
+                    >
+                      {track.album}
+                    </button>
+                  ) : (
+                    track.album || '—'
+                  )}
                 </div>
 
                 <button
@@ -399,6 +443,37 @@ export const TrackList = ({
                 <ListPlus size={14} className="text-[#A6B0CF]" />
                 <span>Add to Queue</span>
               </button>
+              {onOpenArtist && (
+                <button
+                  onClick={() => {
+                    onOpenArtist(
+                      menuState.track.artist.split(',')[0].trim(),
+                      menuState.track.artist_id
+                    );
+                    setMenuState(null);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
+                >
+                  <UserRound size={14} className="text-[#A6B0CF]" />
+                  <span>Go to Artist</span>
+                </button>
+              )}
+              {onOpenAlbum && (
+                <button
+                  onClick={() => {
+                    onOpenAlbum(
+                      menuState.track.album || menuState.track.title,
+                      menuState.track.album_id,
+                      menuState.track
+                    );
+                    setMenuState(null);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
+                >
+                  <Disc3 size={14} className="text-[#A6B0CF]" />
+                  <span>Go to Album</span>
+                </button>
+              )}
               {onOpenAddToPlaylist && (
                 <button
                   onClick={() => {
@@ -441,4 +516,4 @@ export const TrackList = ({
         )}
     </>
   );
-};
+});

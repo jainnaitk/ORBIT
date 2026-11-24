@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import random
+import re
 import sqlite3
 from collections.abc import Callable
 from contextlib import suppress
@@ -24,6 +26,65 @@ logger = logging.getLogger(__name__)
 
 RepeatMode = Literal["off", "all", "one"]
 VALID_REPEAT_MODES: set[str] = {"off", "all", "one"}
+
+_NOISE_KEYWORDS: tuple[str, ...] = (
+    "afrobeat",
+    "slowed",
+    "reverb",
+    "8d audio",
+    "8d ",
+    "ringtone",
+    "whatsapp status",
+    "status video",
+    "mashup",
+    "dj remix",
+    "dj mix",
+    "sped up",
+    "nightcore",
+    "bass boosted",
+    "karaoke",
+    "instrumental",
+    "reaction",
+    "podcast",
+    "full album",
+    "jukebox",
+    "nonstop",
+    "1 hour",
+    "10 hours",
+    "remix",
+    "lofi flip",
+    "lo-fi flip",
+    "bootleg",
+)
+
+_PAREN_RE = re.compile(r"[\(\[\{].*?[\)\]\}]")
+_FEAT_RE = re.compile(r"\b(?:feat\.?|ft\.?|featuring)\b.*$", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9\u0900-\u097f]+")
+
+
+def _canonical_title(title: str) -> str:
+    """Normalize a song title to detect duplicate uploads, remixes, and lyric-video variants."""
+    cleaned = _PAREN_RE.sub(" ", title.lower())
+    cleaned = _FEAT_RE.sub(" ", cleaned)
+    # Strip trailing dash/pipe descriptors like "- Official Audio" or "| Lyrical"
+    cleaned = re.split(r"\s+[-|–—]\s+", cleaned, maxsplit=1)[0]
+    cleaned = _NON_ALNUM_RE.sub(" ", cleaned).strip()
+    return cleaned or title.lower().strip()
+
+
+def _primary_artist(artist: str) -> str:
+    """Extract the normalized lead artist name."""
+    first = re.split(r"[,&/]|\b(?:feat\.?|ft\.?|x)\b", artist, maxsplit=1, flags=re.IGNORECASE)[0]
+    return first.strip().lower()
+
+
+def _has_unwanted_noise(title: str, seed_title_lc: str) -> bool:
+    """Return True if candidate looks like an unwanted remix/spam upload unless seed shares that tag."""
+    tlc = title.lower()
+    for kw in _NOISE_KEYWORDS:
+        if kw in tlc and kw not in seed_title_lc:
+            return True
+    return False
 
 
 class QueueManager:
@@ -259,12 +320,18 @@ class QueueManager:
         self.set_repeat_mode(cycle[self.repeat_mode])
         return self.repeat_mode
 
-    async def refill_radio(self, limit: int = 25) -> int:
-        """Refill queue using YouTube Music watch radio recommendations."""
+    async def refill_radio(self, limit: int = 15) -> int:
+        """Refill queue with contextually relevant, deduplicated, popular radio tracks."""
         if not self.autoplay_radio:
             return 0
         curr = self.current_track
         if not curr:
+            return 0
+
+        # Never balloon the queue when plenty of tracks are already queued ahead
+        upcoming_count = max(0, len(self.items) - 1 - self.current_index)
+        effective_limit = min(limit, max(0, 18 - upcoming_count))
+        if effective_limit <= 0:
             return 0
 
         ytm = self._ytm or YTMusicClient()
@@ -272,16 +339,100 @@ class QueueManager:
             recommended = await ytm.get_watch_radio(curr.video_id, limit=limit)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to fetch radio recommendations: %s", e)
-            return 0
+            recommended = []
 
         existing_ids = {t.video_id for t in self.items}
-        new_tracks = [t for t in recommended if t.video_id not in existing_ids]
+        existing_titles = {_canonical_title(t.title) for t in self.items}
+        seed_title_lc = curr.title.lower()
+        seed_artist = _primary_artist(curr.artist)
+        seed_album = (curr.album or "").strip().lower()
 
-        if new_tracks:
-            self.items.extend(new_tracks)
-            self._original_items.extend(new_tracks)
+        def _score_and_filter(candidates: list[Track], base_priority: float) -> list[tuple[float, Track]]:
+            scored: list[tuple[float, Track]] = []
+            for rank, track in enumerate(candidates):
+                if track.video_id in existing_ids:
+                    continue
+                canon = _canonical_title(track.title)
+                if canon in existing_titles:
+                    continue
+                # Skip ultra-short clips/ringtones (<45s) or full-album/podcast uploads (>12m)
+                if (0 < track.duration_s < 45) or track.duration_s > 720:
+                    continue
+                if _has_unwanted_noise(track.title, seed_title_lc):
+                    continue
+
+                score = base_priority - (rank * 0.45)
+                cand_artist = _primary_artist(track.artist)
+                if seed_artist and seed_artist != "unknown artist" and cand_artist == seed_artist:
+                    score += 3.5
+                if seed_album and track.album and track.album.strip().lower() == seed_album:
+                    score += 4.0
+                if 110 <= track.duration_s <= 420:
+                    score += 1.5
+                scored.append((score, track))
+            return scored
+
+        scored_pool = _score_and_filter(list(recommended), base_priority=20.0)
+
+        # If watch radio returned too few clean tracks (or drifted into remixes/duplicates),
+        # blend in popular contextual songs from the seed artist / soundtrack.
+        if (
+            len(scored_pool) < 6
+            and seed_artist
+            and seed_artist not in ("unknown artist", "artist")
+            and hasattr(ytm, "search")
+            and inspect.iscoroutinefunction(ytm.search)
+        ):
+            queries = [f"{curr.artist.split(',')[0].strip()} popular songs"]
+            if curr.album and curr.album.strip().lower() != curr.title.strip().lower():
+                queries.append(f"{curr.album} songs")
+            for q in queries:
+                try:
+                    extra = await ytm.search(q, filter_type="songs", limit=12)
+                    scored_pool.extend(_score_and_filter(list(extra), base_priority=15.0))
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("Contextual radio fallback search failed for %r: %s", q, e)
+
+        scored_pool.sort(key=lambda pair: pair[0], reverse=True)
+
+        selected: list[Track] = []
+        seen_ids = set(existing_ids)
+        seen_titles = set(existing_titles)
+        artist_counts: dict[str, int] = {}
+
+        for _, track in scored_pool:
+            if track.video_id in seen_ids:
+                continue
+            canon = _canonical_title(track.title)
+            if canon in seen_titles:
+                continue
+            cand_artist = _primary_artist(track.artist)
+            # Cap per-artist concentration so one artist/upload spam cannot dominate Up Next
+            max_for_artist = 4 if (seed_artist and cand_artist == seed_artist) else 2
+            if cand_artist and cand_artist not in ("unknown artist", "artist"):
+                if artist_counts.get(cand_artist, 0) >= max_for_artist:
+                    continue
+                artist_counts[cand_artist] = artist_counts.get(cand_artist, 0) + 1
+
+            seen_ids.add(track.video_id)
+            seen_titles.add(canon)
+            selected.append(track)
+            if len(selected) >= effective_limit:
+                break
+
+        # Graceful fallback if strict filtering removed everything from a valid watch list
+        if not selected and recommended:
+            for track in recommended:
+                if track.video_id not in existing_ids:
+                    selected.append(track)
+                if len(selected) >= min(effective_limit, 8):
+                    break
+
+        if selected:
+            self.items.extend(selected)
+            self._original_items.extend(selected)
             self._notify()
-            return len(new_tracks)
+            return len(selected)
         return 0
 
     async def next_track(self, is_error: bool = False) -> Track | None:

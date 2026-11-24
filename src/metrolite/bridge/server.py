@@ -232,6 +232,8 @@ class BridgeController:
         self._play_seq: int = 0
         self._shutdown: bool = False
         self._home_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._artist_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._album_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
         self._bind_callbacks()
 
@@ -636,7 +638,7 @@ class BridgeController:
         if self.queue.autoplay_radio and remaining < 3 and self.queue.current_track is not None:
             async def _refill() -> None:
                 with suppress(asyncio.CancelledError, Exception):
-                    added = await self.queue.refill_radio(limit=20)
+                    added = await self.queue.refill_radio(limit=14)
                     if added > 0:
                         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
                     nxt_preview = self.queue.next_track_preview
@@ -1427,6 +1429,71 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Search failed: {e}",
+            ) from e
+
+    @app.get("/artist", dependencies=[Depends(verify_token)])
+    async def get_artist_profile(
+        name: str | None = Query(default=None),
+        channel_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        if not (name and name.strip()) and not (channel_id and channel_id.strip()):
+            raise HTTPException(status_code=400, detail="Either name or channel_id is required")
+        cache_key = f"{(channel_id or '').strip()}::{(name or '').strip().lower()}"
+        now = time.monotonic()
+        if cache_key in ctrl._artist_cache:
+            exp, payload = ctrl._artist_cache[cache_key]
+            if now < exp:
+                return payload
+        try:
+            payload = await ctrl.ytm.get_artist_profile(name=name, channel_id=channel_id)
+            if len(ctrl._artist_cache) >= 8 and cache_key not in ctrl._artist_cache:
+                ctrl._artist_cache.pop(next(iter(ctrl._artist_cache)), None)
+            ctrl._artist_cache[cache_key] = (now + 300.0, payload)
+            ctrl.spawn_task(asyncio.to_thread(trim_memory))
+            return payload
+        except Exception as e:
+            logger.error("Artist profile fetch failed (%r / %r): %s", name, channel_id, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch artist profile: {e}",
+            ) from e
+
+    @app.get("/album", dependencies=[Depends(verify_token)])
+    async def get_album_details(
+        browse_id: str | None = Query(default=None),
+        title: str | None = Query(default=None),
+        artist: str | None = Query(default=None),
+        video_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        if video_id:
+            video_id = _require_valid_video_id(video_id)
+        if not any([(browse_id or "").strip(), (title or "").strip(), (video_id or "").strip()]):
+            raise HTTPException(
+                status_code=400, detail="At least one of browse_id, title, or video_id is required"
+            )
+        cache_key = (
+            f"{(browse_id or '').strip()}::{(title or '').strip().lower()}::"
+            f"{(artist or '').strip().lower()}::{(video_id or '').strip()}"
+        )
+        now = time.monotonic()
+        if cache_key in ctrl._album_cache:
+            exp, payload = ctrl._album_cache[cache_key]
+            if now < exp:
+                return payload
+        try:
+            payload = await ctrl.ytm.get_album_details(
+                browse_id=browse_id, title=title, artist=artist, video_id=video_id
+            )
+            if len(ctrl._album_cache) >= 8 and cache_key not in ctrl._album_cache:
+                ctrl._album_cache.pop(next(iter(ctrl._album_cache)), None)
+            ctrl._album_cache[cache_key] = (now + 300.0, payload)
+            ctrl.spawn_task(asyncio.to_thread(trim_memory))
+            return payload
+        except Exception as e:
+            logger.error("Album fetch failed (%r / %r): %s", browse_id, title, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch album: {e}",
             ) from e
 
     @app.api_route("/player/play", methods=["GET", "POST"], dependencies=[Depends(verify_token)])

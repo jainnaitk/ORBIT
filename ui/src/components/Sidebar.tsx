@@ -12,7 +12,16 @@ import {
 } from 'lucide-react';
 import type { Playlist } from '../api/types';
 
-export type NavTab = 'home' | 'search' | 'library' | 'liked' | 'downloads' | 'history' | 'playlist';
+export type NavTab =
+  | 'home'
+  | 'search'
+  | 'library'
+  | 'liked'
+  | 'downloads'
+  | 'history'
+  | 'playlist'
+  | 'artist'
+  | 'album';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -46,6 +55,7 @@ export const Sidebar = memo(({
   ) => {
     const active = activeTab === tab;
     const accent = activeColor || 'var(--dynamic-accent)';
+    const useDynamicBg = !activeColor;
 
     if (collapsed) {
       return (
@@ -54,16 +64,32 @@ export const Sidebar = memo(({
           onClick={() => onSelectTab(tab)}
           aria-label={label}
           title={label}
-          className={`relative w-full py-2 sm:py-2.5 rounded-xl sm:rounded-2xl flex flex-col items-center justify-center gap-1 transition-all duration-200 ${
+          className={`relative w-full py-2 sm:py-2.5 rounded-xl sm:rounded-2xl flex flex-col items-center justify-center gap-1 transition-all duration-200 border ${
             active
-              ? 'bg-white/[0.11] text-[#F1F4FA] shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
-              : 'text-[#8E99BA] hover:text-white hover:bg-white/[0.06]'
+              ? 'text-[#F1F4FA] shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]'
+              : 'border-transparent text-[#8E99BA] hover:text-white hover:bg-white/[0.06]'
           }`}
+          style={
+            active
+              ? useDynamicBg
+                ? {
+                    background: 'rgba(var(--dynamic-accent-rgb), 0.14)',
+                    borderColor: 'rgba(var(--dynamic-accent-rgb), 0.32)',
+                  }
+                : {
+                    background: 'rgba(255, 255, 255, 0.11)',
+                    borderColor: 'rgba(255, 255, 255, 0.14)',
+                  }
+              : undefined
+          }
         >
           {active && (
             <span
               className="absolute left-0.5 top-2.5 bottom-2.5 sm:top-3 sm:bottom-3 w-[3px] rounded-full"
-              style={{ background: accent }}
+              style={{
+                background: accent,
+                boxShadow: `0 0 10px ${accent}`,
+              }}
             />
           )}
           <div style={active ? { color: accent } : undefined}>{icon}</div>
@@ -84,16 +110,32 @@ export const Sidebar = memo(({
         key={tab}
         onClick={() => onSelectTab(tab)}
         aria-label={label}
-        className={`relative w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-medium transition-all duration-200 ${
+        className={`relative w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-medium transition-all duration-200 border ${
           active
-            ? 'bg-white/[0.11] text-[#F1F4FA] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
-            : 'text-[#8E99BA] hover:bg-white/[0.06] hover:text-white'
+            ? 'text-[#F1F4FA] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]'
+            : 'border-transparent text-[#8E99BA] hover:bg-white/[0.06] hover:text-white'
         }`}
+        style={
+          active
+            ? useDynamicBg
+              ? {
+                  background: 'rgba(var(--dynamic-accent-rgb), 0.14)',
+                  borderColor: 'rgba(var(--dynamic-accent-rgb), 0.32)',
+                }
+              : {
+                  background: 'rgba(255, 255, 255, 0.11)',
+                  borderColor: 'rgba(255, 255, 255, 0.14)',
+                }
+            : undefined
+        }
       >
         {active && (
           <span
             className="absolute left-0.5 top-2.5 bottom-2.5 w-[3px] rounded-full"
-            style={{ background: accent }}
+            style={{
+              background: accent,
+              boxShadow: `0 0 10px ${accent}`,
+            }}
           />
         )}
         <div className="flex items-center gap-3">
@@ -183,12 +225,29 @@ export const Sidebar = memo(({
               <button
                 key={pl.id}
                 onClick={() => onSelectTab('playlist', pl.id)}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs truncate text-left transition-colors ${
+                className={`relative w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs truncate text-left transition-colors border ${
                   isActive
-                    ? 'bg-white/[0.11] text-white font-semibold'
-                    : 'text-[#9BA4C4] hover:bg-white/[0.06] hover:text-white'
+                    ? 'text-white font-semibold'
+                    : 'border-transparent text-[#9BA4C4] hover:bg-white/[0.06] hover:text-white'
                 }`}
+                style={
+                  isActive
+                    ? {
+                        background: 'rgba(var(--dynamic-accent-rgb), 0.14)',
+                        borderColor: 'rgba(var(--dynamic-accent-rgb), 0.32)',
+                      }
+                    : undefined
+                }
               >
+                {isActive && (
+                  <span
+                    className="absolute left-0.5 top-2 bottom-2 w-[3px] rounded-full"
+                    style={{
+                      background: 'var(--dynamic-accent)',
+                      boxShadow: '0 0 10px var(--dynamic-accent)',
+                    }}
+                  />
+                )}
                 <ListMusic
                   size={14}
                   className="flex-none"

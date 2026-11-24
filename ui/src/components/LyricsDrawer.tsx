@@ -10,9 +10,12 @@ import {
   Heart,
   Download,
   CheckCircle2,
+  Maximize2,
+  ArrowDown,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { bridgeApi, bridgeSocket } from '../api/client';
+import { useTwoFingerClose } from '../utils/gestures';
 import type { PlaybackTick, QueueData, LyricLine, Track, DownloadProgress } from '../api/types';
 
 interface LyricsDrawerProps {
@@ -23,6 +26,9 @@ interface LyricsDrawerProps {
   likedIds?: Set<string>;
   downloadedIds?: Set<string>;
   onClose: () => void;
+  onExpandFullscreen: () => void;
+  onOpenAlbum?: (track: Track) => void;
+  onOpenArtist?: (track: Track) => void;
   onSeek: (seconds: number) => void;
   onToggleLike: (track: Track) => void;
   onDownload: (track: Track) => void;
@@ -36,6 +42,9 @@ export const LyricsDrawer = ({
   likedIds,
   downloadedIds,
   onClose,
+  onExpandFullscreen,
+  onOpenAlbum,
+  onOpenArtist,
   onSeek,
   onToggleLike,
   onDownload,
@@ -51,12 +60,23 @@ export const LyricsDrawer = ({
   const [activeLineIdx, setActiveLineIdx] = useState<number>(0);
   const [showSearch, setShowSearch] = useState<boolean>(false);
   const [manualQuery, setManualQuery] = useState<string>('');
+  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState<boolean>(false);
 
+  const asideRef = useRef<HTMLElement>(null);
   const scrollBoxRef = useRef<HTMLDivElement>(null);
+
+  useTwoFingerClose({
+    enabled: isOpen && rendered,
+    ready: visible && !loading,
+    settleMs: 420,
+    containerRef: asideRef,
+    onClose,
+  });
   const lineRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const lastServerPosRef = useRef<number>(0);
   const lastTickRef = useRef<number>(performance.now());
-  const userScrollUntilRef = useRef<number>(0);
+  const isAutoScrollPausedRef = useRef<boolean>(false);
+  isAutoScrollPausedRef.current = isAutoScrollPaused;
   const reqSeqRef = useRef<number>(0);
   const scrollAnimRef = useRef<number | null>(null);
 
@@ -70,18 +90,11 @@ export const LyricsDrawer = ({
   useEffect(() => {
     if (isOpen) {
       setRendered(true);
-      let raf2 = 0;
-      const raf1 = requestAnimationFrame(() => {
-        raf2 = requestAnimationFrame(() => setVisible(true));
-      });
-      return () => {
-        cancelAnimationFrame(raf1);
-        if (raf2) cancelAnimationFrame(raf2);
-      };
+      const raf1 = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(raf1);
     } else {
       setVisible(false);
-      const t = window.setTimeout(() => setRendered(false), 210);
-      return () => clearTimeout(t);
+      setRendered(false);
     }
   }, [isOpen]);
 
@@ -94,6 +107,8 @@ export const LyricsDrawer = ({
     lastServerPosRef.current = syncedPos;
     lastTickRef.current = performance.now();
     lineRefs.current = [];
+    setIsAutoScrollPaused(false);
+    isAutoScrollPausedRef.current = false;
   }, [currentVideoId, isOpen]);
 
   useEffect(() => {
@@ -155,6 +170,8 @@ export const LyricsDrawer = ({
       setLyricsSource(null);
       setIsOfflineLrc(false);
       setActiveLineIdx(0);
+      setIsAutoScrollPaused(false);
+      isAutoScrollPausedRef.current = false;
       lineRefs.current = [];
 
       try {
@@ -201,20 +218,16 @@ export const LyricsDrawer = ({
     return () => clearInterval(interval);
   }, [isOpen, syncedLines, isPlaying, syncOffset, playback?.time_pos, updateActiveLine]);
 
-  // Exact pixel vertical centering with smooth Apple-Music quartic easing
-  useEffect(() => {
-    if (activeLineIdx < 0 || !syncedLines?.length) return;
-    if (performance.now() < userScrollUntilRef.current) return;
-
+  const scrollToLine = useCallback((idx: number) => {
     const box = scrollBoxRef.current;
-    const el = lineRefs.current[activeLineIdx];
+    const el = lineRefs.current[idx];
     if (!box || !el) return;
 
     const boxRect = box.getBoundingClientRect();
     const elRect = el.getBoundingClientRect();
     const targetTop = Math.max(
       0,
-      box.scrollTop + (elRect.top - boxRect.top) - box.clientHeight * 0.45 + elRect.height * 0.5
+      box.scrollTop + (elRect.top - boxRect.top) - box.clientHeight * 0.44 + elRect.height * 0.5
     );
 
     if (scrollAnimRef.current !== null) {
@@ -225,7 +238,7 @@ export const LyricsDrawer = ({
     const delta = targetTop - startTop;
     if (Math.abs(delta) < 1) return;
 
-    const duration = 480;
+    const duration = 460;
     const startTime = performance.now();
 
     const step = (now: number) => {
@@ -240,13 +253,21 @@ export const LyricsDrawer = ({
     };
 
     scrollAnimRef.current = requestAnimationFrame(step);
+  }, []);
+
+  // Exact pixel vertical centering with smooth Apple-Music quartic easing
+  useEffect(() => {
+    if (activeLineIdx < 0 || !syncedLines?.length) return;
+    if (isAutoScrollPausedRef.current) return;
+
+    scrollToLine(activeLineIdx);
     return () => {
       if (scrollAnimRef.current !== null) {
         cancelAnimationFrame(scrollAnimRef.current);
         scrollAnimRef.current = null;
       }
     };
-  }, [activeLineIdx, syncedLines]);
+  }, [activeLineIdx, syncedLines, scrollToLine]);
 
   if (!rendered) return null;
 
@@ -255,11 +276,16 @@ export const LyricsDrawer = ({
       ? likedIds.has(currentTrack.video_id)
       : !!currentTrack.is_liked
     : false;
+  const dlState = currentTrack ? downloads[currentTrack.video_id] : undefined;
+  const isDownloading =
+    dlState?.status === 'downloading' ||
+    dlState?.status === 'queued' ||
+    dlState?.status === 'tagging';
   const isDownloaded =
     !!currentTrack &&
     (downloadedIds?.has(currentTrack.video_id) ||
       currentTrack.download_status === 'completed' ||
-      downloads[currentTrack.video_id]?.status === 'completed' ||
+      dlState?.status === 'completed' ||
       !!currentTrack.local_path);
 
   const plainLines = plainLyrics ? plainLyrics.split(/\r?\n/) : [];
@@ -270,26 +296,33 @@ export const LyricsDrawer = ({
     void fetchLyrics(manualQuery.trim());
   };
 
+  const handleResumeAutoScroll = () => {
+    isAutoScrollPausedRef.current = false;
+    setIsAutoScrollPaused(false);
+    scrollToLine(activeLineIdx);
+  };
+
   return (
     <aside
+      ref={asideRef}
       data-testid="lyrics-drawer"
       style={{
-        transform: visible ? 'translate3d(0, 0, 0) scale(1)' : 'translate3d(0, 16px, 0) scale(0.985)',
+        transform: visible ? 'translate3d(0, 0, 0)' : 'translate3d(24px, 0, 0)',
         opacity: visible ? 1 : 0,
-        transition: 'transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease',
-        willChange: 'transform, opacity',
+        transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease',
       }}
-      className="absolute inset-0 z-30 ios-liquid-drawer rounded-[26px] my-1 flex flex-col select-none overflow-hidden"
+      className="absolute inset-2 z-30 md:static md:inset-auto md:w-[360px] md:flex-none ios-liquid-drawer rounded-[24px] md:my-1 flex flex-col select-none overflow-hidden"
     >
-      <div className="h-12 flex-none px-5 flex items-center justify-between border-b border-white/[0.10] bg-white/[0.025]">
-        <div className="flex items-center gap-2">
-          <AlignLeft size={14} style={{ color: 'var(--dynamic-accent)' }} />
-          <span className="text-xs font-bold uppercase tracking-[0.2em] text-[#F4F6FF]">
+      {/* Header */}
+      <div className="h-12 flex-none px-4 flex items-center justify-between border-b border-white/[0.10] bg-white/[0.025]">
+        <div className="flex items-center gap-2 min-w-0">
+          <AlignLeft size={14} style={{ color: 'var(--dynamic-accent)' }} className="flex-none" />
+          <span className="text-xs font-bold uppercase tracking-[0.18em] text-[#F4F6FF]">
             Lyrics
           </span>
           {syncedLines && (
             <span
-              className="text-[9px] font-mono uppercase px-2 py-0.5 rounded-full border"
+              className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded-full border flex-none"
               style={{
                 color: 'var(--dynamic-accent)',
                 borderColor: 'rgba(var(--dynamic-accent-rgb), 0.45)',
@@ -300,197 +333,227 @@ export const LyricsDrawer = ({
             </span>
           )}
           {isOfflineLrc && (
-            <span className="inline-flex items-center gap-1 text-[9px] font-mono uppercase px-2 py-0.5 rounded-full bg-[#34D399]/15 text-[#34D399] border border-[#34D399]/35">
+            <span className="inline-flex items-center gap-1 text-[9px] font-mono uppercase px-1.5 py-0.5 rounded-full bg-[#34D399]/15 text-[#34D399] border border-[#34D399]/35 flex-none">
               <HardDrive size={9} />
-              Offline .lrc
+              .lrc
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {syncedLines && syncedLines.length > 0 && (
-            <div
-              className="hidden sm:flex items-center gap-1 mr-2 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.10] text-[10px]"
-              title="Adjust lyrics timing offset"
-            >
-              <span className="text-[#8E99BA] uppercase tracking-wider text-[9px] mr-0.5">
-                Sync
-              </span>
-              <span className="text-[#E6ECF8] mr-1 font-mono tabular-nums">
-                {syncOffset >= 0 ? `+${syncOffset.toFixed(1)}s` : `${syncOffset.toFixed(1)}s`}
-              </span>
-              <button
-                onClick={() => setSyncOffset((o) => Number((o - 0.5).toFixed(1)))}
-                title="Show lyrics 0.5s earlier"
-                className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono transition-colors"
-              >
-                -0.5s
-              </button>
-              <button
-                onClick={() => setSyncOffset((o) => Number((o + 0.5).toFixed(1)))}
-                title="Show lyrics 0.5s later"
-                className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono transition-colors"
-              >
-                +0.5s
-              </button>
-              {syncOffset !== 0 && (
-                <button
-                  onClick={() => setSyncOffset(0)}
-                  title="Reset sync offset"
-                  className="p-1 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#A6B0CF] hover:text-white transition-colors"
-                >
-                  <RotateCcw size={10} />
-                </button>
-              )}
-            </div>
-          )}
-
+        <div className="flex items-center gap-1 flex-none">
           <button
+            type="button"
             onClick={() => setShowSearch((s) => !s)}
             title="Find Lyrics Match"
             className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] rounded-full transition-colors"
           >
-            <Search size={14} />
+            <Search size={13} />
           </button>
           <button
+            type="button"
             onClick={() => void fetchLyrics()}
             disabled={loading || !currentTrack}
             title="Reload Lyrics"
             className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] disabled:opacity-35 rounded-full transition-colors"
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
           <button
+            type="button"
+            onClick={onExpandFullscreen}
+            title="Expand to Fullscreen Stage"
+            className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] rounded-full transition-colors"
+          >
+            <Maximize2 size={13} />
+          </button>
+          <button
+            type="button"
             onClick={onClose}
             title="Close Lyrics (Esc)"
             className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] rounded-full transition-colors"
           >
-            <X size={15} />
+            <X size={14} />
           </button>
         </div>
       </div>
 
+      {/* Compact Track Ribbon + Sync Offset */}
+      {currentTrack && (
+        <div className="flex-none px-4 py-2.5 border-b border-white/[0.08] bg-white/[0.02] flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => onOpenAlbum?.(currentTrack)}
+              title="Open Album"
+              className="w-9 h-9 rounded-lg overflow-hidden border border-white/15 bg-[#0C101C] flex-none hover:scale-105 transition-transform"
+            >
+              <TrackImage
+                src={currentTrack.thumbnail_url}
+                videoId={currentTrack.video_id}
+                size="sm"
+                iconSize={16}
+                eager
+              />
+            </button>
+            <div className="min-w-0 flex-1">
+              <button
+                type="button"
+                onClick={onExpandFullscreen}
+                title="Open Fullscreen Lyrics"
+                className="block text-left text-xs font-semibold text-white truncate max-w-full hover:underline"
+              >
+                {currentTrack.title}
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenArtist?.(currentTrack)}
+                title={`Open ${currentTrack.artist}`}
+                className="block text-left text-[10px] text-[#9AA5C4] hover:text-white hover:underline truncate max-w-full"
+              >
+                {currentTrack.artist}
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-1 flex-none">
+            <button
+              type="button"
+              onClick={() => onToggleLike(currentTrack)}
+              title={isLiked ? 'Unlike' : 'Like'}
+              className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${
+                isLiked
+                  ? 'bg-[#FF4D8D]/16 text-[#FF4D8D]'
+                  : 'text-[#A6B0CF] hover:text-white hover:bg-white/[0.08]'
+              }`}
+            >
+              <Heart size={13} className={isLiked ? 'fill-[#FF4D8D]' : ''} />
+            </button>
+            <button
+              type="button"
+              onClick={() => !isDownloading && !isDownloaded && onDownload(currentTrack)}
+              disabled={isDownloading || isDownloaded}
+              title={
+                isDownloaded
+                  ? 'Downloaded offline'
+                  : isDownloading
+                  ? 'Downloading...'
+                  : 'Download track'
+              }
+              className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${
+                isDownloaded
+                  ? 'bg-[#34D399]/16 text-[#34D399] cursor-default'
+                  : isDownloading
+                  ? 'text-[#A6B0CF] cursor-wait'
+                  : 'text-[#A6B0CF] hover:text-white hover:bg-white/[0.08]'
+              }`}
+            >
+              {isDownloaded ? (
+                <CheckCircle2 size={13} />
+              ) : isDownloading ? (
+                <Loader2 size={13} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
+              ) : (
+                <Download size={13} />
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {syncedLines && syncedLines.length > 0 && (
+        <div
+          className="flex-none px-4 py-1.5 border-b border-white/[0.06] bg-black/20 flex items-center justify-between text-[10px]"
+          title="Adjust lyrics timing offset"
+        >
+          <span className="text-[#8E99BA] uppercase tracking-wider text-[9px]">
+            Timing Offset
+          </span>
+          <div className="flex items-center gap-1">
+            <span className="text-[#E6ECF8] mr-1 font-mono tabular-nums">
+              {syncOffset >= 0 ? `+${syncOffset.toFixed(1)}s` : `${syncOffset.toFixed(1)}s`}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSyncOffset((o) => Number((o - 0.5).toFixed(1)))}
+              title="Show lyrics 0.5s earlier"
+              className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono transition-colors"
+            >
+              -0.5s
+            </button>
+            <button
+              type="button"
+              onClick={() => setSyncOffset((o) => Number((o + 0.5).toFixed(1)))}
+              title="Show lyrics 0.5s later"
+              className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono transition-colors"
+            >
+              +0.5s
+            </button>
+            {syncOffset !== 0 && (
+              <button
+                type="button"
+                onClick={() => setSyncOffset(0)}
+                title="Reset sync offset"
+                className="p-1 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#A6B0CF] hover:text-white transition-colors"
+              >
+                <RotateCcw size={10} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {showSearch && (
         <form
           onSubmit={handleManualSubmit}
-          className="eh-popover-in flex-none px-5 py-2.5 border-b border-white/[0.08] bg-black/25 flex items-center gap-2"
+          className="eh-popover-in flex-none px-4 py-2 border-b border-white/[0.08] bg-black/25 flex items-center gap-2"
         >
           <input
             type="text"
             value={manualQuery}
             onChange={(e) => setManualQuery(e.target.value)}
-            placeholder="Search song name & artist on LRCLIB..."
-            className="flex-1 bg-black/45 border border-white/15 rounded-full px-4 py-1.5 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
+            placeholder="Search song & artist on LRCLIB..."
+            className="flex-1 min-w-0 bg-black/45 border border-white/15 rounded-full px-3 py-1 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
           />
           <button
             type="submit"
-            className="px-4 py-1.5 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] hover:opacity-90"
+            className="px-3 py-1 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] hover:opacity-90 flex-none"
           >
-            Search
+            Find
           </button>
         </form>
       )}
 
-      <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-12 overflow-hidden">
-        <div className="hidden md:flex md:col-span-5 flex-col items-center justify-center p-4 lg:p-6 md:border-r border-white/[0.08] overflow-y-auto no-scrollbar">
-          {currentTrack ? (
-            <div className="ios-liquid-card rounded-[24px] p-5 w-full max-w-[300px] flex flex-col items-center text-center my-auto">
-              <div className="relative w-40 h-40 lg:w-48 lg:h-48 flex items-center justify-center flex-none">
-                <div
-                  className={`eh-accretion absolute -inset-2.5 rounded-full opacity-45 ${
-                    isPlaying ? '' : 'eh-paused opacity-20'
-                  }`}
-                  style={{
-                    background:
-                      'conic-gradient(from 0deg, transparent 0%, rgba(var(--dynamic-accent-rgb), 0.55) 30%, rgba(var(--dynamic-secondary-rgb), 0.25) 60%, transparent 85%)',
-                    WebkitMask:
-                      'radial-gradient(farthest-side, transparent 88%, #000 90%, #000 96%, transparent 100%)',
-                    mask: 'radial-gradient(farthest-side, transparent 88%, #000 90%, #000 96%, transparent 100%)',
-                  }}
-                />
-                <div className="relative w-36 h-36 lg:w-44 lg:h-44 rounded-2xl overflow-hidden border border-white/15 shadow-[0_14px_32px_rgba(0,0,0,0.75)] bg-[#0C101C]">
-                  <TrackImage
-                    src={currentTrack.thumbnail_url}
-                    videoId={currentTrack.video_id}
-                    size="lg"
-                    iconSize={40}
-                    eager
-                  />
-                </div>
-              </div>
-
-              <div className="mt-4 w-full space-y-1 px-1">
-                <h2
-                  title={currentTrack.title}
-                  className="text-base lg:text-lg font-bold text-white leading-snug line-clamp-2 break-words"
-                >
-                  {currentTrack.title || 'Untitled Track'}
-                </h2>
-                <p
-                  title={currentTrack.artist}
-                  className="text-xs font-medium text-[#B2BCD9] truncate"
-                >
-                  {currentTrack.artist}
-                </p>
-                {currentTrack.album && (
-                  <p title={currentTrack.album} className="text-[11px] text-[#7A84A6] truncate">
-                    {currentTrack.album}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 mt-4">
-                <button
-                  onClick={() => onToggleLike(currentTrack)}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                    isLiked
-                      ? 'bg-[#FF4D8D]/16 text-[#FF4D8D] border-[#FF4D8D]/40'
-                      : 'ios-liquid-pill text-[#C8D1EE] hover:text-white'
-                  }`}
-                >
-                  <Heart size={13} className={isLiked ? 'fill-[#FF4D8D]' : ''} />
-                  <span>{isLiked ? 'Liked' : 'Like'}</span>
-                </button>
-                <button
-                  onClick={() => onDownload(currentTrack)}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                    isDownloaded
-                      ? 'bg-[#34D399]/16 text-[#34D399] border-[#34D399]/40'
-                      : 'ios-liquid-pill text-[#C8D1EE] hover:text-white'
-                  }`}
-                >
-                  {isDownloaded ? <CheckCircle2 size={13} /> : <Download size={13} />}
-                  <span>{isDownloaded ? 'Offline' : 'Download'}</span>
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="text-xs text-[#7A84A6]">Play any track to view synced lyrics.</div>
-          )}
-        </div>
-
+      {/* Docked Scrolling Lyrics Canvas + Floating Auto Scroll Pill */}
+      <div className="flex-1 min-h-0 relative overflow-hidden">
         <div
           ref={scrollBoxRef}
           onWheel={() => {
-            userScrollUntilRef.current = performance.now() + 3600;
+            if (syncedLines && syncedLines.length > 0) {
+              isAutoScrollPausedRef.current = true;
+              setIsAutoScrollPaused(true);
+            }
             if (scrollAnimRef.current !== null) {
               cancelAnimationFrame(scrollAnimRef.current);
               scrollAnimRef.current = null;
             }
           }}
-          className="md:col-span-7 overflow-y-auto no-scrollbar px-6 lg:px-10 lyrics-fade-mask relative"
+          onTouchMove={() => {
+            if (syncedLines && syncedLines.length > 0) {
+              isAutoScrollPausedRef.current = true;
+              setIsAutoScrollPaused(true);
+            }
+          }}
+          className="h-full overflow-y-auto no-scrollbar px-5 lyrics-fade-mask"
         >
           {!currentTrack ? (
-            <div className="h-full flex items-center justify-center text-xs text-[#646E8F]">
-              No active song.
+            <div className="h-full flex items-center justify-center text-xs text-[#646E8F] text-center">
+              Play any track to view synced lyrics.
             </div>
           ) : loading ? (
             <div className="h-full flex flex-col items-center justify-center gap-2.5 text-[#A6B0CF]">
-              <Loader2 size={22} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
+              <Loader2 size={20} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
               <span className="text-xs">Syncing lyrics...</span>
             </div>
           ) : syncedLines && syncedLines.length > 0 ? (
-            <div className="space-y-4 max-w-xl mx-auto" style={{ paddingTop: '36%', paddingBottom: '44%' }}>
+            <div className="space-y-3.5" style={{ paddingTop: '36%', paddingBottom: '48%' }}>
               {syncedLines.map((line, i) => {
                 const dist = Math.abs(i - activeLineIdx);
                 const isActive = i === activeLineIdx;
@@ -514,7 +577,8 @@ export const LyricsDrawer = ({
                     }}
                     type="button"
                     onClick={() => {
-                      userScrollUntilRef.current = 0;
+                      isAutoScrollPausedRef.current = false;
+                      setIsAutoScrollPaused(false);
                       const target = Math.max(0, line.time - syncOffset);
                       lastServerPosRef.current = target;
                       lastTickRef.current = performance.now();
@@ -524,14 +588,14 @@ export const LyricsDrawer = ({
                     style={{
                       opacity,
                       transform: isActive
-                        ? 'translate3d(6px, 0, 0) scale(1.06)'
-                        : 'translate3d(0, 0, 0) scale(0.94)',
+                        ? 'translate3d(4px, 0, 0) scale(1.04)'
+                        : 'translate3d(0, 0, 0) scale(0.95)',
                       transformOrigin: 'left center',
                       transition:
                         'transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease',
                       willChange: isActive || dist <= 2 ? 'transform, opacity' : 'auto',
                     }}
-                    className={`block w-full text-left rounded-xl px-2 py-1 leading-snug text-xl sm:text-[23px] font-bold tracking-[-0.015em] hover:!opacity-100 ${
+                    className={`block w-full text-left rounded-xl px-1.5 py-0.5 leading-snug text-[17px] font-bold tracking-[-0.012em] hover:!opacity-100 ${
                       isActive ? 'text-white' : 'text-[#D6DDF5]'
                     }`}
                   >
@@ -540,51 +604,51 @@ export const LyricsDrawer = ({
                 );
               })}
               {lyricsSource && (
-                <p className="pt-8 text-[11px] font-mono text-[#646E8F]">
+                <p className="pt-6 text-[10px] font-mono text-[#646E8F]">
                   Synced via {lyricsSource}
                 </p>
               )}
             </div>
           ) : plainLines.length > 0 ? (
-            <div className="space-y-3 py-10 max-w-xl mx-auto">
+            <div className="space-y-2.5 py-8">
               {plainLines.map((line, i) => (
                 <p
                   key={i}
                   className={
                     line.trim()
-                      ? 'text-base leading-relaxed font-medium text-[#F4F6FF]/85'
-                      : 'h-3'
+                      ? 'text-sm leading-relaxed font-medium text-[#F4F6FF]/85'
+                      : 'h-2.5'
                   }
                 >
                   {line}
                 </p>
               ))}
               {lyricsSource && (
-                <p className="pt-6 text-[11px] font-mono text-[#646E8F] border-t border-white/[0.08]">
+                <p className="pt-5 text-[10px] font-mono text-[#646E8F] border-t border-white/[0.08]">
                   Source: {lyricsSource}
                 </p>
               )}
             </div>
           ) : (
-            <div className="h-full flex flex-col items-center justify-center text-center text-[#A6B0CF] gap-3">
-              <AlignLeft size={28} className="opacity-30" />
+            <div className="h-full flex flex-col items-center justify-center text-center text-[#A6B0CF] gap-3 px-2">
+              <AlignLeft size={26} className="opacity-30" />
               <div>
-                <p className="text-sm font-semibold text-[#F4F6FF]">No lyrics found automatically</p>
-                <p className="text-xs text-[#646E8F] mt-1">
+                <p className="text-xs font-semibold text-[#F4F6FF]">No lyrics found automatically</p>
+                <p className="text-[11px] text-[#646E8F] mt-1">
                   Search the original song name below.
                 </p>
               </div>
-              <form onSubmit={handleManualSubmit} className="flex items-center gap-2 w-full max-w-sm">
+              <form onSubmit={handleManualSubmit} className="flex items-center gap-1.5 w-full">
                 <input
                   type="text"
                   value={manualQuery}
                   onChange={(e) => setManualQuery(e.target.value)}
                   placeholder="Search song name..."
-                  className="flex-1 bg-black/45 border border-white/15 rounded-full px-4 py-2 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
+                  className="flex-1 min-w-0 bg-black/45 border border-white/15 rounded-full px-3 py-1.5 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
                 />
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308]"
+                  className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] flex-none"
                 >
                   Find
                 </button>
@@ -592,6 +656,22 @@ export const LyricsDrawer = ({
             </div>
           )}
         </div>
+
+        {/* Floating Auto scroll pill */}
+        {isAutoScrollPaused && syncedLines && syncedLines.length > 0 && (
+          <button
+            type="button"
+            onClick={handleResumeAutoScroll}
+            className="eh-popover-in absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full ios-liquid-glass text-xs font-semibold text-white hover:scale-105 active:scale-95 transition-transform"
+            style={{
+              borderColor: 'rgba(var(--dynamic-accent-rgb), 0.55)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.65), 0 0 18px rgba(var(--dynamic-accent-rgb), 0.22)',
+            }}
+          >
+            <ArrowDown size={13} style={{ color: 'var(--dynamic-accent)' }} />
+            <span>Auto scroll</span>
+          </button>
+        )}
       </div>
     </aside>
   );
