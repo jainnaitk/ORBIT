@@ -579,10 +579,20 @@ class AudioPlayer:
         self._update_state()
 
     def seek(self, seconds: float) -> None:
-        """Seek to absolute position in seconds."""
-        self._expecting_new_file = False
-        self.time_pos = max(0.0, float(seconds))
-        self.mpv.seek(self.time_pos, reference="absolute")
+        """Seek to absolute position in seconds, safely guarding against idle/loading states."""
+        if self._terminated or self._loading_new_track:
+            return
+        if getattr(self.mpv, "idle_active", False) is True:
+            return
+        target = max(0.0, float(seconds))
+        if self.duration and target > self.duration:
+            target = self.duration
+        try:
+            self.mpv.seek(target, reference="absolute")
+            self._expecting_new_file = False
+            self.time_pos = target
+        except (SystemError, OSError, Exception) as e:  # noqa: BLE001
+            logger.warning("libmpv seek to %.1fs failed: %s", target, e)
 
     def set_eq_preset(self, preset: str) -> str:
         """Apply a native libmpv C audio filter preset with zero Python overhead."""

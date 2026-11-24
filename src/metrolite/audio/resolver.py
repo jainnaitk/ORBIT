@@ -286,8 +286,14 @@ class StreamResolver:
         raise StreamResolutionError(f"yt-dlp extraction failed for {video_id}: {last_err}") from last_err
 
     def _put_cache(self, video_id: str, stream_url: ResolvedSource, expires_at: float) -> None:
+        now = time.monotonic()
+        # Purge expired cache items to prevent memory bloat
+        expired = [k for k, (_, exp) in self._cache.items() if now >= exp]
+        for k in expired:
+            self.invalidate(k)
         if len(self._cache) >= 40 and video_id not in self._cache:
-            self._cache.pop(next(iter(self._cache)), None)
+            evict_id = next(iter(self._cache))
+            self.invalidate(evict_id)
         self._cache[video_id] = (stream_url, expires_at)
 
     async def _resolve_uncached(self, video_id: str) -> ResolvedSource:

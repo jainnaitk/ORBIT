@@ -161,6 +161,31 @@ def test_player_controls() -> None:
     assert player.current_track is None
 
 
+def test_player_seek_idle_buffering_and_exception_safety() -> None:
+    """Verify AudioPlayer.seek safely ignores idle/buffering states and catches libmpv errors."""
+    mock_mpv = MagicMock()
+    player = AudioPlayer(resolver=MagicMock(), mpv_instance=mock_mpv)
+
+    # 1. Idle state guard (idle_active is True)
+    mock_mpv.idle_active = True
+    player.seek(50.0)
+    mock_mpv.seek.assert_not_called()
+    assert player.time_pos == 0.0
+
+    # 2. Buffering state guard (_loading_new_track is True)
+    mock_mpv.idle_active = False
+    player._loading_new_track = True
+    player.seek(50.0)
+    mock_mpv.seek.assert_not_called()
+    assert player.time_pos == 0.0
+
+    # 3. Libmpv SystemError (e.g. MPV_ERROR_COMMAND code -12) is caught gracefully
+    player._loading_new_track = False
+    mock_mpv.seek.side_effect = SystemError("libmpv MPV_ERROR_COMMAND (-12)")
+    player.seek(50.0)
+    assert player.time_pos == 0.0  # Must not mutate time_pos on failure
+
+
 def test_player_callbacks() -> None:
     """Test registered callbacks for state changes and time position."""
     mock_mpv = MagicMock()

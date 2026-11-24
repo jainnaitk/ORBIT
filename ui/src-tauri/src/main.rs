@@ -4,9 +4,14 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 
 const ISLAND_PILL_W: f64 = 380.0;
 const ISLAND_PILL_H: f64 = 142.0;
@@ -14,6 +19,7 @@ const ISLAND_CIRCLE_SIZE: f64 = 78.0;
 const ISLAND_TOP_MARGIN: f64 = 20.0;
 
 static LAST_TRIM_MS: AtomicU64 = AtomicU64::new(0);
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -456,13 +462,239 @@ fn exit_dynamic_island(
     Ok(())
 }
 
+const LOW_MEM_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,Translate,SpareRendererForSitePerProcess,msEdgeShopping,msEdgeSidebar,msEdgeCollections,InterestFeedContentSuggestions,AudioServiceOutOfProcess --disable-background-networking --disable-component-update --disable-extensions --disable-sync --disable-3d-apis --disk-cache-size=4194304 --media-cache-size=4194304 --renderer-process-limit=1 --js-flags=--max-old-space-size=64";
+
+fn should_close_to_tray() -> bool {
+    let paths = [
+        PathBuf::from("config.yaml"),
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            PathBuf::from(local_app_data).join("metrolite").join("config.yaml")
+        } else {
+            PathBuf::from("config.yaml")
+        },
+    ];
+
+    for path in &paths {
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("close_to_tray:") {
+                        let parts: Vec<&str> = trimmed.split(':').collect();
+                        if parts.len() > 1 {
+                            let val = parts[1].trim().to_lowercase();
+                            if val.starts_with("false") {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn send_bridge_request(path: &str, method: &str) {
+    let bridge_cfg = match get_bridge_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to get bridge config for tray action {path}: {e}");
+            return;
+        }
+    };
+
+    let url = format!("http://{}:{}{}", bridge_cfg.host, bridge_cfg.port, path);
+    let token = bridge_cfg.token;
+    let method = method.to_string();
+
+    tauri::async_runtime::spawn(async move {
+        let client = reqwest::Client::new();
+        let req = match method.as_str() {
+            "POST" => client.post(&url),
+            "GET" => client.get(&url),
+            _ => client.post(&url),
+        };
+        let _ = req.header("X-Bridge-Token", token).send().await;
+    });
+}
+
+fn quit_application(app: &AppHandle) {
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
+
+    let bridge_cfg = get_bridge_config().ok();
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        if let Some(cfg) = bridge_cfg {
+            let client = reqwest::Client::new();
+            let url = format!("http://{}:{}/shutdown", cfg.host, cfg.port);
+            tauri::async_runtime::block_on(async {
+                let _ = client
+                    .post(&url)
+                    .header("X-Bridge-Token", cfg.token)
+                    .timeout(std::time::Duration::from_millis(600))
+                    .send()
+                    .await;
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        app_handle.exit(0);
+    });
+}
+
+fn attach_window_close_handler(window: &WebviewWindow) {
+    let app = window.app_handle().clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if !should_close_to_tray() {
+                quit_application(&app);
+            }
+        }
+    });
+}
+
+pub fn ensure_main_window(app: &AppHandle) {
+    if let Some(main_win) = app.get_webview_window("main") {
+        let _ = main_win.unminimize();
+        let _ = main_win.show();
+        let _ = main_win.set_focus();
+        return;
+    }
+
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("ORBIT")
+        .inner_size(1120.0, 700.0)
+        .min_inner_size(380.0, 320.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .additional_browser_args(LOW_MEM_BROWSER_ARGS);
+
+    match builder.build() {
+        Ok(win) => {
+            disable_window_transitions(&win);
+            attach_window_close_handler(&win);
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(e) => {
+            eprintln!("Failed to recreate main window: {e}");
+        }
+    }
+}
+
+fn start_tray_tooltip_sync(app: AppHandle) {
+    std::thread::spawn(move || {
+        let client = reqwest::Client::new();
+        while !EXIT_REQUESTED.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            if EXIT_REQUESTED.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok(cfg) = get_bridge_config() {
+                let url = format!("http://{}:{}/health", cfg.host, cfg.port);
+                let app_clone = app.clone();
+                let client_ref = &client;
+                tauri::async_runtime::block_on(async move {
+                    if let Ok(res) = client_ref
+                        .get(&url)
+                        .timeout(std::time::Duration::from_millis(800))
+                        .send()
+                        .await
+                    {
+                        if let Ok(json) = res.json::<serde_json::Value>().await {
+                            let tooltip = if let Some(track) = json.get("track").and_then(|t| t.as_str()) {
+                                if !track.trim().is_empty() {
+                                    format!("ORBIT • {}", track.trim())
+                                } else {
+                                    "ORBIT".to_string()
+                                }
+                            } else {
+                                "ORBIT".to_string()
+                            };
+
+                            if let Some(tray) = app_clone.tray_by_id("orbit_tray") {
+                                let _ = tray.set_tooltip(Some(tooltip));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            ensure_main_window(app);
+        }))
         .setup(|app| {
             // Disable DWM hide/show transition ghosting on frameless transparent window
             if let Some(main_win) = app.get_webview_window("main") {
                 disable_window_transitions(&main_win);
+                attach_window_close_handler(&main_win);
             }
+
+            // Create Windows System Tray
+            let open_i = MenuItem::with_id(app, "open", "Open ORBIT", true, None::<&str>)?;
+            let play_pause_i = MenuItem::with_id(app, "play_pause", "Play / Pause", true, None::<&str>)?;
+            let next_i = MenuItem::with_id(app, "next", "Next Track", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&open_i, &play_pause_i, &next_i, &quit_i])?;
+
+            let tray_icon = app
+                .default_window_icon()
+                .cloned()
+                .or_else(|| tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico")).ok())
+                .expect("failed to load app icon for tray");
+
+            let _tray = TrayIconBuilder::with_id("orbit_tray")
+                .icon(tray_icon)
+                .tooltip("ORBIT")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |app, event| {
+                    match event.id().as_ref() {
+                        "open" => {
+                            ensure_main_window(app);
+                        }
+                        "play_pause" => {
+                            send_bridge_request("/player/toggle", "POST");
+                        }
+                        "next" => {
+                            send_bridge_request("/player/next", "POST");
+                        }
+                        "quit" => {
+                            quit_application(app);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            let app = tray.app_handle();
+                            ensure_main_window(app);
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
+            // Start live tray tooltip sync
+            start_tray_tooltip_sync(app.handle().clone());
+
             // Trim initial cold startup pages once WebView2 settles (~6s after launch)
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(6));
@@ -478,6 +710,26 @@ fn main() {
             resize_dynamic_island,
             exit_dynamic_island
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running metrolite application");
+        .build(tauri::generate_context!())
+        .expect("error while building metrolite application")
+        .run(|_app_handle, event| {
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    if label == "main" {
+                        spawn_memory_trim();
+                    }
+                }
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if should_close_to_tray() && !EXIT_REQUESTED.load(Ordering::SeqCst) {
+                        api.prevent_exit();
+                        spawn_memory_trim();
+                    }
+                }
+                _ => {}
+            }
+        });
 }

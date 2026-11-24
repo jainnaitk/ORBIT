@@ -1325,11 +1325,13 @@ def create_app(
 
     @app.get("/health")
     async def get_health() -> dict[str, Any]:
+        curr = ctrl.queue.current_track
         return {
             "status": "ok",
             "app": "MetroLite",
             "version": "0.1.0",
             "state": ctrl.player.state,
+            "track": f"{curr.title} • {curr.artist}" if curr else None,
         }
 
     @app.websocket("/ws")
@@ -1447,6 +1449,16 @@ def create_app(
         await ctrl.ws_manager.broadcast("playback_tick", tick_data)
         return tick_data
 
+    @app.post("/player/toggle", dependencies=[Depends(verify_token)])
+    async def player_toggle() -> dict[str, Any]:
+        """Toggle playback between playing and paused."""
+        if ctrl.player.state == "playing":
+            ctrl.player.pause()
+            tick_data = ctrl.get_playback_tick_data()
+            await ctrl.ws_manager.broadcast("playback_tick", tick_data)
+            return tick_data
+        return await ctrl.play()
+
     @app.post("/player/next", dependencies=[Depends(verify_token)])
     async def player_next() -> dict[str, Any]:
         return await ctrl.next_track()
@@ -1463,7 +1475,8 @@ def create_app(
         target_sec = body.seconds if body is not None else seconds
         if target_sec is None or target_sec < 0:
             raise HTTPException(status_code=400, detail="Missing or invalid seconds parameter")
-        ctrl.player.seek(target_sec)
+        with suppress(Exception):
+            ctrl.player.seek(target_sec)
         tick_data = ctrl.get_playback_tick_data()
         await ctrl.ws_manager.broadcast("playback_tick", tick_data)
         return {"time_pos": ctrl.player.time_pos}
@@ -1784,6 +1797,26 @@ def create_app(
     async def install_update() -> dict[str, Any]:
         return ctrl.updater.launch_installer()
 
+    @app.post("/shutdown", dependencies=[Depends(verify_token)])
+    async def shutdown_server() -> dict[str, str]:
+        """Cleanly terminate audio playback, remove bridge file, and stop FastAPI server."""
+        logger.info("Shutdown requested via bridge API")
+        loop = asyncio.get_running_loop()
+        server_obj = getattr(app.state, "server", None)
+
+        def _do_shutdown() -> None:
+            ctrl.shutdown()
+            if server_obj is not None:
+                server_obj.stop()
+
+        loop.call_later(0.1, _do_shutdown)
+        return {"status": "shutting_down"}
+
+    @app.post("/player/quit", dependencies=[Depends(verify_token)])
+    async def player_quit() -> dict[str, str]:
+        """Alias for /shutdown."""
+        return await shutdown_server()
+
     return app
 
 
@@ -1810,6 +1843,7 @@ class BridgeServer:
         )
         self.controller = controller or BridgeController()
         self.app = create_app(controller=self.controller, token=self.token)
+        self.app.state.server = self
         self._uvicorn_server: uvicorn.Server | None = None
 
     def start_sync(self) -> None:

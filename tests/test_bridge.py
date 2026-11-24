@@ -719,3 +719,67 @@ def test_queue_set_autoplay_stream_resolution_error(
     )
     assert res.status_code == 200
     assert len(res.json()["items"]) == 1
+
+
+def test_player_toggle_and_shutdown_endpoints(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Test /player/toggle, /shutdown, and /player/quit endpoints."""
+    headers = {"X-Bridge-Token": test_token}
+
+    # Set up mock track so pause transitions to 'paused'
+    mock_track = Track(video_id="toggle_vid", title="Toggle Track", artist="Artist")
+    mock_controller.player.current_track = mock_track
+    mock_controller.player.mpv.idle_active = False
+
+    # Test toggle when playing -> pauses
+    mock_controller.player.state = "playing"
+    mock_controller.player.mpv.pause = False
+    res = client.post("/player/toggle", headers=headers)
+    assert res.status_code == 200
+    assert mock_controller.player.state == "paused"
+
+    # Test toggle when paused -> attempts play
+    res2 = client.post("/player/toggle", headers=headers)
+    assert res2.status_code == 200
+
+    # Test /shutdown
+    res_shutdown = client.post("/shutdown", headers=headers)
+    assert res_shutdown.status_code == 200
+    assert res_shutdown.json() == {"status": "shutting_down"}
+
+    # Test /player/quit
+    res_quit = client.post("/player/quit", headers=headers)
+    assert res_quit.status_code == 200
+    assert res_quit.json() == {"status": "shutting_down"}
+
+
+def test_player_seek_idle_buffering_no_500(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Test seeking while idle or buffering does not crash with HTTP 500."""
+    headers = {"X-Bridge-Token": test_token}
+
+    # Simulate idle/stopped mpv
+    mock_controller.player.mpv.idle_active = True
+    res = client.post("/player/seek?seconds=120.0", headers=headers)
+    assert res.status_code == 200
+    assert res.json() == {"time_pos": 0.0}
+
+    # Simulate buffering state
+    mock_controller.player.mpv.idle_active = False
+    mock_controller.player._loading_new_track = True
+    res2 = client.post("/player/seek", json={"seconds": 65.0}, headers=headers)
+    assert res2.status_code == 200
+    assert res2.json() == {"time_pos": 0.0}
+
+    # Simulate libmpv throwing SystemError (-12)
+    mock_controller.player._loading_new_track = False
+    mock_controller.player.mpv.seek.side_effect = SystemError("libmpv MPV_ERROR_COMMAND (-12)")
+    res3 = client.post("/player/seek", json={"seconds": 30.0}, headers=headers)
+    assert res3.status_code == 200
+    assert res3.json() == {"time_pos": 0.0}
