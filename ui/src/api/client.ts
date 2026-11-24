@@ -199,6 +199,18 @@ export async function exitDynamicIslandWindow(saved: SavedWindowBounds | null): 
   }
 }
 
+export async function launchUpdateInstallerAndQuit(installerPath: string): Promise<boolean> {
+  if (!isTauri() || !installerPath) return false;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('launch_update_installer', { installerPath });
+    return true;
+  } catch (err) {
+    console.error('launchUpdateInstallerAndQuit failed:', err);
+    return false;
+  }
+}
+
 export class BridgeApiClient {
   private config: BridgeConfig | null = null;
   private preloadedIds: Set<string> = new Set();

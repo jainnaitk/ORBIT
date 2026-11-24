@@ -1528,17 +1528,6 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
         <span id="dl-exe-label">Download for Windows</span>
       </button>
-
-      <div id="dl-progress-wrap" class="hidden mt-4 space-y-1.5">
-        <div class="flex items-center justify-between text-[11px] font-mono text-[#939DBB]">
-          <span id="dl-progress-text">Downloading...</span>
-          <span id="dl-progress-pct" style="color: var(--accent);">0%</span>
-        </div>
-        <div class="w-full h-1.5 rounded-full bg-white/[0.09] overflow-hidden">
-          <div id="dl-progress-fill" class="h-full w-full rounded-full origin-left will-change-transform"
-               style="transform: scaleX(0); background: linear-gradient(90deg, var(--secondary), var(--accent));"></div>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -3453,7 +3442,6 @@
     const RELEASE = {
       version: '0.1.0',
       exeName: 'ORBIT-Setup.exe',
-      exeSize: 0,
       exeUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download/ORBIT-Setup.exe`,
     };
 
@@ -3478,7 +3466,6 @@
           assets.find((a) => /\.exe$/i.test(a.name || ''));
         if (exe && exe.browser_download_url) {
           RELEASE.exeName = exe.name;
-          RELEASE.exeSize = Number(exe.size || 0);
           RELEASE.exeUrl = exe.browser_download_url;
         }
         updateModalMeta();
@@ -3511,63 +3498,16 @@
       }, 180);
     }
 
-    async function downloadOrbitInstaller() {
+    function downloadOrbitInstaller() {
       const filename = RELEASE.exeName;
-      const wrap = document.getElementById('dl-progress-wrap');
-      const txt = document.getElementById('dl-progress-text');
-      const pctEl = document.getElementById('dl-progress-pct');
-      const fill = document.getElementById('dl-progress-fill');
-      const btn = document.getElementById('dl-exe-btn');
-
-      if (window.isSecureContext && typeof window.showSaveFilePicker === 'function' && window.location.protocol.startsWith('http')) {
-        try {
-          const handle = await window.showSaveFilePicker({
-            suggestedName: filename,
-            types: [{ description: 'Windows Installer', accept: { 'application/octet-stream': ['.exe'] } }],
-          });
-
-          if (wrap) wrap.classList.remove('hidden');
-          if (txt) txt.textContent = `Saving ${filename}...`;
-          if (pctEl) pctEl.textContent = '0%';
-          if (fill) fill.style.transform = 'scaleX(0)';
-          if (btn) btn.disabled = true;
-
-          const res = await fetch(`/api/download?asset=${encodeURIComponent(filename)}`);
-          if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-          const total = Number(res.headers.get('content-length') || RELEASE.exeSize || 0);
-          const writable = await handle.createWritable();
-          const reader = res.body.getReader();
-          let loaded = 0;
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            await writable.write(value);
-            loaded += value.byteLength;
-            if (total > 0) {
-              const r = Math.min(1, loaded / total);
-              if (pctEl) pctEl.textContent = `${Math.round(r * 100)}%`;
-              if (fill) fill.style.transform = `scaleX(${r.toFixed(4)})`;
-            }
-          }
-          await writable.close();
-          if (txt) txt.textContent = `Saved ${filename}`;
-          if (pctEl) pctEl.textContent = '100%';
-          if (fill) fill.style.transform = 'scaleX(1)';
-          showToast(`Saved ${filename}`);
-          if (btn) btn.disabled = false;
-          return;
-        } catch (err) {
-          if (btn) btn.disabled = false;
-          if (wrap) wrap.classList.add('hidden');
-          if (err && err.name === 'AbortError') return;
-        }
-      }
+      const useProxy = window.location.protocol.startsWith('http');
+      const downloadUrl = useProxy
+        ? `/api/download?asset=${encodeURIComponent(filename)}`
+        : RELEASE.exeUrl;
 
       showToast(`Downloading ${filename}`);
       const a = document.createElement('a');
-      a.href = RELEASE.exeUrl;
+      a.href = downloadUrl;
       a.download = filename;
       a.rel = 'noopener';
       document.body.appendChild(a);

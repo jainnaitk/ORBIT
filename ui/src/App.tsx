@@ -27,8 +27,10 @@ import { UpdateAvailableModal } from './components/UpdateCenter';
 import {
   useBridge,
   bridgeSocket,
+  isTauri,
   enterDynamicIslandWindow,
   exitDynamicIslandWindow,
+  launchUpdateInstallerAndQuit,
   trimProcessMemory,
   waitForNextPaint,
   type SavedWindowBounds,
@@ -57,6 +59,7 @@ export default function App() {
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState<boolean>(false);
   const promptedUpdateVersionRef = useRef<string | null>(null);
   const toastedReadyUpdateRef = useRef<string | null>(null);
+  const autoInstallPendingRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (
@@ -76,7 +79,28 @@ export default function App() {
       toastedReadyUpdateRef.current = updateState.latest_version;
       toast.show(`Update v${updateState.latest_version} downloaded`, 'success', 3600);
     }
-  }, [updateState?.update_available, updateState?.latest_version, updateState?.status]);
+    if (
+      autoInstallPendingRef.current &&
+      updateState?.status === 'ready' &&
+      updateState.downloaded_path
+    ) {
+      autoInstallPendingRef.current = false;
+      void launchUpdateInstallerAndQuit(updateState.downloaded_path).then((launched) => {
+        if (!launched) {
+          void api.installUpdate().then((next) => setUpdateState(next)).catch(() => {});
+        }
+      });
+    } else if (updateState?.status === 'error') {
+      autoInstallPendingRef.current = false;
+    }
+  }, [
+    api,
+    setUpdateState,
+    updateState?.downloaded_path,
+    updateState?.latest_version,
+    updateState?.status,
+    updateState?.update_available,
+  ]);
 
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
@@ -1033,15 +1057,23 @@ export default function App() {
 
   const handleDownloadAndInstallUpdate = useCallback(async () => {
     try {
-      const next =
-        updateState?.status === 'ready'
-          ? await api.installUpdate()
-          : await api.downloadUpdate(true);
+      if (updateState?.status === 'ready' && updateState.downloaded_path) {
+        const launched = await launchUpdateInstallerAndQuit(updateState.downloaded_path);
+        if (launched) return;
+        const next = await api.installUpdate();
+        setUpdateState(next);
+        return;
+      }
+
+      const tauriEnv = isTauri();
+      autoInstallPendingRef.current = tauriEnv;
+      const next = await api.downloadUpdate(!tauriEnv);
       setUpdateState(next);
     } catch {
+      autoInstallPendingRef.current = false;
       // Handled via socket update_status
     }
-  }, [api, setUpdateState, updateState?.status]);
+  }, [api, setUpdateState, updateState?.downloaded_path, updateState?.status]);
 
   const handleToggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((c) => !c);

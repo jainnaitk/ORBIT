@@ -641,6 +641,7 @@ mod win_job {
     use std::ffi::c_void;
     use std::mem::size_of;
 
+    const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0000_0800;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
 
     #[repr(C)]
@@ -703,7 +704,8 @@ mod win_job {
                     return None;
                 }
                 let mut info: JobobjectExtendedLimitInformation = std::mem::zeroed();
-                info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                info.basic_limit_information.limit_flags =
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
                 let res = SetInformationJobObject(
                     h_job,
                     9, // JobObjectExtendedLimitInformation
@@ -898,6 +900,102 @@ fn quit_application(app: &AppHandle) {
     });
 }
 
+/// Launches a downloaded Windows update installer outside the sidecar Job Object
+/// and cleanly shuts down ORBIT + sidecar so NSIS never hits a running-process lock
+/// or gets terminated when the Job Object closes.
+#[tauri::command]
+fn launch_update_installer(app: AppHandle, installer_path: String) -> Result<(), String> {
+    let updates_dir = get_bridge_path()
+        .parent()
+        .map(|p| p.join("updates"))
+        .ok_or_else(|| "Could not resolve ORBIT updates directory".to_string())?;
+
+    let canon_updates = fs::canonicalize(&updates_dir)
+        .map_err(|e| format!("Updates directory unavailable: {e}"))?;
+    let canon_target = fs::canonicalize(&installer_path)
+        .map_err(|e| format!("Installer file not found: {e}"))?;
+
+    if !canon_target.is_file() || !canon_target.starts_with(&canon_updates) {
+        return Err("Installer path is outside ORBIT updates directory".to_string());
+    }
+
+    let ext = canon_target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext != "exe" && ext != "msi" {
+        return Err(format!("Unsupported installer format: .{ext}"));
+    }
+
+    // Strip Win32 extended-length prefix (\\?\) so NSIS / msiexec accept the path cleanly
+    let launch_path = canon_target
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or(canon_target);
+
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+
+    let bridge_cfg = get_bridge_config().ok();
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        // 1. Gracefully stop backend & sidecar BEFORE launching NSIS so zero files are locked
+        if let Some(cfg) = bridge_cfg {
+            let client = reqwest::Client::new();
+            let url = format!("http://{}:{}/shutdown", cfg.host, cfg.port);
+            tauri::async_runtime::block_on(async {
+                let _ = client
+                    .post(&url)
+                    .header("X-Bridge-Token", cfg.token)
+                    .timeout(Duration::from_millis(500))
+                    .send()
+                    .await;
+            });
+        }
+        std::thread::sleep(Duration::from_millis(180));
+        terminate_sidecar();
+
+        // 2. Spawn installer completely detached from orbit.exe (outside WINDOWS_JOB)
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+            let spawned = if ext == "msi" {
+                std::process::Command::new("msiexec")
+                    .arg("/i")
+                    .arg(&launch_path)
+                    .creation_flags(CREATE_NEW_PROCESS_GROUP)
+                    .spawn()
+            } else {
+                std::process::Command::new(&launch_path)
+                    .creation_flags(CREATE_NEW_PROCESS_GROUP)
+                    .spawn()
+            };
+
+            if spawned.is_err() {
+                // Fallback via Windows shell if elevation or shell dispatch is required
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", ""])
+                    .arg(&launch_path)
+                    .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+                    .spawn();
+            }
+        }
+
+        // 3. Exit orbit.exe immediately so NSIS finds zero running ORBIT processes
+        app_handle.exit(0);
+    });
+
+    Ok(())
+}
+
 fn attach_window_close_handler(window: &WebviewWindow) {
     let app = window.app_handle().clone();
     let win_clone = window.clone();
@@ -1087,7 +1185,8 @@ fn main() {
             enter_dynamic_island,
             resize_dynamic_island,
             set_island_pinned,
-            exit_dynamic_island
+            exit_dynamic_island,
+            launch_update_installer
         ])
         .build(tauri::generate_context!())
         .expect("error while building metrolite application")
