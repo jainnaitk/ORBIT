@@ -48,5 +48,5 @@ ui:
 updates:
   enabled: true
   github_repo: "jainnaitk/ORBIT"
-  current_version: "1.1.1"
+  current_version: "1.2.0"
   check_on_startup: true
