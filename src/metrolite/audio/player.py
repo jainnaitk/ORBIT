@@ -156,9 +156,12 @@ class AudioPlayer:
         self._loading_new_track: bool = False
         self._expecting_new_file: bool = False
         self._load_seq: int = 0
+        self._preload_seq: int = 0
         self._loaded_video_id: str | None = None
         self._pause_requested: bool = False
         self._gapless_promoted_id: str | None = None
+        self._seek_guard_until: float = 0.0
+        self._seek_target: float = 0.0
         self.consecutive_errors: int = 0
         self.max_consecutive_errors: int = 2
         self.current_user_agent: str | None = None
@@ -181,6 +184,7 @@ class AudioPlayer:
                 "video": False,
                 "ytdl": False,
                 "gapless_audio": "yes",
+                "hr_seek": "yes",
                 "cache": "yes",
                 "cache_pause_initial": "no",
                 "demuxer_readahead_secs": 6,
@@ -243,6 +247,14 @@ class AudioPlayer:
                         self._expecting_new_file = False
                     else:
                         return
+                if self._seek_guard_until > 0.0:
+                    if time.monotonic() < self._seek_guard_until:
+                        if abs(pos - self._seek_target) <= 1.5:
+                            self._seek_guard_until = 0.0
+                        else:
+                            return
+                    else:
+                        self._seek_guard_until = 0.0
                 self.time_pos = pos
                 if self._on_time_pos:
                     try:
@@ -281,6 +293,8 @@ class AudioPlayer:
 
             @self._mpv.event_callback("end-file")
             def _on_end_file(event: Any) -> None:
+                if self._terminated or self._loading_new_track:
+                    return
                 reason = _extract_end_reason(event)
                 logger.info("mpv end-file event with reason: %s", reason)
                 if reason in _NON_COMPLETION_REASONS:
@@ -321,6 +335,28 @@ class AudioPlayer:
                         logger.error("Error in on_track_ended callback: %s", e)
         except Exception as e:  # noqa: BLE001
             logger.debug("Failed to set up some mpv observers (may be mocked): %s", e)
+
+    def get_live_time_pos(self) -> float:
+        """Read live libmpv time_pos when actively playing to avoid observer staleness."""
+        if (
+            not self._terminated
+            and not self._loading_new_track
+            and not self._expecting_new_file
+            and self.state == "playing"
+        ):
+            with suppress(Exception):
+                raw = getattr(self._mpv, "time_pos", None)
+                if isinstance(raw, (int, float)) and raw >= 0:
+                    pos = float(raw)
+                    if self._seek_guard_until > 0.0:
+                        if time.monotonic() < self._seek_guard_until:
+                            if abs(pos - self._seek_target) <= 1.5:
+                                self._seek_guard_until = 0.0
+                                self.time_pos = pos
+                            return self.time_pos
+                        self._seek_guard_until = 0.0
+                    self.time_pos = pos
+        return self.time_pos
 
     def record_error(self) -> int:
         """Record an error and increment consecutive error count."""
@@ -404,8 +440,10 @@ class AudioPlayer:
 
     def prepare_track(self, track: Track | None) -> None:
         """Reset timeline to 0:00 and pause old audio while resolving the next track."""
+        self._preload_seq += 1
         self._gapless_promoted_id = None
         self._pause_requested = False
+        self._seek_guard_until = 0.0
         self._loading_new_track = True
         self._expecting_new_file = True
         if self.state == "playing":
@@ -442,8 +480,10 @@ class AudioPlayer:
         if http_headers:
             self.set_http_headers(http_headers)
 
+        self._preload_seq += 1
         self._gapless_promoted_id = None
         self._pause_requested = False
+        self._seek_guard_until = 0.0
         self.current_track = track
         self._loaded_video_id = track.video_id if track is not None else None
         self.next_track = None
@@ -511,6 +551,7 @@ class AudioPlayer:
 
     def clear_preloaded_next(self) -> None:
         """Clear any previously appended gapless track from mpv's playlist."""
+        self._preload_seq += 1
         self.next_track = None
         self._gapless_promoted_id = None
         with suppress(Exception):
@@ -538,8 +579,10 @@ class AudioPlayer:
     async def preload_next(self, track: Track) -> None:
         """Resolve and preload next track for gapless transition (aborts if track switched)."""
         my_seq = self._load_seq
+        self._preload_seq += 1
+        my_preload_seq = self._preload_seq
         source = await self.resolver.resolve(track.video_id)
-        if my_seq != self._load_seq:
+        if my_seq != self._load_seq or my_preload_seq != self._preload_seq:
             return
         ua = getattr(source, "user_agent", None)
         headers = getattr(source, "http_headers", None)
@@ -561,6 +604,7 @@ class AudioPlayer:
             if pl_count < 2 or pl_pos is None or pl_pos + 1 >= pl_count:
                 return False
             self._load_seq += 1
+            self._preload_seq += 1
             self._pause_requested = False
             self._loading_new_track = False
             self._expecting_new_file = True
@@ -602,10 +646,16 @@ class AudioPlayer:
         if self.duration and target > self.duration:
             target = self.duration
         try:
-            self.mpv.seek(target, reference="absolute")
+            self._seek_target = target
+            self._seek_guard_until = time.monotonic() + 0.85
+            if mpv is not None and isinstance(self.mpv, mpv.MPV):
+                self.mpv.seek(target, reference="absolute", precision="exact")
+            else:
+                self.mpv.seek(target, reference="absolute")
             self._expecting_new_file = False
             self.time_pos = target
         except (SystemError, OSError, Exception) as e:  # noqa: BLE001
+            self._seek_guard_until = 0.0
             logger.warning("libmpv seek to %.1fs failed: %s", target, e)
 
     def set_eq_preset(self, preset: str) -> str:
@@ -635,6 +685,7 @@ class AudioPlayer:
     def stop(self) -> None:
         """Stop playback and clear current track."""
         self._load_seq += 1
+        self._preload_seq += 1
         self._pause_requested = False
         self._gapless_promoted_id = None
         self._loaded_video_id = None

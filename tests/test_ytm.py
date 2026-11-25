@@ -309,6 +309,125 @@ async def test_ytm_client_api_error_handling() -> None:
         await client.get_home_sections()
 
 
+@pytest.mark.asyncio
+async def test_ytm_client_get_artist_recovers_from_missing_header_keyerror() -> None:
+    """When ytmusicapi.get_artist raises KeyError('header') on two-column pages, fallback recovers full profile."""
+    mock_yt = MagicMock()
+    mock_yt.get_artist.side_effect = KeyError("header")
+    mock_yt.parser = None
+    mock_yt.search.return_value = []
+    mock_yt._send_request.return_value = {
+        "contents": {
+            "twoColumnBrowseResultsRenderer": {
+                "tabs": [
+                    {
+                        "tabRenderer": {
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [
+                                        {
+                                            "musicResponsiveHeaderRenderer": {
+                                                "title": {"runs": [{"text": "Shashwat Sachdev"}]},
+                                                "thumbnail": {
+                                                    "musicThumbnailRenderer": {
+                                                        "thumbnail": {
+                                                            "thumbnails": [
+                                                                {
+                                                                    "url": "https://example.com/shashwat.jpg",
+                                                                    "width": 226,
+                                                                }
+                                                            ]
+                                                        }
+                                                    }
+                                                },
+                                                "subscriptionButton": {
+                                                    "subscribeButtonRenderer": {
+                                                        "channelId": "UCtIiZrzDsXk_rWeynT1ho4g",
+                                                        "subscriberCountText": {
+                                                            "runs": [{"text": "420K"}]
+                                                        },
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ],
+                "secondaryContents": {
+                    "sectionListRenderer": {
+                        "contents": [
+                            {
+                                "musicCarouselShelfRenderer": {
+                                    "contents": []
+                                }
+                            },
+                            {
+                                "musicCarouselShelfRenderer": {
+                                    "header": {
+                                        "musicCarouselShelfBasicHeaderRenderer": {
+                                            "title": {"runs": [{"text": "Albums"}]}
+                                        }
+                                    },
+                                    "contents": [
+                                        {
+                                            "musicTwoRowItemRenderer": {
+                                                "title": {"runs": [{"text": "Dhurandhar"}]},
+                                                "subtitle": {
+                                                    "runs": [{"text": "Album • 2026"}]
+                                                },
+                                                "navigationEndpoint": {
+                                                    "browseEndpoint": {
+                                                        "browseId": "MPREb_dhurandhar"
+                                                    }
+                                                },
+                                                "thumbnailRenderer": {
+                                                    "musicThumbnailRenderer": {
+                                                        "thumbnail": {
+                                                            "thumbnails": [
+                                                                {
+                                                                    "url": "https://example.com/alb.jpg",
+                                                                    "width": 226,
+                                                                }
+                                                            ]
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    ],
+                                }
+                            },
+                            {
+                                "musicDescriptionShelfRenderer": {
+                                    "description": {"runs": [{"text": "Indian composer."}]},
+                                    "subheader": {"runs": [{"text": "1B views"}]},
+                                }
+                            },
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    client = YTMusicClient(yt_instance=mock_yt)
+    profile = await client.get_artist_profile(
+        name="Shashwat Sachdev", channel_id="UCtIiZrzDsXk_rWeynT1ho4g"
+    )
+
+    assert profile["name"] == "Shashwat Sachdev"
+    assert profile["subscribers"] == "420K"
+    assert profile["views"] == "1B views"
+    assert profile["description"] == "Indian composer."
+    assert profile["thumbnail_url"] == "https://example.com/shashwat.jpg"
+    assert len(profile["albums"]) == 1
+    assert profile["albums"][0]["browse_id"] == "MPREb_dhurandhar"
+    assert profile["albums"][0]["year"] == "2026"
+
+
 def test_ytm_client_auth_fallback() -> None:
     """Test that auth initialization failure gracefully falls back to unauthenticated."""
     with patch("metrolite.ytm.client.YTMusic") as mock_yt_cls:

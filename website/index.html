@@ -1523,6 +1523,11 @@
         <span id="modal-version-pill" class="font-mono text-[#F4F6FF]">v0.1.0</span>
       </div>
 
+      <div id="modal-changelog-wrap" class="hidden mt-4 rounded-2xl bg-[#080B14] border border-white/[0.08] p-3.5 space-y-2">
+        <div class="text-[10px] font-mono uppercase tracking-[0.18em] text-[#8E98B5]">What's New</div>
+        <ul id="modal-changelog-list" class="space-y-1.5 text-xs text-[#F2F5FC] leading-relaxed"></ul>
+      </div>
+
       <button type="button" id="dl-exe-btn" onclick="downloadOrbitInstaller()"
          class="btn-platinum mt-6 w-full px-5 py-3.5 rounded-full text-sm font-semibold active:scale-95 inline-flex items-center justify-center gap-2.5">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
@@ -3443,11 +3448,54 @@
       version: '0.1.0',
       exeName: 'ORBIT-Setup.exe',
       exeUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download/ORBIT-Setup.exe`,
+      changelog: [],
     };
+
+    function extractBriefChangelog(body, maxItems = 3) {
+      if (!body) return [];
+      const items = [];
+      for (const raw of String(body).split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || /^#{1,6}\s+/.test(line) || /^[-*_]{3,}$/.test(line)) continue;
+        if (/^(full changelog|sha256|checksum|https?:\/\/)/i.test(line)) continue;
+        const cleaned = line
+          .replace(/^[-*+•]\s+/, '')
+          .replace(/^\d+[.)]\s+/, '')
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+          .replace(/[*_`~]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (cleaned.length < 4) continue;
+        items.push(cleaned.length > 96 ? `${cleaned.slice(0, 93).trimEnd()}...` : cleaned);
+        if (items.length >= maxItems) break;
+      }
+      return items;
+    }
 
     function updateModalMeta() {
       const verEl = document.getElementById('modal-version-pill');
       if (verEl) verEl.textContent = `v${RELEASE.version}`;
+      const wrap = document.getElementById('modal-changelog-wrap');
+      const list = document.getElementById('modal-changelog-list');
+      if (wrap && list) {
+        if (RELEASE.changelog.length > 0) {
+          list.innerHTML = '';
+          RELEASE.changelog.forEach((txt) => {
+            const li = document.createElement('li');
+            li.className = 'flex items-start gap-2';
+            const dot = document.createElement('span');
+            dot.className = 'w-1.5 h-1.5 rounded-full mt-1 flex-none';
+            dot.style.background = 'var(--accent)';
+            const span = document.createElement('span');
+            span.textContent = txt;
+            li.append(dot, span);
+            list.appendChild(li);
+          });
+          wrap.classList.remove('hidden');
+        } else {
+          wrap.classList.add('hidden');
+        }
+      }
     }
 
     async function fetchLatestRelease() {
@@ -3460,6 +3508,7 @@
         const data = await res.json();
         const ver = String(data.tag_name || '').replace(/^v/i, '').trim();
         if (ver) RELEASE.version = ver;
+        RELEASE.changelog = extractBriefChangelog(data.body, 3);
         const assets = Array.isArray(data.assets) ? data.assets : [];
         const exe =
           assets.find((a) => /setup\.exe$/i.test(a.name || '') && !/^ORBIT-Setup\.exe$/i.test(a.name || '')) ||

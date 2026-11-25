@@ -485,8 +485,61 @@ export const PlayerBar = ({
         </div>
       </div>
 
-      {/* Center: Sculpted Liquid Glass Transport Pill + Precision Orbital Scrubber */}
-      <div className="flex flex-col items-center gap-1.5 flex-none sm:flex-1 sm:max-w-[440px]">
+      {/* Center: Precision Orbital Scrubber (Top) + Sculpted Liquid Glass Transport Pill (Bottom) */}
+      <div className="flex flex-col items-center gap-1 flex-none sm:flex-1 sm:max-w-[440px]">
+        {/* GPU-Composited Orbital Scrubber (Above Play/Pause) */}
+        <div className="hidden sm:flex w-full items-center gap-2 text-[10px] font-mono tabular-nums text-[#9BA4C4]">
+          <span ref={elapsedTextRef} className="w-8 text-right flex-none">
+            0:00
+          </span>
+
+          <div
+            ref={progressBarRef}
+            onPointerDown={onPointerDown}
+            onMouseMove={handleBarHover}
+            onMouseLeave={() => setHoverInfo(null)}
+            className="flex-1 h-3.5 flex items-center cursor-pointer group relative"
+          >
+            {hoverInfo && duration > 0 && (
+              <div
+                style={{ left: `${Math.max(6, Math.min(94, hoverInfo.pct))}%` }}
+                className="pointer-events-none absolute -top-7 -translate-x-1/2 px-2 py-0.5 rounded-full ios-liquid-popover text-[10px] font-mono tabular-nums text-[#F4F6FF]"
+              >
+                {formatTime(hoverInfo.sec)}
+              </div>
+            )}
+
+            <div className="w-full h-[3.5px] bg-white/[0.15] rounded-full relative group-hover:h-[5px] transition-[height] duration-150">
+              <div className="absolute inset-0 rounded-full overflow-hidden">
+                <div
+                  ref={scrubberFillRef}
+                  className="w-full h-full origin-left will-change-transform"
+                  style={{
+                    transform: 'scaleX(0)',
+                    background:
+                      'linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF)',
+                    boxShadow: '0 0 10px rgba(var(--dynamic-accent-rgb), 0.55)',
+                  }}
+                />
+              </div>
+              <div className="pointer-events-none absolute inset-0">
+                <div
+                  ref={scrubberKnobTrackRef}
+                  className="w-full h-full relative will-change-transform"
+                  style={{ transform: 'translate3d(-100%, 0, 0)' }}
+                >
+                  <span
+                    className="w-3 h-3 rounded-full bg-white absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ boxShadow: '0 0 12px var(--dynamic-accent)' }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <span className="w-8 text-left flex-none">{formatTime(duration)}</span>
+        </div>
+
         <div
           className="flex items-center gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1 rounded-full ios-liquid-pill"
           style={
@@ -577,59 +630,6 @@ export const PlayerBar = ({
           >
             {queue?.repeat_mode === 'one' ? <Repeat1 size={14} /> : <Repeat size={13} />}
           </button>
-        </div>
-
-        {/* GPU-Composited Orbital Scrubber */}
-        <div className="hidden sm:flex w-full items-center gap-2 text-[10px] font-mono tabular-nums text-[#9BA4C4]">
-          <span ref={elapsedTextRef} className="w-8 text-right flex-none">
-            0:00
-          </span>
-
-          <div
-            ref={progressBarRef}
-            onPointerDown={onPointerDown}
-            onMouseMove={handleBarHover}
-            onMouseLeave={() => setHoverInfo(null)}
-            className="flex-1 h-3.5 flex items-center cursor-pointer group relative"
-          >
-            {hoverInfo && duration > 0 && (
-              <div
-                style={{ left: `${Math.max(6, Math.min(94, hoverInfo.pct))}%` }}
-                className="pointer-events-none absolute -top-7 -translate-x-1/2 px-2 py-0.5 rounded-full ios-liquid-popover text-[10px] font-mono tabular-nums text-[#F4F6FF]"
-              >
-                {formatTime(hoverInfo.sec)}
-              </div>
-            )}
-
-            <div className="w-full h-[3.5px] bg-white/[0.15] rounded-full relative group-hover:h-[5px] transition-[height] duration-150">
-              <div className="absolute inset-0 rounded-full overflow-hidden">
-                <div
-                  ref={scrubberFillRef}
-                  className="w-full h-full origin-left will-change-transform"
-                  style={{
-                    transform: 'scaleX(0)',
-                    background:
-                      'linear-gradient(90deg, var(--dynamic-secondary), var(--dynamic-accent), #FFFFFF)',
-                    boxShadow: '0 0 10px rgba(var(--dynamic-accent-rgb), 0.55)',
-                  }}
-                />
-              </div>
-              <div className="pointer-events-none absolute inset-0">
-                <div
-                  ref={scrubberKnobTrackRef}
-                  className="w-full h-full relative will-change-transform"
-                  style={{ transform: 'translate3d(-100%, 0, 0)' }}
-                >
-                  <span
-                    className="w-3 h-3 rounded-full bg-white absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
-                    style={{ boxShadow: '0 0 12px var(--dynamic-accent)' }}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <span className="w-8 text-left flex-none">{formatTime(duration)}</span>
         </div>
       </div>
 

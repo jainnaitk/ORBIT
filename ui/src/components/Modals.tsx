@@ -1,5 +1,5 @@
 import { useState, useEffect, type FC, type FormEvent } from 'react';
-import { X, Plus, ListMusic, Sparkles, Download } from 'lucide-react';
+import { X, Plus, ListMusic, Sparkles, Download, AlignLeft } from 'lucide-react';
 import { OrbitLogo } from './OrbitLogo';
 import type { CosmicEffectsMode } from './StarfieldBg';
 import type { Playlist, Track } from '../api/types';
@@ -196,6 +196,8 @@ interface SettingsModalProps {
   onChangeCosmicMode: (mode: CosmicEffectsMode) => void;
   autoDownloadLiked: boolean;
   onToggleAutoDownloadLiked: () => void;
+  lyricsEdgeBlur: boolean;
+  onToggleLyricsEdgeBlur: () => void;
 }
 
 const COSMIC_MODES: { id: CosmicEffectsMode; label: string; desc: string }[] = [
@@ -211,6 +213,8 @@ export const SettingsModal: FC<SettingsModalProps> = ({
   onChangeCosmicMode,
   autoDownloadLiked,
   onToggleAutoDownloadLiked,
+  lyricsEdgeBlur,
+  onToggleLyricsEdgeBlur,
 }) => {
   if (!isOpen) return null;
 
@@ -265,6 +269,35 @@ export const SettingsModal: FC<SettingsModalProps> = ({
                 );
               })}
             </div>
+          </div>
+
+          {/* Lyrics Progressive Edge Blur */}
+          <div className="flex items-center justify-between p-3.5 rounded-xl bg-white/[0.04] border border-white/10">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-black/50 border border-white/10 flex items-center justify-center flex-none">
+                <AlignLeft size={16} style={{ color: 'var(--dynamic-accent)' }} />
+              </div>
+              <div>
+                <div className="font-semibold text-[#F4F6FF]">Lyrics Edge Blur</div>
+                <div className="text-[11px] text-[#9AA5C4] mt-0.5">
+                  Softly blur distant lines on the synced lyrics stage
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onToggleLyricsEdgeBlur}
+              aria-pressed={lyricsEdgeBlur}
+              className={`w-10 h-5 rounded-full p-0.5 transition-colors flex-none ${
+                lyricsEdgeBlur ? 'bg-[var(--dynamic-accent)]' : 'bg-white/10 border border-white/15'
+              }`}
+            >
+              <div
+                className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
+                  lyricsEdgeBlur ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
           </div>
 
           {/* Auto-Download Liked Songs */}

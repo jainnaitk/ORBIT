@@ -16,25 +16,26 @@ import {
   AlignLeft,
   ListMusic,
   Minimize2,
-  RotateCcw,
-  Search,
-  RefreshCw,
   HardDrive,
   Radio,
   Trash2,
   X,
-  ArrowDown,
   GripVertical,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
-import { bridgeApi, bridgeSocket } from '../api/client';
+import {
+  LyricsOverflowMenu,
+  LyricsStageBody,
+  LyricsSyncModeTabs,
+  useLyricsController,
+} from './LyricsStageView';
+import { bridgeSocket } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
 import type {
   PlaybackTick,
   QueueData,
   Track,
   DownloadProgress,
-  LyricLine,
 } from '../api/types';
 
 export type FullscreenTab = 'lyrics' | 'queue';
@@ -54,6 +55,7 @@ interface FullscreenStageProps {
   downloads?: Record<string, DownloadProgress>;
   likedIds?: Set<string>;
   downloadedIds?: Set<string>;
+  lyricsEdgeBlur: boolean;
   onClose: () => void;
   onTogglePlay: () => void;
   onNext: () => void;
@@ -89,6 +91,7 @@ export const FullscreenStage = ({
   downloads = {},
   likedIds,
   downloadedIds,
+  lyricsEdgeBlur,
   onClose,
   onTogglePlay,
   onNext,
@@ -132,18 +135,6 @@ export const FullscreenStage = ({
     onClose,
   });
 
-  // Lyrics state
-  const [syncedLines, setSyncedLines] = useState<LyricLine[] | null>(null);
-  const [plainLyrics, setPlainLyrics] = useState<string | null>(null);
-  const [lyricsSource, setLyricsSource] = useState<string | null>(null);
-  const [isOfflineLrc, setIsOfflineLrc] = useState<boolean>(false);
-  const [loadingLyrics, setLoadingLyrics] = useState<boolean>(false);
-  const [syncOffset, setSyncOffset] = useState<number>(0);
-  const [activeLineIdx, setActiveLineIdx] = useState<number>(0);
-  const [showSearch, setShowSearch] = useState<boolean>(false);
-  const [manualQuery, setManualQuery] = useState<string>('');
-  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState<boolean>(false);
-
   // Scrubber state & GPU refs (never store 4Hz time_pos in React state)
   const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
   const [hoverInfo, setHoverInfo] = useState<{ pct: number; sec: number } | null>(null);
@@ -154,15 +145,9 @@ export const FullscreenStage = ({
   const lastDisplayedSecRef = useRef<number>(-1);
   const scrubCleanupRef = useRef<(() => void) | null>(null);
 
-  const lyricsBoxRef = useRef<HTMLDivElement>(null);
   const queueListRef = useRef<HTMLDivElement>(null);
-  const lineRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const lastServerPosRef = useRef<number>(0);
   const lastTickRef = useRef<number>(performance.now());
-  const scrollAnimRef = useRef<number | null>(null);
-  const reqSeqRef = useRef<number>(0);
-  const isAutoScrollPausedRef = useRef<boolean>(false);
-  isAutoScrollPausedRef.current = isAutoScrollPaused;
 
   const currentTrack = playback?.current_track || queue?.current_track || null;
   const currentVideoId = currentTrack?.video_id ?? null;
@@ -175,14 +160,6 @@ export const FullscreenStage = ({
   durationRef.current = duration;
   const isScrubbingRef = useRef<boolean>(isScrubbing);
   isScrubbingRef.current = isScrubbing;
-  const currentTrackRef = useRef<Track | null>(currentTrack);
-  currentTrackRef.current = currentTrack;
-  const syncedLinesRef = useRef<LyricLine[] | null>(syncedLines);
-  syncedLinesRef.current = syncedLines;
-  const syncOffsetRef = useRef<number>(syncOffset);
-  syncOffsetRef.current = syncOffset;
-  const isActuallyPlayingRef = useRef<boolean>(isActuallyPlaying);
-  isActuallyPlayingRef.current = isActuallyPlaying;
 
   useEffect(() => {
     if (isOpen) {
@@ -221,60 +198,23 @@ export const FullscreenStage = ({
     }
   }, []);
 
-  const updateActiveLine = useCallback(() => {
-    const lines = syncedLinesRef.current;
-    if (!lines || lines.length === 0 || document.hidden) return;
-    const elapsed = isActuallyPlayingRef.current ? (performance.now() - lastTickRef.current) / 1000 : 0;
-    const nowSec = lastServerPosRef.current + elapsed + syncOffsetRef.current;
+  const syncScrubberFromLyrics = useCallback(
+    (targetSec: number) => {
+      lastServerPosRef.current = targetSec;
+      lastTickRef.current = performance.now();
+      paintProgress(targetSec, durationRef.current);
+    },
+    [paintProgress]
+  );
 
-    let idx = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].time <= nowSec + 0.16) idx = i;
-      else break;
-    }
-    setActiveLineIdx((prev) => (prev !== idx ? idx : prev));
-  }, []);
-
-  const scrollToLine = useCallback((idx: number, instant: boolean = false) => {
-    const box = lyricsBoxRef.current;
-    const el = lineRefs.current[idx];
-    if (!box || !el) return;
-
-    const boxRect = box.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const targetTop = Math.max(
-      0,
-      box.scrollTop + (elRect.top - boxRect.top) - box.clientHeight * 0.44 + elRect.height * 0.5
-    );
-
-    if (scrollAnimRef.current !== null) {
-      cancelAnimationFrame(scrollAnimRef.current);
-      scrollAnimRef.current = null;
-    }
-
-    if (instant) {
-      box.scrollTop = targetTop;
-      return;
-    }
-
-    const startTop = box.scrollTop;
-    const delta = targetTop - startTop;
-    if (Math.abs(delta) < 1) return;
-
-    const animDuration = 460;
-    const startTime = performance.now();
-    const step = (now: number) => {
-      const t = Math.min(1, (now - startTime) / animDuration);
-      const ease = 1 - Math.pow(1 - t, 4);
-      box.scrollTop = startTop + delta * ease;
-      if (t < 1) {
-        scrollAnimRef.current = requestAnimationFrame(step);
-      } else {
-        scrollAnimRef.current = null;
-      }
-    };
-    scrollAnimRef.current = requestAnimationFrame(step);
-  }, []);
+  const lyrics = useLyricsController({
+    isActive: isOpen,
+    isSyncVisible: isOpen && activeTab === 'lyrics',
+    playback,
+    queue,
+    onSeek,
+    onSyncScrubber: syncScrubberFromLyrics,
+  });
 
   // Sync time anchor on open, mount, or track change
   useEffect(() => {
@@ -286,8 +226,6 @@ export const FullscreenStage = ({
     lastServerPosRef.current = startPos;
     lastTickRef.current = performance.now();
     lastDisplayedSecRef.current = -1;
-    lineRefs.current = [];
-    setIsAutoScrollPaused(false);
     paintProgress(startPos, durationRef.current);
   }, [isOpen, rendered, currentVideoId, paintProgress]);
 
@@ -301,10 +239,9 @@ export const FullscreenStage = ({
         if (!isScrubbingRef.current) {
           paintProgress(tick.time_pos, tick.duration || durationRef.current);
         }
-        updateActiveLine();
       }
     });
-  }, [isOpen, paintProgress, updateActiveLine]);
+  }, [isOpen, paintProgress]);
 
   // 60fps scrubber interpolation while playing & focused
   useEffect(() => {
@@ -346,76 +283,6 @@ export const FullscreenStage = ({
     };
   }, [isOpen, isActuallyPlaying, isScrubbing, paintProgress]);
 
-  // Lyrics fetch
-  const fetchLyrics = useCallback(
-    async (customQ?: string) => {
-      const trk = currentTrackRef.current;
-      if (!currentVideoId || !trk) return;
-
-      const mySeq = ++reqSeqRef.current;
-      setLoadingLyrics(true);
-      setSyncedLines(null);
-      setPlainLyrics(null);
-      setLyricsSource(null);
-      setIsOfflineLrc(false);
-      setActiveLineIdx(0);
-      setIsAutoScrollPaused(false);
-      lineRefs.current = [];
-
-      try {
-        const res = await bridgeApi.getLyrics(
-          currentVideoId,
-          trk.title,
-          trk.artist,
-          trk.duration_s,
-          customQ
-        );
-        if (mySeq !== reqSeqRef.current) return;
-        setSyncedLines(res.synced && res.synced.length > 0 ? res.synced : null);
-        setPlainLyrics(res.lyrics || null);
-        setLyricsSource(res.source || null);
-        setIsOfflineLrc(Boolean(res.offline));
-      } catch {
-        if (mySeq !== reqSeqRef.current) return;
-        setSyncedLines(null);
-        setPlainLyrics(null);
-      } finally {
-        if (mySeq === reqSeqRef.current) setLoadingLyrics(false);
-      }
-    },
-    [currentVideoId]
-  );
-
-  useEffect(() => {
-    if (!isOpen || !currentVideoId) return;
-    setSyncOffset(0);
-    setShowSearch(false);
-    setManualQuery(
-      (currentTrackRef.current?.title || '').replace(/\s*[\(\[].*?[\)\]]/g, '').trim()
-    );
-    void fetchLyrics();
-  }, [isOpen, currentVideoId, fetchLyrics]);
-
-  useEffect(() => {
-    if (!isOpen || !syncedLines || syncedLines.length === 0) return;
-    updateActiveLine();
-    if (!isActuallyPlaying) return;
-    const interval = window.setInterval(updateActiveLine, 75);
-    return () => clearInterval(interval);
-  }, [isOpen, syncedLines, isActuallyPlaying, syncOffset, updateActiveLine]);
-
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'lyrics' || activeLineIdx < 0 || !syncedLines?.length) return;
-    if (isAutoScrollPausedRef.current) return;
-    scrollToLine(activeLineIdx);
-    return () => {
-      if (scrollAnimRef.current !== null) {
-        cancelAnimationFrame(scrollAnimRef.current);
-        scrollAnimRef.current = null;
-      }
-    };
-  }, [isOpen, activeTab, activeLineIdx, syncedLines, scrollToLine]);
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -431,10 +298,6 @@ export const FullscreenStage = ({
       if (resetDragTimerRef.current !== null) {
         clearTimeout(resetDragTimerRef.current);
         resetDragTimerRef.current = null;
-      }
-      if (scrollAnimRef.current !== null) {
-        cancelAnimationFrame(scrollAnimRef.current);
-        scrollAnimRef.current = null;
       }
     };
   }, []);
@@ -677,20 +540,6 @@ export const FullscreenStage = ({
       currentTrack.download_status === 'completed' ||
       dlState?.status === 'completed' ||
       !!currentTrack.local_path);
-
-  const plainLines = plainLyrics ? plainLyrics.split(/\r?\n/) : [];
-
-  const handleManualSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!manualQuery.trim()) return;
-    void fetchLyrics(manualQuery.trim());
-  };
-
-  const handleResumeAutoScroll = () => {
-    setIsAutoScrollPaused(false);
-    isAutoScrollPausedRef.current = false;
-    scrollToLine(activeLineIdx);
-  };
 
   return (
     <div
@@ -1048,60 +897,21 @@ export const FullscreenStage = ({
 
             {activeTab === 'lyrics' ? (
               <div className="flex items-center gap-1.5">
-                {isOfflineLrc && (
+                <LyricsSyncModeTabs controller={lyrics} />
+                {lyrics.isOfflineLrc && (
                   <span className="hidden lg:inline-flex items-center gap-1 text-[9px] font-mono uppercase px-2 py-0.5 rounded-full bg-[#34D399]/15 text-[#34D399] border border-[#34D399]/35">
                     <HardDrive size={9} />
                     .lrc
                   </span>
                 )}
-                {syncedLines && syncedLines.length > 0 && (
-                  <div className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/[0.10] text-[10px]">
-                    <span className="text-[#E6ECF8] font-mono tabular-nums mr-0.5">
-                      {syncOffset >= 0 ? `+${syncOffset.toFixed(1)}s` : `${syncOffset.toFixed(1)}s`}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSyncOffset((o) => Number((o - 0.5).toFixed(1)))}
-                      className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono"
-                    >
-                      -0.5s
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSyncOffset((o) => Number((o + 0.5).toFixed(1)))}
-                      className="px-1.5 py-0.5 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF] font-mono"
-                    >
-                      +0.5s
-                    </button>
-                    {syncOffset !== 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setSyncOffset(0)}
-                        title="Reset offset"
-                        className="p-1 rounded-full bg-white/[0.08] hover:bg-white/[0.18] text-[#A6B0CF] hover:text-white"
-                      >
-                        <RotateCcw size={10} />
-                      </button>
-                    )}
-                  </div>
+                {lyrics.syncOffsetMs !== 0 && (
+                  <span className="text-[10px] font-mono tabular-nums px-2 py-0.5 rounded-full bg-white/[0.08] text-[#E6ECF8] border border-white/[0.12]">
+                    {lyrics.syncOffsetMs > 0
+                      ? `+${lyrics.syncOffsetMs}ms`
+                      : `${lyrics.syncOffsetMs}ms`}
+                  </span>
                 )}
-                <button
-                  type="button"
-                  onClick={() => setShowSearch((s) => !s)}
-                  title="Search Lyrics Match"
-                  className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] rounded-full transition-colors"
-                >
-                  <Search size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void fetchLyrics()}
-                  disabled={loadingLyrics || !currentTrack}
-                  title="Reload Lyrics"
-                  className="p-1.5 text-[#A6B0CF] hover:text-white hover:bg-white/[0.10] disabled:opacity-35 rounded-full transition-colors"
-                >
-                  <RefreshCw size={14} className={loadingLyrics ? 'animate-spin' : ''} />
-                </button>
+                <LyricsOverflowMenu controller={lyrics} />
               </div>
             ) : (
               <div className="flex items-center gap-2">
@@ -1135,178 +945,13 @@ export const FullscreenStage = ({
             )}
           </div>
 
-          {activeTab === 'lyrics' && showSearch && (
-            <form
-              onSubmit={handleManualSubmit}
-              className="eh-popover-in flex-none px-5 py-2.5 border-b border-white/[0.08] bg-black/25 flex items-center gap-2"
-            >
-              <input
-                type="text"
-                value={manualQuery}
-                onChange={(e) => setManualQuery(e.target.value)}
-                placeholder="Search song name & artist on LRCLIB..."
-                className="flex-1 bg-black/45 border border-white/15 rounded-full px-4 py-1.5 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
-              />
-              <button
-                type="submit"
-                className="px-4 py-1.5 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] hover:opacity-90"
-              >
-                Search
-              </button>
-            </form>
-          )}
-
           {/* Tab Body */}
           {activeTab === 'lyrics' ? (
-            <div className="flex-1 min-h-0 relative overflow-hidden">
-              <div
-                ref={lyricsBoxRef}
-                onWheel={() => {
-                  if (syncedLines && syncedLines.length > 0) {
-                    isAutoScrollPausedRef.current = true;
-                    setIsAutoScrollPaused(true);
-                  }
-                  if (scrollAnimRef.current !== null) {
-                    cancelAnimationFrame(scrollAnimRef.current);
-                    scrollAnimRef.current = null;
-                  }
-                }}
-                onTouchMove={() => {
-                  if (syncedLines && syncedLines.length > 0) {
-                    isAutoScrollPausedRef.current = true;
-                    setIsAutoScrollPaused(true);
-                  }
-                }}
-                className="h-full overflow-y-auto no-scrollbar px-6 lg:px-12 lyrics-fade-mask"
-              >
-                {!currentTrack ? (
-                  <div className="h-full flex items-center justify-center text-xs text-[#646E8F]">
-                    Play any track to view synced lyrics.
-                  </div>
-                ) : loadingLyrics ? (
-                  <div className="h-full flex flex-col items-center justify-center gap-2.5 text-[#A6B0CF]">
-                    <Loader2 size={24} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
-                    <span className="text-xs">Syncing lyrics...</span>
-                  </div>
-                ) : syncedLines && syncedLines.length > 0 ? (
-                  <div
-                    className="space-y-4 max-w-xl mx-auto"
-                    style={{ paddingTop: '34%', paddingBottom: '46%' }}
-                  >
-                    {syncedLines.map((line, i) => {
-                      const dist = Math.abs(i - activeLineIdx);
-                      const isActive = i === activeLineIdx;
-                      const isPast = i < activeLineIdx;
-                      const opacity = isActive
-                        ? 1
-                        : dist === 1
-                        ? isPast
-                          ? 0.44
-                          : 0.68
-                        : dist === 2
-                        ? 0.34
-                        : 0.22;
-
-                      return (
-                        <button
-                          key={`${line.time}-${i}`}
-                          ref={(el) => {
-                            lineRefs.current[i] = el;
-                          }}
-                          type="button"
-                          onClick={() => {
-                            isAutoScrollPausedRef.current = false;
-                            setIsAutoScrollPaused(false);
-                            const target = Math.max(0, line.time - syncOffset);
-                            lastServerPosRef.current = target;
-                            lastTickRef.current = performance.now();
-                            setActiveLineIdx(i);
-                            paintProgress(target, durationRef.current);
-                            onSeek(target);
-                          }}
-                          style={{
-                            opacity,
-                            transform: isActive
-                              ? 'translate3d(8px, 0, 0) scale(1.06)'
-                              : 'translate3d(0, 0, 0) scale(0.95)',
-                            transformOrigin: 'left center',
-                            transition:
-                              'transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease',
-                            willChange: isActive || dist <= 2 ? 'transform, opacity' : 'auto',
-                          }}
-                          className={`block w-full text-left rounded-xl px-2 py-1 leading-snug text-2xl lg:text-[27px] font-bold tracking-[-0.015em] hover:!opacity-100 ${
-                            isActive ? 'text-white' : 'text-[#D6DDF5]'
-                          }`}
-                        >
-                          {line.text || '♪'}
-                        </button>
-                      );
-                    })}
-                    {lyricsSource && (
-                      <p className="pt-8 text-[11px] font-mono text-[#646E8F]">
-                        Synced via {lyricsSource}
-                      </p>
-                    )}
-                  </div>
-                ) : plainLines.length > 0 ? (
-                  <div className="space-y-3 py-10 max-w-xl mx-auto">
-                    {plainLines.map((line, i) => (
-                      <p
-                        key={i}
-                        className={
-                          line.trim()
-                            ? 'text-lg leading-relaxed font-medium text-[#F4F6FF]/85'
-                            : 'h-3'
-                        }
-                      >
-                        {line}
-                      </p>
-                    ))}
-                    {lyricsSource && (
-                      <p className="pt-6 text-[11px] font-mono text-[#646E8F] border-t border-white/[0.08]">
-                        Source: {lyricsSource}
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-[#A6B0CF] gap-3">
-                    <AlignLeft size={30} className="opacity-30" />
-                    <p className="text-sm font-semibold text-[#F4F6FF]">No lyrics found automatically</p>
-                    <form onSubmit={handleManualSubmit} className="flex items-center gap-2 w-full max-w-sm">
-                      <input
-                        type="text"
-                        value={manualQuery}
-                        onChange={(e) => setManualQuery(e.target.value)}
-                        placeholder="Search song name..."
-                        className="flex-1 bg-black/45 border border-white/15 rounded-full px-4 py-2 text-xs text-[#F4F6FF] placeholder-[#646E8F] focus:outline-none focus:border-white/35"
-                      />
-                      <button
-                        type="submit"
-                        className="px-4 py-2 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308]"
-                      >
-                        Find
-                      </button>
-                    </form>
-                  </div>
-                )}
-              </div>
-
-              {/* Floating Auto scroll pill */}
-              {isAutoScrollPaused && syncedLines && syncedLines.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleResumeAutoScroll}
-                  className="eh-popover-in absolute bottom-5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full ios-liquid-glass text-xs font-semibold text-white hover:scale-105 active:scale-95 transition-transform"
-                  style={{
-                    borderColor: 'rgba(var(--dynamic-accent-rgb), 0.55)',
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.65), 0 0 18px rgba(var(--dynamic-accent-rgb), 0.22)',
-                  }}
-                >
-                  <ArrowDown size={13} style={{ color: 'var(--dynamic-accent)' }} />
-                  <span>Auto scroll</span>
-                </button>
-              )}
-            </div>
+            <LyricsStageBody
+              variant="fullscreen"
+              controller={lyrics}
+              lyricsEdgeBlur={lyricsEdgeBlur}
+            />
           ) : (
             <div ref={queueListRef} className="flex-1 overflow-y-auto px-4 py-3 relative" style={{ contain: 'strict' }}>
               {upNextEntries.length === 0 ? (

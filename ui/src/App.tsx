@@ -30,6 +30,8 @@ import {
   isTauri,
   enterDynamicIslandWindow,
   exitDynamicIslandWindow,
+  closeToTrayWindow,
+  consumePendingEnterIsland,
   launchUpdateInstallerAndQuit,
   trimProcessMemory,
   waitForNextPaint,
@@ -161,6 +163,10 @@ export default function App() {
 
   const [cosmicMode, setCosmicMode] = useState<CosmicEffectsMode>('full');
   const [autoDownloadLiked, setAutoDownloadLiked] = useState<boolean>(false);
+  const [lyricsEdgeBlur, setLyricsEdgeBlur] = useState<boolean>(true);
+  const [isNarrowViewport, setIsNarrowViewport] = useState<boolean>(
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
   const [eqPreset, setEqPreset] = useState<EqPreset>('flat');
   const appliedEqRef = useRef<EqPreset | null>(null);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
@@ -213,6 +219,14 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-effects', cosmicMode);
   }, [cosmicMode]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const onChange = () => setIsNarrowViewport(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   const cosmicModeRef = useRef<CosmicEffectsMode>(cosmicMode);
   cosmicModeRef.current = cosmicMode;
@@ -405,6 +419,9 @@ export default function App() {
       if (typeof settingsObj.auto_download_liked === 'boolean') {
         setAutoDownloadLiked(settingsObj.auto_download_liked);
       }
+      if (typeof settingsObj.lyrics_edge_blur === 'boolean') {
+        setLyricsEdgeBlur(settingsObj.lyrics_edge_blur);
+      }
       const savedMode = settingsObj.cosmic_mode;
       if (savedMode === 'full' || savedMode === 'static' || savedMode === 'oled') {
         setCosmicMode(savedMode);
@@ -531,6 +548,14 @@ export default function App() {
     setAutoDownloadLiked((prev) => {
       const next = !prev;
       void api.setSettings({ auto_download_liked: next }).catch(() => {});
+      return next;
+    });
+  }, [api]);
+
+  const handleToggleLyricsEdgeBlur = useCallback(() => {
+    setLyricsEdgeBlur((prev) => {
+      const next = !prev;
+      void api.setSettings({ lyrics_edge_blur: next }).catch(() => {});
       return next;
     });
   }, [api]);
@@ -755,6 +780,7 @@ export default function App() {
   const handleSeek = useCallback(
     async (seconds: number) => {
       bridgeSocket.latestTimePos = seconds;
+      bridgeSocket.latestTickAt = performance.now();
       setPlayback((prev) => (prev ? { ...prev, time_pos: seconds } : null));
       try { await api.seek(seconds); } catch { /* Ignore */ }
     },
@@ -1171,6 +1197,49 @@ export default function App() {
     void handleExitIsland();
   }, [handleExitIsland]);
 
+  const handleCloseIslandToTrayAction = useCallback(() => {
+    void closeToTrayWindow();
+  }, []);
+
+  // Allow System Tray popup to launch or exit Dynamic Island directly
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    const unlisteners: (() => void)[] = [];
+
+    void consumePendingEnterIsland().then((shouldEnter) => {
+      if (active && shouldEnter && !isIslandModeRef.current) {
+        void handleEnterIsland();
+      }
+    });
+
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        Promise.all([
+          listen('orbit://enter-island', () => {
+            if (active && !isIslandModeRef.current) {
+              void handleEnterIsland();
+            }
+          }),
+          listen('orbit://exit-island', () => {
+            if (active && isIslandModeRef.current) {
+              void handleExitIsland();
+            }
+          }),
+        ])
+      )
+      .then((fns) => {
+        if (active) unlisteners.push(...fns);
+        else fns.forEach((fn) => fn());
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [handleEnterIsland, handleExitIsland]);
+
   const handleShellPointerDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (activeTab !== 'search') return;
@@ -1228,6 +1297,7 @@ export default function App() {
           onSeek={handleSeek}
           onToggleLike={handleToggleLike}
           onExitIsland={handleExitIslandAction}
+          onCloseToTray={handleCloseIslandToTrayAction}
         />
       )}
 
@@ -1237,12 +1307,12 @@ export default function App() {
           hideMainShell ? 'hidden' : 'flex'
         } ${restoreSeq > 0 ? 'eh-app-restore' : ''}`}
       >
-      {/* Subtle Top-Right Black Hole + Starfield (paused in Stage or Dynamic Island) */}
+      {/* Subtle Top-Right Black Hole + Starfield (paused in Stage, full-pane Lyrics, or Dynamic Island) */}
       <StarfieldBg
         mode={cosmicMode}
         absorbPulseKey={absorbPulseKey}
         isPlaying={playback?.state === 'playing' || playback?.state === 'buffering'}
-        paused={isFullscreenStageOpen || hideMainShell}
+        paused={isFullscreenStageOpen || hideMainShell || (rightDrawer === 'lyrics' && isNarrowViewport)}
       />
 
       {/* Outgoing Song Card Spiraling into the Black Hole (Full mode only, suppressed when Stage/Island active) */}
@@ -1431,6 +1501,7 @@ export default function App() {
             downloads={downloads}
             likedIds={likedIds}
             downloadedIds={downloadedIds}
+            lyricsEdgeBlur={lyricsEdgeBlur}
             onClose={handleCloseRightDrawer}
             onExpandFullscreen={handleOpenFullscreenFromLyrics}
             onOpenAlbum={handleOpenTrackAlbum}
@@ -1486,6 +1557,7 @@ export default function App() {
         downloads={downloads}
         likedIds={likedIds}
         downloadedIds={downloadedIds}
+        lyricsEdgeBlur={lyricsEdgeBlur}
         onClose={() => setIsFullscreenStageOpen(false)}
         onTogglePlay={handleTogglePlay}
         onNext={handleNext}
@@ -1528,6 +1600,8 @@ export default function App() {
         onChangeCosmicMode={handleChangeCosmicMode}
         autoDownloadLiked={autoDownloadLiked}
         onToggleAutoDownloadLiked={handleToggleAutoDownloadLiked}
+        lyricsEdgeBlur={lyricsEdgeBlur}
+        onToggleLyricsEdgeBlur={handleToggleLyricsEdgeBlur}
       />
 
       <UpdateAvailableModal

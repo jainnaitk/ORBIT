@@ -116,6 +116,8 @@ class QueueManager:
         self.max_consecutive_errors: int = 2
         self._persist_task: asyncio.Task[None] | None = None
         self._persist_dirty: bool = False
+        self._generation: int = 0
+        self._refill_seq: int = 0
 
     def record_error(self) -> int:
         """Record a playback or resolution error and increment consecutive error count."""
@@ -171,6 +173,7 @@ class QueueManager:
 
     def _notify(self) -> None:
         """Trigger queue changed callback and auto-persistence."""
+        self._generation += 1
         if self.auto_persist and self._db_path and self._db_path.is_file():
             try:
                 asyncio.get_running_loop()
@@ -334,12 +337,26 @@ class QueueManager:
         if effective_limit <= 0:
             return 0
 
+        self._refill_seq += 1
+        my_refill_seq = self._refill_seq
+        start_gen = self._generation
+        seed_id = curr.video_id
+
         ytm = self._ytm or YTMusicClient()
         try:
             recommended = await ytm.get_watch_radio(curr.video_id, limit=limit)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to fetch radio recommendations: %s", e)
             recommended = []
+
+        if (
+            not self.autoplay_radio
+            or self._generation != start_gen
+            or self._refill_seq != my_refill_seq
+            or self.current_track is None
+            or self.current_track.video_id != seed_id
+        ):
+            return 0
 
         existing_ids = {t.video_id for t in self.items}
         existing_titles = {_canonical_title(t.title) for t in self.items}
@@ -387,11 +404,28 @@ class QueueManager:
             if curr.album and curr.album.strip().lower() != curr.title.strip().lower():
                 queries.append(f"{curr.album} songs")
             for q in queries:
+                if (
+                    not self.autoplay_radio
+                    or self._generation != start_gen
+                    or self._refill_seq != my_refill_seq
+                    or self.current_track is None
+                    or self.current_track.video_id != seed_id
+                ):
+                    return 0
                 try:
                     extra = await ytm.search(q, filter_type="songs", limit=12)
                     scored_pool.extend(_score_and_filter(list(extra), base_priority=15.0))
                 except Exception as e:  # noqa: BLE001
                     logger.debug("Contextual radio fallback search failed for %r: %s", q, e)
+
+        if (
+            not self.autoplay_radio
+            or self._generation != start_gen
+            or self._refill_seq != my_refill_seq
+            or self.current_track is None
+            or self.current_track.video_id != seed_id
+        ):
+            return 0
 
         scored_pool.sort(key=lambda pair: pair[0], reverse=True)
 
@@ -471,8 +505,18 @@ class QueueManager:
 
         # Off mode: check autoplay radio refill
         if self.autoplay_radio:
+            gen_before = self._generation
+            seed_idx = self.current_index
+            seed_id = self.current_track.video_id if self.current_track else None
             added = await self.refill_radio()
-            if added > 0 and self.current_index + 1 < len(self.items):
+            if (
+                added > 0
+                and self.current_index == seed_idx
+                and self.current_track is not None
+                and self.current_track.video_id == seed_id
+                and self._generation == gen_before + 1
+                and self.current_index + 1 < len(self.items)
+            ):
                 self.current_index += 1
                 self._notify()
                 return self.current_track
@@ -585,6 +629,7 @@ class QueueManager:
                 self.shuffle = bool(row["shuffle"])
                 raw_repeat = row["repeat_mode"] or "off"
                 self.repeat_mode = raw_repeat if raw_repeat in VALID_REPEAT_MODES else "off"  # type: ignore[assignment]
+                self._generation += 1
                 return True
         except (sqlite3.Error, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             logger.warning("Failed to load queue state from database: %s", e)
@@ -608,6 +653,7 @@ class QueueManager:
                 self.shuffle = bool(row["shuffle"])
                 raw_repeat = row["repeat_mode"] or "off"
                 self.repeat_mode = raw_repeat if raw_repeat in VALID_REPEAT_MODES else "off"  # type: ignore[assignment]
+                self._generation += 1
                 return True
         except (sqlite3.Error, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             logger.warning("Failed to load queue state from database: %s", e)

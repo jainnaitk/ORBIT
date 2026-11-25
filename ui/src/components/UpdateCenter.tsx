@@ -17,6 +17,37 @@ function formatBytes(bytes?: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
 }
 
+/**
+ * Extract up to `maxItems` brief, human-readable summary lines from GitHub Release markdown.
+ */
+function extractBriefChangelog(notes?: string | null, maxItems = 3): string[] {
+  if (!notes) return [];
+  const trimmed = notes.trim();
+  if (!trimmed || /^no github releases published yet/i.test(trimmed)) return [];
+
+  const items: string[] = [];
+  for (const raw of trimmed.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^#{1,6}\s+/.test(line)) continue;
+    if (/^[-*_]{3,}$/.test(line)) continue;
+    if (/^(full changelog|sha256|checksum|https?:\/\/)/i.test(line)) continue;
+
+    const cleaned = line
+      .replace(/^[-*+•]\s+/, '')
+      .replace(/^\d+[.)]\s+/, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/[*_`~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleaned.length < 4) continue;
+    items.push(cleaned.length > 96 ? `${cleaned.slice(0, 93).trimEnd()}...` : cleaned);
+    if (items.length >= maxItems) break;
+  }
+  return items;
+}
+
 interface UpdateAvailableModalProps {
   isOpen: boolean;
   updateState: UpdateState | null;
@@ -149,6 +180,7 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
   const pct = Math.max(0, Math.min(100, updateState?.progress_pct ?? 0));
   const downloadedLabel = formatBytes(updateState?.downloaded_bytes);
   const totalLabel = formatBytes(updateState?.total_bytes || updateState?.asset_size);
+  const briefChangelog = extractBriefChangelog(updateState?.release_notes, 3);
 
   return (
     <>
@@ -258,6 +290,26 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
             </div>
           )}
         </div>
+
+        {briefChangelog.length > 0 && (
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.07] px-3 py-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.16em] text-[#8E99BA]">
+              <span>What&apos;s New</span>
+              <span style={{ color: 'var(--dynamic-accent)' }}>v{latestVersion}</span>
+            </div>
+            <ul className="space-y-1 text-[11px] text-[#CBD4EE] leading-snug">
+              {briefChangelog.map((entry, idx) => (
+                <li key={idx} className="flex items-start gap-2">
+                  <span
+                    className="w-1 h-1 rounded-full mt-1.5 flex-none"
+                    style={{ background: 'var(--dynamic-accent)' }}
+                  />
+                  <span className="min-w-0 break-words">{entry}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="flex items-center justify-between gap-2">
           {hasUpdate || isReady || isDownloading ? (

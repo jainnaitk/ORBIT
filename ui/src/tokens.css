@@ -562,3 +562,162 @@ input[type="range"].orbit-slider:hover::-webkit-slider-thumb {
   will-change: transform;
 }
 
+/* === PHASE B: NEXT-GEN SYNCED LYRICS STAGE (GPU-ONLY) === */
+@keyframes ehOrbitalPulse {
+  0%, 80%, 100% {
+    transform: scale3d(0.72, 0.72, 1);
+    opacity: 0.38;
+  }
+  40% {
+    transform: scale3d(1.18, 1.18, 1);
+    opacity: 1;
+  }
+}
+
+.eh-orbital-dot {
+  animation: ehOrbitalPulse 1.35s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.window-paused .eh-orbital-dot,
+[data-effects="static"] .eh-orbital-dot,
+[data-effects="oled"] .eh-orbital-dot {
+  animation-play-state: paused !important;
+}
+
+/* Word-by-word karaoke sweep (only active singing word computes gradient; sung/unsung are crisp solid colors) */
+.eh-lyr-word {
+  display: inline;
+}
+
+.eh-lyr-active-karaoke .eh-lyr-word {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    #FFFFFF 0%,
+    #FFFFFF var(--wp, 0%),
+    rgba(214, 221, 245, 0.34) calc(var(--wp, 0%) + 14%),
+    rgba(214, 221, 245, 0.34) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+.eh-lyr-active-karaoke .eh-lyr-word.sung {
+  background-image: none;
+  color: #FFFFFF;
+  -webkit-text-fill-color: #FFFFFF;
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.24);
+}
+
+.eh-lyr-active-karaoke .eh-lyr-word.unsung {
+  background-image: none;
+  color: rgba(214, 221, 245, 0.36);
+  -webkit-text-fill-color: rgba(214, 221, 245, 0.36);
+}
+
+/* Smooth line-level sweep fallback (LRCLIB / YouTube Music / Translated lines) */
+.eh-lyr-sweep-text {
+  display: inline;
+}
+
+.eh-lyr-active-sweep .eh-lyr-sweep-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    #FFFFFF 0%,
+    #FFFFFF var(--p, 0%),
+    rgba(214, 221, 245, 0.36) calc(var(--p, 0%) + 9%),
+    rgba(214, 221, 245, 0.36) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+.eh-lyric-blur-2 {
+  filter: blur(1.5px);
+}
+
+.eh-lyric-blur-3 {
+  filter: blur(2.5px);
+}
+
+.eh-lyric-line:hover {
+  opacity: 1 !important;
+  filter: none !important;
+}
+
+/* Real-Time 3D Smoked-Obsidian Liquid Glass Lyrics Loader (synced to Dynamic Accent Theme) */
+.eh-liquid-stage-loader {
+  background: transparent;
+  isolation: isolate;
+}
+
+.eh-liquid-canvas {
+  display: block;
+  filter: blur(1.4px) saturate(112%) contrast(1.04);
+  opacity: 0.92;
+  pointer-events: none;
+}
+
+/* Accent-synced optical glass glaze so fluid dissolves seamlessly into drawer & fullscreen stage */
+.eh-liquid-glass-glaze {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse 78% 64% at 14% 12%,
+      rgba(var(--dynamic-accent-rgb), 0.14) 0%,
+      transparent 58%
+    ),
+    radial-gradient(
+      ellipse 64% 58% at 86% 88%,
+      rgba(var(--dynamic-secondary-rgb), 0.12) 0%,
+      transparent 62%
+    ),
+    radial-gradient(
+      ellipse 78% 72% at 50% 50%,
+      transparent 22%,
+      rgba(6, 9, 18, 0.24) 74%,
+      rgba(6, 9, 18, 0.62) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(var(--dynamic-accent-rgb), 0.22),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  transition: box-shadow 350ms ease;
+}
+
+[data-effects="oled"] .eh-liquid-glass-glaze {
+  background:
+    radial-gradient(
+      ellipse 74% 68% at 50% 50%,
+      rgba(0, 0, 0, 0.18) 0%,
+      rgba(0, 0, 0, 0.62) 66%,
+      rgba(0, 0, 0, 0.94) 100%
+    );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Subtle Accent-Synced Smoked-Glass Status Capsule */
+.eh-liquid-status-pill {
+  background:
+    linear-gradient(
+      145deg,
+      rgba(var(--dynamic-accent-rgb), 0.14) 0%,
+      rgba(10, 14, 24, 0.72) 50%,
+      rgba(6, 9, 18, 0.84) 100%
+    );
+  border: 1px solid rgba(var(--dynamic-accent-rgb), 0.30);
+  backdrop-filter: blur(14px) saturate(145%);
+  -webkit-backdrop-filter: blur(14px) saturate(145%);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.65),
+    0 0 20px rgba(var(--dynamic-accent-rgb), 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  transition: border-color 350ms ease, box-shadow 350ms ease;
+}
+
+

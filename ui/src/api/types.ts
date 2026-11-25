@@ -77,15 +77,47 @@ export type RepeatMode = 'off' | 'all' | 'one';
 
 export type EqPreset = 'flat' | 'bass' | 'vocal' | 'night' | 'studio';
 
+export interface LyricWord {
+  time: number;
+  end: number;
+  text: string;
+}
+
 export interface LyricLine {
   time: number;
+  end?: number;
   text: string;
+  romanized?: string;
+  type?: 'line' | 'instrumental';
+  align?: 'left' | 'right';
+  duration?: number;
+  words?: LyricWord[];
+}
+
+export type LyricsSyncType = 'word' | 'line' | 'plain';
+
+export interface LyricVariant {
+  code: string;
+  label: string;
+  script: 'latin' | 'native';
+  synced: LyricLine[] | null;
+  lyrics: string | null;
+  sync_type?: LyricsSyncType;
+  source?: string | null;
 }
 
 export interface LyricsResponse {
   synced: LyricLine[] | null;
   lyrics: string | null;
   source: string | null;
+  sync_type?: LyricsSyncType;
+  credit?: string | null;
+  credit_url?: string | null;
+  submitter?: string | null;
+  submitter_url?: string | null;
+  songwriters?: string[];
+  original_lang?: string;
+  variants?: LyricVariant[];
   offline?: boolean;
 }
 

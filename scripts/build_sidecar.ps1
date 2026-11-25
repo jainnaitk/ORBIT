@@ -20,14 +20,22 @@ if (Test-Path "$Root\.venv\Scripts\python.exe") {
 
 Write-Host "Using Python: $python" -ForegroundColor Gray
 
-# Ensure pyinstaller is available
-$pyinstallerCheck = & $python -c "import PyInstaller" 2>&1
-if ($LASTEXITCODE -ne 0) {
+# Ensure pyinstaller is available (PS 5.1 turns native stderr into terminating error under Stop)
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('PyInstaller') else 1)" 2>$null
+$pyinstallerExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+
+if ($pyinstallerExit -ne 0) {
     Write-Host "PyInstaller not found. Installing via uv / pip..." -ForegroundColor Yellow
     if (Get-Command uv -ErrorAction SilentlyContinue) {
-        & uv pip install pyinstaller
+        & uv pip install --python $python pyinstaller
     } else {
         & $python -m pip install pyinstaller
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install PyInstaller into $python"
     }
 }
 

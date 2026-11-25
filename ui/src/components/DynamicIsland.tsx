@@ -12,6 +12,7 @@ import {
   Circle,
   Pin,
   PinOff,
+  X,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { OrbitLogo } from './OrbitLogo';
@@ -34,6 +35,7 @@ interface DynamicIslandProps {
   onSeek: (seconds: number) => void;
   onToggleLike: (track: Track) => void;
   onExitIsland: () => void;
+  onCloseToTray: () => void;
 }
 
 const AUTO_COLLAPSE_MS = 5000;
@@ -65,6 +67,7 @@ export const DynamicIsland = ({
   onSeek,
   onToggleLike,
   onExitIsland,
+  onCloseToTray,
 }: DynamicIslandProps) => {
   const [islandMode, setIslandMode] = useState<IslandWindowMode>('pill');
   const [isPinned, setIsPinned] = useState<boolean>(true);
@@ -294,6 +297,15 @@ export const DynamicIsland = ({
     void setDynamicIslandPinned(isPinnedRef.current);
   }, []);
 
+  const handleCloseToTray = useCallback(() => {
+    clearCollapseTimer();
+    clearMorphTimer();
+    pointerCleanupRef.current?.();
+    pointerCleanupRef.current = null;
+    switchingRef.current = true;
+    onCloseToTray();
+  }, [clearCollapseTimer, clearMorphTimer, onCloseToTray]);
+
   const handleSeekClick = (e: React.MouseEvent) => {
     if (!barRef.current || duration <= 0) return;
     const rect = barRef.current.getBoundingClientRect();
@@ -350,7 +362,7 @@ export const DynamicIsland = ({
     window.addEventListener('pointercancel', onCancel);
   };
 
-  const cardWidth = isCircle ? 58 : isCard ? 220 : 364;
+  const cardWidth = isCircle ? 58 : isCard ? 220 : 388;
   const cardHeight = isCircle ? 58 : isCard ? 220 : 126;
   const cardRadius = isCircle ? 9999 : isCard ? 26 : 28;
 
@@ -498,6 +510,14 @@ export const DynamicIsland = ({
                 >
                   <Maximize2 size={11} />
                 </button>
+                <button
+                  type="button"
+                  onClick={handleCloseToTray}
+                  title="Close to System Tray"
+                  className="w-7 h-7 rounded-full bg-black/45 hover:bg-[#E81123] border border-white/20 hover:border-[#FF4D8D]/60 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <X size={12} />
+                </button>
               </div>
             </div>
 
@@ -590,7 +610,7 @@ export const DynamicIsland = ({
             </div>
           </div>
         ) : (
-          <div className="w-[336px] h-full flex flex-col justify-between">
+          <div className="w-[360px] h-full flex flex-col justify-between">
             <div
               className="pointer-events-none absolute top-0 left-7 right-7 h-[1px]"
               style={{
@@ -686,6 +706,15 @@ export const DynamicIsland = ({
                   className="w-7 h-7 rounded-full bg-white/[0.12] hover:bg-white/[0.24] border border-white/20 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
                 >
                   <Maximize2 size={11} />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleCloseToTray}
+                  title="Close to System Tray"
+                  className="w-7 h-7 rounded-full bg-white/[0.12] hover:bg-[#E81123] border border-white/20 hover:border-[#FF4D8D]/60 text-[#DCE3FC] hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <X size={12} />
                 </button>
               </div>
             </div>

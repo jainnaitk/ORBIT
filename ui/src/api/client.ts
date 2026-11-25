@@ -199,6 +199,76 @@ export async function exitDynamicIslandWindow(saved: SavedWindowBounds | null): 
   }
 }
 
+export async function closeToTrayWindow(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('close_to_tray');
+  } catch (err) {
+    console.error('closeToTrayWindow failed:', err);
+  }
+}
+
+export async function hideTrayPopup(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('hide_tray_popup_cmd');
+  } catch {
+    // Ignore
+  }
+}
+
+export async function openMainFromTray(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_main_from_tray');
+  } catch {
+    // Ignore
+  }
+}
+
+export async function minimizeAppToTray(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('minimize_app_to_tray');
+  } catch {
+    // Ignore
+  }
+}
+
+export async function openIslandFromTray(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_island_from_tray');
+  } catch {
+    // Ignore
+  }
+}
+
+export async function consumePendingEnterIsland(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<boolean>('consume_pending_enter_island');
+  } catch {
+    return false;
+  }
+}
+
+export async function quitFromTray(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('quit_from_tray');
+  } catch {
+    // Ignore
+  }
+}
+
 export async function launchUpdateInstallerAndQuit(installerPath: string): Promise<boolean> {
   if (!isTauri() || !installerPath) return false;
   try {
@@ -250,16 +320,24 @@ export class BridgeApiClient {
 
   public async getLyrics(
     videoId: string,
-    title?: string,
-    artist?: string,
-    duration?: number,
-    customQuery?: string
+    options?: {
+      title?: string;
+      artist?: string;
+      duration?: number;
+      force?: boolean;
+      query?: string;
+    }
   ): Promise<LyricsResponse> {
     const params = new URLSearchParams();
-    if (title) params.set('title', title);
-    if (artist) params.set('artist', artist);
-    if (duration && duration > 0) params.set('duration', String(Math.round(duration)));
-    if (customQuery && customQuery.trim()) params.set('q', customQuery.trim());
+    if (options?.title) params.set('title', options.title);
+    if (options?.artist) params.set('artist', options.artist);
+    if (options?.duration && options.duration > 0) {
+      params.set('duration', String(Math.round(options.duration)));
+    }
+    if (options?.force) params.set('force', 'true');
+    if (options?.query && options.query.trim()) {
+      params.set('query', options.query.trim());
+    }
     const qs = params.toString();
     return this.request<LyricsResponse>(
       `/lyrics/${encodeURIComponent(videoId)}${qs ? '?' + qs : ''}`
@@ -564,6 +642,7 @@ export class BridgeSocketClient {
 
   public isConnected = false;
   public latestTimePos = 0;
+  public latestTickAt = 0;
   public latestDuration = 0;
   public latestTrackId: string | null = null;
 
@@ -611,11 +690,15 @@ export class BridgeSocketClient {
           const parsed = JSON.parse(event.data) as { event: keyof BridgeEventMap; data: any };
           if (parsed && parsed.event) {
             if (parsed.event === 'playback_tick' && parsed.data) {
-              if (typeof parsed.data.time_pos === 'number') this.latestTimePos = parsed.data.time_pos;
+              if (typeof parsed.data.time_pos === 'number') {
+                this.latestTimePos = parsed.data.time_pos;
+                this.latestTickAt = performance.now();
+              }
               if (typeof parsed.data.duration === 'number') this.latestDuration = parsed.data.duration;
               this.latestTrackId = parsed.data.current_track?.video_id ?? null;
             } else if (parsed.event === 'track_changed' && parsed.data) {
               this.latestTimePos = typeof parsed.data.time_pos === 'number' ? parsed.data.time_pos : 0;
+              this.latestTickAt = performance.now();
               const trk =
                 parsed.data.current_track !== undefined ? parsed.data.current_track : parsed.data.track ?? null;
               this.latestDuration =

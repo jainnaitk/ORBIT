@@ -7,25 +7,31 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
 };
 
 static SIDECAR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
-const ISLAND_PILL_W: f64 = 380.0;
+const ISLAND_PILL_W: f64 = 404.0;
 const ISLAND_PILL_H: f64 = 142.0;
 const ISLAND_CIRCLE_SIZE: f64 = 78.0;
 const ISLAND_CARD_SIZE: f64 = 236.0;
 const ISLAND_TOP_MARGIN: f64 = 20.0;
+const TRAY_POPUP_W: f64 = 248.0;
+const TRAY_POPUP_H: f64 = 248.0;
 
 static LAST_TRIM_MS: AtomicU64 = AtomicU64::new(0);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static TRAY_MOVE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PENDING_ENTER_ISLAND: AtomicBool = AtomicBool::new(false);
 static ISLAND_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ISLAND_PINNED: AtomicBool = AtomicBool::new(true);
+static LAST_TRAY_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_TRAY_SHOW_MS: AtomicU64 = AtomicU64::new(0);
+static TRAY_POPUP_GEN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -152,6 +158,16 @@ mod win_mem {
             u_flags: u32,
         ) -> i32;
         fn ShowWindow(hwnd: *mut c_void, n_cmd_show: i32) -> i32;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    }
+
+    pub fn bring_to_foreground(hwnd: *mut c_void) {
+        if hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 
     pub fn set_window_bounds_atomic(hwnd: *mut c_void, x: i32, y: i32, w: i32, h: i32) {
@@ -282,13 +298,17 @@ mod win_mem {
     }
 }
 
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn spawn_memory_trim() {
     #[cfg(windows)]
     {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = now_epoch_ms();
         let prev = LAST_TRIM_MS.load(Ordering::Relaxed);
         if now_ms.saturating_sub(prev) < 2000 {
             return;
@@ -298,6 +318,16 @@ fn spawn_memory_trim() {
             win_mem::trim_process_tree();
         });
     }
+}
+
+fn focus_window_foreground(window: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            win_mem::bring_to_foreground(hwnd.0 as *mut std::ffi::c_void);
+        }
+    }
+    let _ = window.set_focus();
 }
 
 fn apply_bounds_atomic(window: &WebviewWindow, x: i32, y: i32, w: i32, h: i32) {
@@ -579,6 +609,253 @@ fn exit_dynamic_island(
     Ok(())
 }
 
+/// Closes the main / Dynamic Island window straight to the system tray without quitting ORBIT.
+/// Async + off-thread dispatch avoids the Windows WebView2 synchronous IPC destruction deadlock.
+#[tauri::command]
+async fn close_to_tray(app: AppHandle) -> Result<(), String> {
+    ISLAND_ACTIVE.store(false, Ordering::SeqCst);
+    TRAY_MOVE_REQUESTED.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        if let Some(popup) = app.get_webview_window("tray_popup") {
+            if !popup.is_visible().unwrap_or(false) {
+                let _ = popup.destroy();
+            }
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_always_on_top(false);
+            let _ = window.set_skip_taskbar(false);
+            let _ = window.destroy();
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_tray_popup_cmd(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        hide_tray_popup(&app, false);
+    });
+}
+
+#[tauri::command]
+async fn open_main_from_tray(app: AppHandle) {
+    PENDING_ENTER_ISLAND.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        hide_tray_popup(&app, false);
+        ensure_main_window(&app);
+        if ISLAND_ACTIVE.load(Ordering::SeqCst) {
+            let _ = app.emit_to("main", "orbit://exit-island", ());
+        }
+    });
+}
+
+#[tauri::command]
+async fn minimize_app_to_tray(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        hide_tray_popup(&app, false);
+        if let Some(main_win) = app.get_webview_window("main") {
+            ISLAND_ACTIVE.store(false, Ordering::SeqCst);
+            TRAY_MOVE_REQUESTED.store(true, Ordering::SeqCst);
+            let _ = main_win.set_always_on_top(false);
+            let _ = main_win.set_skip_taskbar(false);
+            let _ = main_win.destroy();
+        }
+    });
+}
+
+#[tauri::command]
+async fn open_island_from_tray(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        hide_tray_popup(&app, false);
+        if let Some(main_win) = app.get_webview_window("main") {
+            let _ = main_win.unminimize();
+            let _ = main_win.show();
+            focus_window_foreground(&main_win);
+            if !ISLAND_ACTIVE.load(Ordering::SeqCst) {
+                let _ = app.emit_to("main", "orbit://enter-island", ());
+            }
+            return;
+        }
+        PENDING_ENTER_ISLAND.store(true, Ordering::SeqCst);
+        ensure_main_window(&app);
+    });
+}
+
+#[tauri::command]
+fn consume_pending_enter_island() -> bool {
+    PENDING_ENTER_ISLAND.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+async fn quit_from_tray(app: AppHandle) {
+    quit_application(&app);
+}
+
+fn compute_tray_popup_bounds(app: &AppHandle, click_x: i32, click_y: i32) -> (i32, i32, i32, i32) {
+    let mon = app
+        .available_monitors()
+        .ok()
+        .and_then(|mons| {
+            mons.into_iter().find(|m| {
+                let p = m.position();
+                let s = m.size();
+                click_x >= p.x
+                    && click_x < p.x + s.width as i32
+                    && click_y >= p.y
+                    && click_y < p.y + s.height as i32
+            })
+        })
+        .or_else(|| app.primary_monitor().ok().flatten());
+
+    let scale = mon.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+    let phys_w = (TRAY_POPUP_W * scale).round() as i32;
+    let phys_h = (TRAY_POPUP_H * scale).round() as i32;
+    let margin = (8.0 * scale).round() as i32;
+
+    if let Some(m) = mon {
+        let wa = m.work_area();
+        let min_x = wa.position.x + margin;
+        let max_x = wa.position.x + wa.size.width as i32 - phys_w - margin;
+        let min_y = wa.position.y + margin;
+        let max_y = wa.position.y + wa.size.height as i32 - phys_h - margin;
+
+        let mut x = click_x - phys_w / 2;
+        if max_x >= min_x {
+            x = x.clamp(min_x, max_x);
+        } else {
+            x = wa.position.x;
+        }
+
+        let wa_bottom = wa.position.y + wa.size.height as i32;
+        let raw_y = if click_y >= wa_bottom {
+            // Standard bottom taskbar: anchor cleanly right above taskbar
+            wa_bottom - phys_h - margin
+        } else if click_y < wa.position.y {
+            // Top taskbar
+            wa.position.y + margin
+        } else if click_y - phys_h - margin >= min_y {
+            // Tray overflow flyout / side taskbar: place above pointer if room
+            click_y - phys_h - margin
+        } else {
+            click_y + margin
+        };
+
+        let y = if max_y >= min_y {
+            raw_y.clamp(min_y, max_y)
+        } else {
+            wa.position.y
+        };
+        return (x, y, phys_w, phys_h);
+    }
+
+    (
+        (click_x - phys_w / 2).max(0),
+        (click_y - phys_h - margin).max(0),
+        phys_w,
+        phys_h,
+    )
+}
+
+fn hide_tray_popup(app: &AppHandle, destroy_immediately: bool) {
+    LAST_TRAY_HIDE_MS.store(now_epoch_ms(), Ordering::SeqCst);
+    let gen = TRAY_POPUP_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+
+    if let Some(popup) = app.get_webview_window("tray_popup") {
+        if destroy_immediately {
+            let _ = popup.destroy();
+            spawn_memory_trim();
+            return;
+        }
+        let _ = popup.hide();
+
+        // Release idle popup WebView2 after 15s (keeps BOTH active <= 185 MB and tray <= 60 MB)
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(15));
+            if TRAY_POPUP_GEN.load(Ordering::SeqCst) == gen {
+                if let Some(p) = app_clone.get_webview_window("tray_popup") {
+                    if !p.is_visible().unwrap_or(false) {
+                        if app_clone.get_webview_window("main").is_none() {
+                            TRAY_MOVE_REQUESTED.store(true, Ordering::SeqCst);
+                        }
+                        let _ = p.destroy();
+                        spawn_memory_trim();
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn toggle_tray_popup(app: &AppHandle, click_x: i32, click_y: i32) {
+    if let Some(popup) = app.get_webview_window("tray_popup") {
+        if popup.is_visible().unwrap_or(false) {
+            hide_tray_popup(app, false);
+            return;
+        }
+    }
+
+    // Prevent immediate reopen when right-clicking the tray icon dismissed focus right before MouseUp
+    if now_epoch_ms().saturating_sub(LAST_TRAY_HIDE_MS.load(Ordering::SeqCst)) < 250 {
+        return;
+    }
+
+    TRAY_POPUP_GEN.fetch_add(1, Ordering::SeqCst);
+    let (x, y, phys_w, phys_h) = compute_tray_popup_bounds(app, click_x, click_y);
+
+    if let Some(popup) = app.get_webview_window("tray_popup") {
+        let _ = popup.set_shadow(false);
+        apply_bounds_smooth(&popup, x, y, phys_w, phys_h);
+        enforce_topmost(&popup, true);
+        let _ = popup.show();
+        focus_window_foreground(&popup);
+        LAST_TRAY_SHOW_MS.store(now_epoch_ms(), Ordering::SeqCst);
+        return;
+    }
+
+    let builder = WebviewWindowBuilder::new(app, "tray_popup", WebviewUrl::default())
+        .title("ORBIT Tray")
+        .inner_size(TRAY_POPUP_W, TRAY_POPUP_H)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .visible(false)
+        .additional_browser_args(LOW_MEM_BROWSER_ARGS);
+
+    match builder.build() {
+        Ok(win) => {
+            disable_window_transitions(&win);
+            let _ = win.set_shadow(false);
+            let app_clone = app.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    if now_epoch_ms().saturating_sub(LAST_TRAY_SHOW_MS.load(Ordering::SeqCst)) > 350
+                    {
+                        hide_tray_popup(&app_clone, false);
+                    }
+                }
+            });
+            apply_bounds_smooth(&win, x, y, phys_w, phys_h);
+            enforce_topmost(&win, true);
+            let _ = win.show();
+            focus_window_foreground(&win);
+            // Stamp AFTER cold WebView2 build + show + focus so overflow-flyout blur never auto-hides it
+            LAST_TRAY_SHOW_MS.store(now_epoch_ms(), Ordering::SeqCst);
+        }
+        Err(e) => {
+            eprintln!("Failed to create tray popup window: {e}");
+        }
+    }
+}
+
 const LOW_MEM_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,Translate,SpareRendererForSitePerProcess,msEdgeShopping,msEdgeSidebar,msEdgeCollections,InterestFeedContentSuggestions,AudioServiceOutOfProcess --disable-background-networking --disable-component-update --disable-extensions --disable-sync --disable-3d-apis --disk-cache-size=4194304 --media-cache-size=4194304 --renderer-process-limit=1 --js-flags=--max-old-space-size=64";
 
 fn should_close_to_tray() -> bool {
@@ -610,30 +887,6 @@ fn should_close_to_tray() -> bool {
         }
     }
     true
-}
-
-fn send_bridge_request(path: &str, method: &str) {
-    let bridge_cfg = match get_bridge_config() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Failed to get bridge config for tray action {path}: {e}");
-            return;
-        }
-    };
-
-    let url = format!("http://{}:{}{}", bridge_cfg.host, bridge_cfg.port, path);
-    let token = bridge_cfg.token;
-    let method = method.to_string();
-
-    tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::new();
-        let req = match method.as_str() {
-            "POST" => client.post(&url),
-            "GET" => client.get(&url),
-            _ => client.post(&url),
-        };
-        let _ = req.header("X-Bridge-Token", token).send().await;
-    });
 }
 
 #[cfg(windows)]
@@ -877,11 +1130,19 @@ fn terminate_sidecar() {
 
 fn quit_application(app: &AppHandle) {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    TRAY_MOVE_REQUESTED.store(false, Ordering::SeqCst);
 
     let bridge_cfg = get_bridge_config().ok();
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        if let Some(popup) = app_handle.get_webview_window("tray_popup") {
+            let _ = popup.hide();
+        }
+        if let Some(win) = app_handle.get_webview_window("main") {
+            let _ = win.hide();
+        }
         if let Some(cfg) = bridge_cfg {
             let client = reqwest::Client::new();
             let url = format!("http://{}:{}/shutdown", cfg.host, cfg.port);
@@ -894,7 +1155,7 @@ fn quit_application(app: &AppHandle) {
                     .await;
             });
         }
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(120));
         terminate_sidecar();
         app_handle.exit(0);
     });
@@ -904,7 +1165,7 @@ fn quit_application(app: &AppHandle) {
 /// and cleanly shuts down ORBIT + sidecar so NSIS never hits a running-process lock
 /// or gets terminated when the Job Object closes.
 #[tauri::command]
-fn launch_update_installer(app: AppHandle, installer_path: String) -> Result<(), String> {
+async fn launch_update_installer(app: AppHandle, installer_path: String) -> Result<(), String> {
     let updates_dir = get_bridge_path()
         .parent()
         .map(|p| p.join("updates"))
@@ -936,14 +1197,18 @@ fn launch_update_installer(app: AppHandle, installer_path: String) -> Result<(),
         .unwrap_or(canon_target);
 
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
 
     let bridge_cfg = get_bridge_config().ok();
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(15));
+        if let Some(popup) = app_handle.get_webview_window("tray_popup") {
+            let _ = popup.hide();
+        }
+        if let Some(win) = app_handle.get_webview_window("main") {
+            let _ = win.hide();
+        }
         // 1. Gracefully stop backend & sidecar BEFORE launching NSIS so zero files are locked
         if let Some(cfg) = bridge_cfg {
             let client = reqwest::Client::new();
@@ -1021,10 +1286,11 @@ fn attach_window_close_handler(window: &WebviewWindow) {
 }
 
 pub fn ensure_main_window(app: &AppHandle) {
+    hide_tray_popup(app, false);
     if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.unminimize();
         let _ = main_win.show();
-        let _ = main_win.set_focus();
+        focus_window_foreground(&main_win);
         return;
     }
 
@@ -1045,7 +1311,7 @@ pub fn ensure_main_window(app: &AppHandle) {
             disable_window_transitions(&win);
             attach_window_close_handler(&win);
             let _ = win.show();
-            let _ = win.set_focus();
+            focus_window_foreground(&win);
         }
         Err(e) => {
             eprintln!("Failed to recreate main window: {e}");
@@ -1114,13 +1380,7 @@ fn main() {
                 let _ = main_win.set_focus();
             }
 
-            // Create Windows System Tray
-            let open_i = MenuItem::with_id(app, "open", "Open ORBIT", true, None::<&str>)?;
-            let play_pause_i = MenuItem::with_id(app, "play_pause", "Play / Pause", true, None::<&str>)?;
-            let next_i = MenuItem::with_id(app, "next", "Next Track", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&open_i, &play_pause_i, &next_i, &quit_i])?;
-
+            // Create Windows System Tray (Left-click opens ORBIT; Right-click opens custom Art-Card popup)
             let tray_icon = app
                 .default_window_icon()
                 .cloned()
@@ -1130,25 +1390,6 @@ fn main() {
             let _tray = TrayIconBuilder::with_id("orbit_tray")
                 .icon(tray_icon)
                 .tooltip("ORBIT")
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| {
-                    match event.id().as_ref() {
-                        "open" => {
-                            ensure_main_window(app);
-                        }
-                        "play_pause" => {
-                            send_bridge_request("/player/toggle", "POST");
-                        }
-                        "next" => {
-                            send_bridge_request("/player/next", "POST");
-                        }
-                        "quit" => {
-                            quit_application(app);
-                        }
-                        _ => {}
-                    }
-                })
                 .on_tray_icon_event(|tray, event| {
                     match event {
                         TrayIconEvent::Click {
@@ -1162,6 +1403,19 @@ fn main() {
                         } => {
                             let app = tray.app_handle();
                             ensure_main_window(app);
+                        }
+                        TrayIconEvent::Click {
+                            button: MouseButton::Right,
+                            button_state: MouseButtonState::Up,
+                            position,
+                            ..
+                        } => {
+                            let app = tray.app_handle();
+                            toggle_tray_popup(
+                                app,
+                                position.x.round() as i32,
+                                position.y.round() as i32,
+                            );
                         }
                         _ => {}
                     }
@@ -1186,11 +1440,18 @@ fn main() {
             resize_dynamic_island,
             set_island_pinned,
             exit_dynamic_island,
+            close_to_tray,
+            hide_tray_popup_cmd,
+            open_main_from_tray,
+            minimize_app_to_tray,
+            open_island_from_tray,
+            consume_pending_enter_island,
+            quit_from_tray,
             launch_update_installer
         ])
         .build(tauri::generate_context!())
         .expect("error while building metrolite application")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| {
             match event {
                 tauri::RunEvent::WindowEvent {
                     label,
@@ -1199,11 +1460,21 @@ fn main() {
                 } => {
                     if label == "main" {
                         ISLAND_ACTIVE.store(false, Ordering::SeqCst);
+                        if let Some(popup) = app_handle.get_webview_window("tray_popup") {
+                            if !popup.is_visible().unwrap_or(false) {
+                                let _ = popup.destroy();
+                            }
+                        }
+                        spawn_memory_trim();
+                    } else if label == "tray_popup" {
                         spawn_memory_trim();
                     }
                 }
                 tauri::RunEvent::ExitRequested { api, .. } => {
-                    if should_close_to_tray() && !EXIT_REQUESTED.load(Ordering::SeqCst) {
+                    let tray_move = TRAY_MOVE_REQUESTED.swap(false, Ordering::SeqCst);
+                    if (should_close_to_tray() || tray_move)
+                        && !EXIT_REQUESTED.load(Ordering::SeqCst)
+                    {
                         api.prevent_exit();
                         spawn_memory_trim();
                     }

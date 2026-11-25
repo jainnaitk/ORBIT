@@ -289,7 +289,15 @@ class BridgeController:
         self.ws_manager.broadcast_sync("playback_tick", tick_data, self.loop)
 
     def _on_player_track_ended(self, reason: str = "eof") -> None:
-        self.run_coro_threadsafe(self.handle_track_ended(reason=reason))
+        expected_play_seq = self._play_seq
+        expected_load_seq = getattr(self.player, "_load_seq", None)
+        self.run_coro_threadsafe(
+            self.handle_track_ended(
+                reason=reason,
+                expected_play_seq=expected_play_seq,
+                expected_load_seq=expected_load_seq,
+            )
+        )
 
     def _on_queue_changed(self) -> None:
         q_data = self.get_queue_data()
@@ -636,9 +644,13 @@ class BridgeController:
 
         remaining = len(self.queue.items) - 1 - self.queue.current_index
         if self.queue.autoplay_radio and remaining < 3 and self.queue.current_track is not None:
+            my_seq = self._play_seq
+
             async def _refill() -> None:
                 with suppress(asyncio.CancelledError, Exception):
                     added = await self.queue.refill_radio(limit=14)
+                    if my_seq != self._play_seq:
+                        return
                     if added > 0:
                         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
                     nxt_preview = self.queue.next_track_preview
@@ -670,8 +682,7 @@ class BridgeController:
         curr_id = curr_preloaded.video_id if curr_preloaded is not None else None
 
         if preview_id is None:
-            if self._preload_task and not self._preload_task.done():
-                self._preload_task.cancel()
+            self._cancel_pending_prefetch()
             if curr_id is not None:
                 if hasattr(self.player, "clear_preloaded_next"):
                     self.player.clear_preloaded_next()
@@ -682,8 +693,7 @@ class BridgeController:
         if preview_id == curr_id:
             return
 
-        if self._preload_task and not self._preload_task.done():
-            self._preload_task.cancel()
+        self._cancel_pending_prefetch()
         if hasattr(self.player, "clear_preloaded_next"):
             self.player.clear_preloaded_next()
         else:
@@ -702,8 +712,13 @@ class BridgeController:
                 self._preload_task = self.spawn_task(_repreload(preview))
 
     def get_playback_tick_data(self) -> dict[str, Any]:
+        live_pos = (
+            self.player.get_live_time_pos()
+            if hasattr(self.player, "get_live_time_pos")
+            else self.player.time_pos
+        )
         return {
-            "time_pos": round(self.player.time_pos, 2),
+            "time_pos": round(live_pos, 3),
             "duration": round(self.player.duration, 2),
             "state": self.player.state,
             "volume": self.player.volume,
@@ -724,10 +739,23 @@ class BridgeController:
             else None,
         }
 
-    async def handle_track_ended(self, reason: str = "eof") -> None:
+    async def handle_track_ended(
+        self,
+        reason: str = "eof",
+        expected_play_seq: int | None = None,
+        expected_load_seq: int | None = None,
+    ) -> None:
         if reason in _NON_COMPLETION_REASONS:
             return
+        if expected_play_seq is not None and expected_play_seq != self._play_seq:
+            return
+        if (
+            expected_load_seq is not None
+            and expected_load_seq != getattr(self.player, "_load_seq", expected_load_seq)
+        ):
+            return
 
+        self._cancel_pending_prefetch()
         self._play_seq += 1
         req_seq = self._play_seq
 
@@ -811,48 +839,12 @@ class BridgeController:
         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
 
     async def toggle_play_pause(self) -> dict[str, Any]:
-        if self.player.state == "playing":
+        if self.player.state in ("playing", "buffering"):
             self.player.pause()
-        elif self.player.state == "paused":
-            self.player.resume()
-        else:
-            self.player.reset_errors()
-            self.queue.reset_errors()
-            self._cancel_pending_prefetch()
-            self._play_seq += 1
-            req_seq = self._play_seq
-            curr = self.queue.current_track
-            if curr:
-                try:
-                    await self.player.load_and_play(curr)
-                    if req_seq != self._play_seq:
-                        return self.get_playback_tick_data()
-                    await self._after_play_started(curr)
-                    await self.ws_manager.broadcast(
-                        "track_changed",
-                        self._track_changed_payload(curr),
-                    )
-                except Exception as e:  # noqa: BLE001
-                    if req_seq != self._play_seq:
-                        return self.get_playback_tick_data()
-                    logger.error("Failed to start track on toggle_play_pause: %s", e)
-                    self.player.record_error()
-                    self.queue.consecutive_errors = self.player.consecutive_errors
-                    await self.ws_manager.broadcast(
-                        "error",
-                        {
-                            "message": f"Failed to play track: {e}",
-                            "video_id": curr.video_id,
-                            "consecutive_errors": self.player.consecutive_errors,
-                        },
-                    )
-                    return {
-                        "error": str(e),
-                        "status": "error",
-                        "video_id": curr.video_id,
-                        **self.get_playback_tick_data(),
-                    }
-        return self.get_playback_tick_data()
+            tick_data = self.get_playback_tick_data()
+            await self.ws_manager.broadcast("playback_tick", tick_data)
+            return tick_data
+        return await self.play()
 
     async def play(
         self, video_id: str | None = None, track: Track | None = None
@@ -1399,18 +1391,29 @@ def create_app(
         artist: str | None = Query(default=None),
         duration: int | None = Query(default=None),
         q: str | None = Query(default=None),
+        query: str | None = Query(default=None),
+        force: bool = Query(default=False),
     ) -> dict[str, Any]:
         """Fetch time-synced lyrics via LRCLIB + YouTube Music native timestamps."""
         from metrolite.ytm.lyrics import resolve_lyrics
 
         valid_vid = _require_valid_video_id(video_id)
+        eff_duration = duration
+        if (
+            ctrl.player.current_track is not None
+            and ctrl.player.current_track.video_id == valid_vid
+            and ctrl.player.duration
+            and ctrl.player.duration > 10
+        ):
+            eff_duration = round(ctrl.player.duration)
         return await resolve_lyrics(
             ctrl.ytm,
             video_id=valid_vid,
             title=title,
             artist=artist,
-            duration=duration,
-            custom_query=q,
+            duration=eff_duration,
+            query=query or q,
+            force=force,
             db_path=ctrl.db_path,
         )
 
@@ -1519,12 +1522,7 @@ def create_app(
     @app.post("/player/toggle", dependencies=[Depends(verify_token)])
     async def player_toggle() -> dict[str, Any]:
         """Toggle playback between playing and paused."""
-        if ctrl.player.state == "playing":
-            ctrl.player.pause()
-            tick_data = ctrl.get_playback_tick_data()
-            await ctrl.ws_manager.broadcast("playback_tick", tick_data)
-            return tick_data
-        return await ctrl.play()
+        return await ctrl.toggle_play_pause()
 
     @app.post("/player/next", dependencies=[Depends(verify_token)])
     async def player_next() -> dict[str, Any]:
@@ -1591,6 +1589,7 @@ def create_app(
         action = body.action.lower()
 
         if action == "set":
+            ctrl._cancel_pending_prefetch()
             tracks = body.items or ([body.item] if body.item else [])
             ctrl.queue.set_queue(tracks, start_index=body.start_index)
             if body.auto_play and ctrl.queue.current_track:
@@ -1621,6 +1620,7 @@ def create_app(
                 ctrl.queue.move(body.from_idx, body.to_idx)
 
         elif action == "clear":
+            ctrl._cancel_pending_prefetch()
             ctrl.queue.clear()
 
         elif action == "shuffle":
@@ -1647,6 +1647,8 @@ def create_app(
                 if body.autoplay_radio is not None
                 else not ctrl.queue.autoplay_radio
             )
+            if not new_radio and ctrl._radio_task and not ctrl._radio_task.done():
+                ctrl._radio_task.cancel()
             ctrl.queue.autoplay_radio = new_radio
             ctrl.queue._notify()
 

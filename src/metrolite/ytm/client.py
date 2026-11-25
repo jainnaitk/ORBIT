@@ -341,9 +341,335 @@ class YTMusicClient:
         """Fetch album details and normalized track list."""
         return await asyncio.to_thread(self._run_sync, self._get_album_sync, browse_id)
 
+    def _parse_artist_browse_fallback(self, channel_id: str) -> dict[str, Any]:
+        """Parse raw YouTube Music browse JSON when ytmusicapi.get_artist fails (e.g. KeyError 'header').
+
+        Handles YouTube Music's twoColumnBrowseResultsRenderer (where header lives inside the
+        left column and shelves live in secondaryContents), musicVisualHeaderRenderer,
+        musicResponsiveHeaderRenderer, and header-less promo carousels.
+        """
+        send_req = getattr(self._yt, "_send_request", None)
+        if not callable(send_req):
+            return {}
+
+        cid = channel_id.removeprefix("MPLA").strip()
+        if not cid:
+            return {}
+
+        response = send_req("browse", {"browseId": cid})
+        if not isinstance(response, dict):
+            return {}
+
+        def _runs_text(obj: Any) -> str:
+            if isinstance(obj, str):
+                return obj.strip()
+            if isinstance(obj, dict):
+                if isinstance(obj.get("simpleText"), str):
+                    return obj["simpleText"].strip()
+                runs = obj.get("runs")
+                if isinstance(runs, list):
+                    return "".join(
+                        str(r.get("text") or "") for r in runs if isinstance(r, dict)
+                    ).strip()
+            return ""
+
+        def _extract_thumbs(obj: Any) -> list[dict[str, Any]]:
+            if not isinstance(obj, dict):
+                return []
+            for path in (
+                ("thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"),
+                ("foregroundThumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"),
+                ("thumbnail", "thumbnails"),
+                ("thumbnails",),
+            ):
+                cur: Any = obj
+                for key in path:
+                    if isinstance(cur, dict) and key in cur:
+                        cur = cur[key]
+                    else:
+                        cur = None
+                        break
+                if isinstance(cur, list) and cur:
+                    return [t for t in cur if isinstance(t, dict) and t.get("url")]
+            return []
+
+        # 1. Collect content sections from both single-column and two-column layouts
+        sections: list[dict[str, Any]] = []
+        contents = response.get("contents")
+        if isinstance(contents, dict):
+            single = contents.get("singleColumnBrowseResultsRenderer")
+            if isinstance(single, dict):
+                for tab in single.get("tabs") or []:
+                    if not isinstance(tab, dict):
+                        continue
+                    tr = tab.get("tabRenderer")
+                    if not isinstance(tr, dict):
+                        continue
+                    sl = (tr.get("content") or {}).get("sectionListRenderer")
+                    if isinstance(sl, dict) and isinstance(sl.get("contents"), list):
+                        sections.extend(
+                            s for s in sl["contents"] if isinstance(s, dict)
+                        )
+
+            two_col = contents.get("twoColumnBrowseResultsRenderer")
+            if isinstance(two_col, dict):
+                for tab in two_col.get("tabs") or []:
+                    if not isinstance(tab, dict):
+                        continue
+                    tr = tab.get("tabRenderer")
+                    if not isinstance(tr, dict):
+                        continue
+                    sl = (tr.get("content") or {}).get("sectionListRenderer")
+                    if isinstance(sl, dict) and isinstance(sl.get("contents"), list):
+                        sections.extend(
+                            s for s in sl["contents"] if isinstance(s, dict)
+                        )
+                sec_sl = (two_col.get("secondaryContents") or {}).get("sectionListRenderer")
+                if isinstance(sec_sl, dict) and isinstance(sec_sl.get("contents"), list):
+                    sections.extend(
+                        s for s in sec_sl["contents"] if isinstance(s, dict)
+                    )
+
+        # 2. Locate artist header (top-level response['header'] OR inside two-column left pane)
+        header_obj: dict[str, Any] = {}
+        header_keys = (
+            "musicImmersiveHeaderRenderer",
+            "musicVisualHeaderRenderer",
+            "musicResponsiveHeaderRenderer",
+            "musicDetailHeaderRenderer",
+        )
+        raw_header = response.get("header")
+        if isinstance(raw_header, dict):
+            for hk in header_keys:
+                if isinstance(raw_header.get(hk), dict):
+                    header_obj = raw_header[hk]
+                    break
+            if not header_obj:
+                for val in raw_header.values():
+                    if isinstance(val, dict) and (val.get("title") or val.get("thumbnail")):
+                        header_obj = val
+                        break
+
+        if not header_obj:
+            for sec in sections:
+                for hk in header_keys:
+                    if isinstance(sec.get(hk), dict):
+                        header_obj = sec[hk]
+                        break
+                if header_obj:
+                    break
+
+        micro = (
+            (response.get("microformat") or {}).get("microformatDataRenderer")
+            if isinstance(response.get("microformat"), dict)
+            else {}
+        )
+        if not isinstance(micro, dict):
+            micro = {}
+
+        name = _runs_text(header_obj.get("title")) or str(micro.get("title") or "").strip()
+        if name.endswith(" - YouTube Music"):
+            name = name[: -len(" - YouTube Music")].strip()
+        if name.endswith(" - Topic"):
+            name = name[: -len(" - Topic")].strip()
+
+        thumbnails = _extract_thumbs(header_obj) or _extract_thumbs(micro)
+
+        sub_btn = (
+            (header_obj.get("subscriptionButton") or {}).get("subscribeButtonRenderer")
+            if isinstance(header_obj.get("subscriptionButton"), dict)
+            else {}
+        )
+        if not isinstance(sub_btn, dict):
+            sub_btn = {}
+        subscribers = (
+            _runs_text(sub_btn.get("subscriberCountText"))
+            or _runs_text(sub_btn.get("longSubscriberCountText"))
+            or _runs_text(header_obj.get("monthlyListenerCount"))
+            or None
+        )
+        if subscribers:
+            subscribers = subscribers.replace(" monthly audience", "").strip() or None
+
+        description: str | None = _runs_text(header_obj.get("description")) or None
+        views: str | None = None
+        for sec in sections:
+            desc_shelf = sec.get("musicDescriptionShelfRenderer")
+            if isinstance(desc_shelf, dict):
+                shelf_desc = _runs_text(desc_shelf.get("description"))
+                if shelf_desc:
+                    description = shelf_desc
+                shelf_sub = _runs_text(desc_shelf.get("subheader"))
+                if shelf_sub:
+                    views = shelf_sub
+                break
+        if not description and isinstance(micro.get("description"), str):
+            desc_m = micro["description"].strip()
+            if desc_m and not desc_m.lower().startswith("share your videos"):
+                description = desc_m
+
+        artist: dict[str, Any] = {
+            "channelId": str(sub_btn.get("channelId") or cid),
+            "name": name or None,
+            "description": description,
+            "subscribers": subscribers,
+            "views": views,
+            "thumbnails": thumbnails,
+            "songs": {"browseId": None, "results": []},
+        }
+
+        # 3. Parse top songs shelf (`musicShelfRenderer`)
+        try:
+            from ytmusicapi.parsers.playlists import parse_playlist_items
+        except Exception:  # noqa: BLE001
+            parse_playlist_items = None
+
+        for sec in sections:
+            shelf = sec.get("musicShelfRenderer")
+            if not isinstance(shelf, dict):
+                continue
+            title_obj = shelf.get("title")
+            if isinstance(title_obj, dict):
+                runs = title_obj.get("runs")
+                if isinstance(runs, list) and runs and isinstance(runs[0], dict):
+                    bid = (
+                        (runs[0].get("navigationEndpoint") or {})
+                        .get("browseEndpoint", {})
+                        .get("browseId")
+                    )
+                    if bid:
+                        artist["songs"]["browseId"] = str(bid).strip()
+            if not artist["songs"]["browseId"]:
+                bot_bid = (
+                    (shelf.get("bottomEndpoint") or {})
+                    .get("browseEndpoint", {})
+                    .get("browseId")
+                )
+                if bot_bid:
+                    artist["songs"]["browseId"] = str(bot_bid).strip()
+
+            raw_items = shelf.get("contents")
+            if isinstance(raw_items, list) and raw_items and parse_playlist_items is not None:
+                try:
+                    parsed = parse_playlist_items(raw_items)
+                    if parsed:
+                        artist["songs"]["results"] = parsed
+                        break
+                except Exception:  # noqa: BLE001
+                    # Per-item salvage if one row has an unexpected shape
+                    salvaged: list[dict[str, Any]] = []
+                    for item in raw_items:
+                        try:
+                            chunk = parse_playlist_items([item])
+                            if chunk:
+                                salvaged.extend(chunk)
+                        except Exception as item_err:  # noqa: BLE001
+                            logger.debug("Skipped malformed artist song item: %s", item_err)
+                            continue
+                    if salvaged:
+                        artist["songs"]["results"] = salvaged
+                        break
+
+        # 4. Parse carousels (Albums, Singles & EPs, Videos, Related) tolerating missing headers
+        try:
+            parser_obj = getattr(self._yt, "parser", None)
+            if parser_obj is not None and hasattr(parser_obj, "parse_channel_contents"):
+                parsed_carousels = parser_obj.parse_channel_contents(sections)
+                if isinstance(parsed_carousels, dict):
+                    artist.update(parsed_carousels)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Artist carousel parser fallback skipped for %s: %s", cid, e)
+
+        # Manual lightweight carousel fallback if parser_obj missed albums/singles
+        if "albums" not in artist or "singles" not in artist:
+            for sec in sections:
+                car = sec.get("musicCarouselShelfRenderer")
+                if not isinstance(car, dict):
+                    continue
+                hdr = (
+                    (car.get("header") or {}).get("musicCarouselShelfBasicHeaderRenderer")
+                    if isinstance(car.get("header"), dict)
+                    else None
+                )
+                if not isinstance(hdr, dict):
+                    continue
+                cat_title = _runs_text(hdr.get("title")).lower()
+                target_key: str | None = None
+                if "album" in cat_title and "albums" not in artist:
+                    target_key = "albums"
+                elif ("single" in cat_title or "ep" in cat_title) and "singles" not in artist:
+                    target_key = "singles"
+                if not target_key:
+                    continue
+
+                rel_items: list[dict[str, Any]] = []
+                for entry in car.get("contents") or []:
+                    mtr = entry.get("musicTwoRowItemRenderer") if isinstance(entry, dict) else None
+                    if not isinstance(mtr, dict):
+                        continue
+                    rel_title = _runs_text(mtr.get("title"))
+                    rel_bid = (
+                        (mtr.get("navigationEndpoint") or {})
+                        .get("browseEndpoint", {})
+                        .get("browseId")
+                    )
+                    if not rel_bid:
+                        t_runs = (mtr.get("title") or {}).get("runs")
+                        if isinstance(t_runs, list) and t_runs and isinstance(t_runs[0], dict):
+                            rel_bid = (
+                                (t_runs[0].get("navigationEndpoint") or {})
+                                .get("browseEndpoint", {})
+                                .get("browseId")
+                            )
+                    if not rel_title or not rel_bid:
+                        continue
+                    sub_txt = _runs_text(mtr.get("subtitle"))
+                    year = None
+                    rel_type = "Single" if target_key == "singles" else "Album"
+                    for part in [p.strip() for p in sub_txt.split("•") if p.strip()]:
+                        if part.isdigit() and len(part) == 4:
+                            year = part
+                        elif part.lower() in ("album", "single", "ep"):
+                            rel_type = part
+                    rel_items.append(
+                        {
+                            "title": rel_title,
+                            "browseId": str(rel_bid).strip(),
+                            "year": year,
+                            "type": rel_type,
+                            "thumbnails": _extract_thumbs(mtr.get("thumbnailRenderer") or mtr),
+                        }
+                    )
+                if rel_items:
+                    artist[target_key] = {"browseId": None, "results": rel_items}
+
+        return artist
+
+    def _fetch_artist_data_sync(self, channel_id: str) -> dict[str, Any]:
+        """Fetch raw artist dict via ytmusicapi.get_artist with resilient raw-browse fallback."""
+        try:
+            data = self._yt.get_artist(channel_id)
+            if isinstance(data, dict) and data:
+                return dict(data)
+        except Exception as e:  # noqa: BLE001
+            fallback = self._parse_artist_browse_fallback(channel_id)
+            if fallback and (
+                fallback.get("name")
+                or (fallback.get("songs") or {}).get("results")
+                or (fallback.get("albums") or {}).get("results")
+                or (fallback.get("singles") or {}).get("results")
+            ):
+                logger.info(
+                    "Recovered artist %s via resilient browse parser after get_artist error: %s",
+                    channel_id,
+                    e,
+                )
+                return fallback
+            logger.warning("get_artist failed for %s: %s", channel_id, e)
+        return {}
+
     def _get_artist_sync(self, channel_id: str) -> dict[str, Any]:
-        data = self._yt.get_artist(channel_id)
-        artist_dict = dict(data)
+        artist_dict = self._fetch_artist_data_sync(channel_id)
         if "songs" in artist_dict and isinstance(artist_dict["songs"], dict):
             songs_data = dict(artist_dict["songs"])
             if "results" in songs_data and isinstance(songs_data["results"], list):
@@ -364,31 +690,52 @@ class YTMusicClient:
         resolved_id = (channel_id or "").strip() or None
         search_name = (name or "").split(",")[0].strip()
 
-        if not resolved_id and search_name:
+        def _search_artist_hit(query_name: str, exclude_id: str | None = None) -> dict[str, Any] | None:
+            if not query_name:
+                return None
             try:
-                artist_hits = self._yt.search(query=search_name, filter="artists", limit=6) or []
+                artist_hits = self._yt.search(query=query_name, filter="artists", limit=6) or []
             except Exception:  # noqa: BLE001
-                artist_hits = []
-            lower_target = search_name.lower()
+                return None
+            lower_target = query_name.lower()
             best_hit = None
             for hit in artist_hits:
                 if not isinstance(hit, dict) or not hit.get("browseId"):
                     continue
+                bid = str(hit["browseId"]).strip()
+                if exclude_id and bid == exclude_id:
+                    continue
                 hit_name = str(hit.get("artist") or hit.get("title") or "").strip().lower()
                 if hit_name == lower_target:
-                    best_hit = hit
-                    break
+                    return hit
                 if best_hit is None:
                     best_hit = hit
+            return best_hit
+
+        search_hit_thumb: str | None = None
+        if not resolved_id and search_name:
+            best_hit = _search_artist_hit(search_name)
             if best_hit and best_hit.get("browseId"):
                 resolved_id = str(best_hit["browseId"]).strip()
+                search_hit_thumb = extract_thumbnail_url(best_hit.get("thumbnails"))
 
         artist_data: dict[str, Any] = {}
         if resolved_id:
-            try:
-                artist_data = dict(self._yt.get_artist(resolved_id) or {})
-            except Exception as e:  # noqa: BLE001
-                logger.warning("get_artist failed for %s: %s", resolved_id, e)
+            artist_data = self._fetch_artist_data_sync(resolved_id)
+
+        # If a raw Topic/channel ID yielded no browse data, try resolving canonical artist browseId by name
+        if (
+            not artist_data
+            and search_name
+        ):
+            alt_hit = _search_artist_hit(search_name, exclude_id=resolved_id)
+            if alt_hit and alt_hit.get("browseId"):
+                alt_id = str(alt_hit["browseId"]).strip()
+                search_hit_thumb = search_hit_thumb or extract_thumbnail_url(alt_hit.get("thumbnails"))
+                alt_data = self._fetch_artist_data_sync(alt_id)
+                if alt_data:
+                    resolved_id = alt_id
+                    artist_data = alt_data
 
         display_name = (
             str(artist_data.get("name") or "").strip()
@@ -398,7 +745,7 @@ class YTMusicClient:
         description = str(artist_data.get("description") or "").strip() or None
         subscribers = str(artist_data.get("subscribers") or "").strip() or None
         views = str(artist_data.get("views") or "").strip() or None
-        thumbnail_url = extract_thumbnail_url(artist_data.get("thumbnails"))
+        thumbnail_url = extract_thumbnail_url(artist_data.get("thumbnails")) or search_hit_thumb
 
         popular_tracks: list[Track] = []
         seen_popular: set[str] = set()
@@ -508,6 +855,43 @@ class YTMusicClient:
 
         albums = _parse_releases("albums", "Album")
         singles = _parse_releases("singles", "Single")
+
+        # Supplement Albums/Singles via search when browse returned a partial Topic/channel page
+        if not albums and not singles and display_name and display_name != "Unknown Artist":
+            try:
+                album_hits = self._yt.search(query=display_name, filter="albums", limit=12) or []
+            except Exception:  # noqa: BLE001
+                album_hits = []
+            artist_lc = display_name.lower()
+            seen_rel_ids: set[str] = set()
+            for raw_rel in album_hits:
+                if not isinstance(raw_rel, dict):
+                    continue
+                bid = str(raw_rel.get("browseId") or "").strip()
+                title = str(raw_rel.get("title") or "").strip()
+                if not bid or not title or bid in seen_rel_ids:
+                    continue
+                rel_artist = extract_artist(raw_rel.get("artists") or raw_rel.get("artist"))
+                rel_artist_id = extract_artist_id(raw_rel.get("artists"))
+                if artist_lc not in rel_artist.lower() and not (
+                    resolved_id and rel_artist_id == resolved_id
+                ):
+                    continue
+                seen_rel_ids.add(bid)
+                rel_type = str(raw_rel.get("type") or "Album").strip()
+                entry = {
+                    "browse_id": bid,
+                    "title": title,
+                    "year": str(raw_rel.get("year") or "").strip() or None,
+                    "type": rel_type,
+                    "thumbnail_url": extract_thumbnail_url(raw_rel.get("thumbnails")),
+                    "artist": display_name,
+                    "artist_id": resolved_id,
+                }
+                if rel_type.lower() in ("single", "ep"):
+                    singles.append(entry)
+                else:
+                    albums.append(entry)
 
         return {
             "channel_id": resolved_id,
