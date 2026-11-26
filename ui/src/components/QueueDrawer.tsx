@@ -1,21 +1,48 @@
 import { memo, useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { X, Trash2, Radio, GripVertical, Play } from 'lucide-react';
+import {
+  X,
+  Trash2,
+  Radio,
+  GripVertical,
+  Play,
+  Plus,
+  Shuffle,
+  Repeat,
+  Repeat1,
+} from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import {
+  TrackContextMenu,
+  isTrackDownloaded,
+  useTrackContextMenu,
+} from './TrackContextMenu';
 import { cancelTrackPreload, scheduleTrackPreload } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
-import type { QueueData, Track } from '../api/types';
+import type { DownloadProgress, QueueData, Track } from '../api/types';
 
 interface QueueDrawerProps {
   isOpen: boolean;
   queue: QueueData | null;
+  downloads?: Record<string, DownloadProgress>;
+  downloadedIds?: Set<string>;
   onClose: () => void;
   onPlayQueueItem: (track: Track, index: number) => void;
   onRemoveQueueItem: (index: number) => void;
   onMoveQueueItem: (fromIdx: number, toIdx: number) => void;
+  onPromoteQueueItem?: (index: number) => void;
   onClearQueue: () => void;
   onToggleAutoplayRadio: () => void;
+  onToggleShuffle?: () => void;
+  onCycleRepeat?: () => void;
+  onAddNext?: (track: Track) => void;
+  onAppendQueue?: (track: Track) => void;
+  onOpenArtist?: (artistName: string, artistId?: string | null) => void;
+  onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
+  onOpenAddToPlaylist?: (track: Track) => void;
+  onDownload?: (track: Track) => void;
+  onDeleteDownload?: (track: Track) => void;
 }
 
 interface FloatingGhost {
@@ -25,23 +52,65 @@ interface FloatingGhost {
   y: number;
 }
 
+type QueueFlatRow =
+  | { type: 'header'; id: string; label: string; count: number; isRadio: boolean }
+  | { type: 'item'; track: Track; origIndex: number; isRadio: boolean };
+
+const HEADER_HEIGHT = 30;
 const ROW_HEIGHT = 54;
+
+function findSectionDropRowIndex(
+  rows: QueueFlatRow[],
+  contentY: number,
+  isRadioSection: boolean
+): number | null {
+  let accY = 0;
+  let bestIdx: number | null = null;
+  let bestDist = Infinity;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const h = r.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT;
+    if (r.type === 'item' && r.isRadio === isRadioSection) {
+      const center = accY + h / 2;
+      const dist = Math.abs(contentY - center);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    accY += h;
+  }
+  return bestIdx;
+}
 
 export const QueueDrawer = memo(({
   isOpen,
   queue,
+  downloads = {},
+  downloadedIds,
   onClose,
   onPlayQueueItem,
   onRemoveQueueItem,
   onMoveQueueItem,
+  onPromoteQueueItem,
   onClearQueue,
   onToggleAutoplayRadio,
+  onToggleShuffle,
+  onCycleRepeat,
+  onAddNext,
+  onAppendQueue,
+  onOpenArtist,
+  onOpenAlbum,
+  onOpenAddToPlaylist,
+  onDownload,
+  onDeleteDownload,
 }: QueueDrawerProps) => {
   const [rendered, setRendered] = useState<boolean>(isOpen);
   const [visible, setVisible] = useState<boolean>(false);
   const [dragVisIdx, setDragVisIdx] = useState<number | null>(null);
   const [overVisIdx, setOverVisIdx] = useState<number | null>(null);
   const [ghost, setGhost] = useState<FloatingGhost | null>(null);
+  const { menuState, menuRef, openMenuAt, closeMenu } = useTrackContextMenu();
 
   useEffect(() => {
     if (isOpen) {
@@ -104,19 +173,48 @@ export const QueueDrawer = memo(({
   const currentTrack = queue?.current_track || null;
   const currentIndex = queue?.current_index ?? 0;
   const autoplayRadio = queue?.autoplay_radio ?? true;
+  const repeatMode = queue?.repeat_mode || 'off';
 
-  // Exclude the currently playing song from UP NEXT so it never duplicates NOW ORBITING
-  const upNextEntries = useMemo(() => {
-    if (!items.length) return [];
-    return items
+  // Split upcoming items cleanly into Up Next (User Queue) & Suggested (Radio)
+  const { upNextEntries, flatRows } = useMemo(() => {
+    if (!items.length) return { upNextEntries: [] as { track: Track; origIndex: number }[], flatRows: [] as QueueFlatRow[] };
+    const filtered = items
       .map((track, origIndex) => ({ track, origIndex }))
       .filter(({ origIndex }) => !(currentTrack && origIndex === currentIndex));
+    const userItems = filtered.filter(({ track }) => track.source !== 'radio');
+    const radioItems = filtered.filter(({ track }) => track.source === 'radio');
+    const rows: QueueFlatRow[] = [];
+    if (userItems.length > 0) {
+      rows.push({
+        type: 'header',
+        id: 'hdr-user',
+        label: 'Up Next (Queue)',
+        count: userItems.length,
+        isRadio: false,
+      });
+      for (const u of userItems) {
+        rows.push({ type: 'item', track: u.track, origIndex: u.origIndex, isRadio: false });
+      }
+    }
+    if (radioItems.length > 0) {
+      rows.push({
+        type: 'header',
+        id: 'hdr-radio',
+        label: 'Suggested (Radio)',
+        count: radioItems.length,
+        isRadio: true,
+      });
+      for (const r of radioItems) {
+        rows.push({ type: 'item', track: r.track, origIndex: r.origIndex, isRadio: true });
+      }
+    }
+    return { upNextEntries: filtered, flatRows: rows };
   }, [items, currentIndex, currentTrack]);
 
   const rowVirtualizer = useVirtualizer({
-    count: rendered ? upNextEntries.length : 0,
+    count: rendered ? flatRows.length : 0,
     getScrollElement: () => listRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: (i) => (flatRows[i]?.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT),
     overscan: 6,
   });
 
@@ -129,19 +227,28 @@ export const QueueDrawer = memo(({
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const recalcOverIndex = (clientY: number, itemCount: number) => {
+  const recalcOverIndex = (
+    clientY: number,
+    rowsSnapshot: QueueFlatRow[],
+    isRadioSection: boolean
+  ) => {
     const listEl = listRef.current;
-    if (!listEl || itemCount <= 0) return;
+    if (!listEl || rowsSnapshot.length <= 0) return;
     const rect = listEl.getBoundingClientRect();
     const contentY = clientY - rect.top + listEl.scrollTop;
-    const idx = Math.max(0, Math.min(itemCount - 1, Math.floor(contentY / ROW_HEIGHT)));
-    if (idx !== overVisRef.current) {
+    const idx = findSectionDropRowIndex(rowsSnapshot, contentY, isRadioSection);
+    if (idx !== null && idx !== overVisRef.current) {
       overVisRef.current = idx;
       setOverVisIdx(idx);
     }
   };
 
-  const handleRowPointerDown = (e: React.PointerEvent, visIdx: number, track: Track) => {
+  const handleRowPointerDown = (
+    e: React.PointerEvent,
+    visIdx: number,
+    track: Track,
+    isRadioSection: boolean
+  ) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
 
@@ -152,8 +259,7 @@ export const QueueDrawer = memo(({
     const startY = e.clientY;
     const rowLeft = listRect ? listRect.left : 0;
     const rowWidth = listRect ? listRect.width : 320;
-    const entriesSnapshot = upNextEntries;
-    const totalCount = entriesSnapshot.length;
+    const rowsSnapshot = flatRows;
 
     dragVisRef.current = visIdx;
     overVisRef.current = visIdx;
@@ -196,7 +302,7 @@ export const QueueDrawer = memo(({
         const prevTop = el.scrollTop;
         el.scrollTop += delta;
         if (el.scrollTop !== prevTop) {
-          recalcOverIndex(py, totalCount);
+          recalcOverIndex(py, rowsSnapshot, isRadioSection);
         }
       }
       autoScrollRafRef.current = requestAnimationFrame(runAutoScroll);
@@ -224,7 +330,7 @@ export const QueueDrawer = memo(({
         y: moveEvent.clientY - ROW_HEIGHT * 0.5,
       });
 
-      recalcOverIndex(moveEvent.clientY, totalCount);
+      recalcOverIndex(moveEvent.clientY, rowsSnapshot, isRadioSection);
     };
 
     const onPointerUp = () => {
@@ -243,12 +349,15 @@ export const QueueDrawer = memo(({
       setOverVisIdx(null);
       setGhost(null);
 
-      if (wasDrag && fromV !== null && toV !== null && fromV !== toV) {
-        const fromOrig = entriesSnapshot[fromV]?.origIndex;
-        const toOrig = entriesSnapshot[toV]?.origIndex;
-        if (fromOrig !== undefined && toOrig !== undefined && fromOrig !== toOrig) {
-          onMoveQueueItem(fromOrig, toOrig);
-        }
+      const fromRow = fromV !== null ? rowsSnapshot[fromV] : undefined;
+      const toRow = toV !== null ? rowsSnapshot[toV] : undefined;
+      if (
+        wasDrag &&
+        fromRow?.type === 'item' &&
+        toRow?.type === 'item' &&
+        fromRow.origIndex !== toRow.origIndex
+      ) {
+        onMoveQueueItem(fromRow.origIndex, toRow.origIndex);
       }
       if (wasDrag) {
         if (resetDragTimerRef.current !== null) clearTimeout(resetDragTimerRef.current);
@@ -267,6 +376,11 @@ export const QueueDrawer = memo(({
 
   const getRowShiftY = (visIdx: number): number => {
     if (dragVisIdx === null || overVisIdx === null || visIdx === dragVisIdx) return 0;
+    const row = flatRows[visIdx];
+    const dragRow = flatRows[dragVisIdx];
+    if (!row || row.type !== 'item' || !dragRow || dragRow.type !== 'item' || row.isRadio !== dragRow.isRadio) {
+      return 0;
+    }
     if (dragVisIdx < overVisIdx && visIdx > dragVisIdx && visIdx <= overVisIdx) return -ROW_HEIGHT;
     if (dragVisIdx > overVisIdx && visIdx >= overVisIdx && visIdx < dragVisIdx) return ROW_HEIGHT;
     return 0;
@@ -375,7 +489,7 @@ export const QueueDrawer = memo(({
         </div>
 
         <div ref={listRef} className="flex-1 overflow-y-auto relative" style={{ contain: 'strict' }}>
-          {upNextEntries.length === 0 ? (
+          {flatRows.length === 0 ? (
             <div className="p-6 text-center text-xs text-[#7A84A6] italic">
               {currentTrack
                 ? autoplayRadio
@@ -393,18 +507,52 @@ export const QueueDrawer = memo(({
             >
               {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                 const visIdx = virtualRow.index;
-                const entry = upNextEntries[visIdx];
-                if (!entry) return null;
-                const { track: item, origIndex } = entry;
+                const row = flatRows[visIdx];
+                if (!row) return null;
+
+                if (row.type === 'header') {
+                  return (
+                    <div
+                      key={row.id}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: `${HEADER_HEIGHT}px`,
+                        transform: `translate3d(0, ${virtualRow.start}px, 0)`,
+                      }}
+                      className="flex items-center justify-between px-4 bg-white/[0.03] border-b border-white/[0.07] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#8E99BA]"
+                    >
+                      <span>{row.label}</span>
+                      <span className="font-mono tabular-nums text-[9.5px] text-[#7A84A6]">
+                        {row.count}
+                      </span>
+                    </div>
+                  );
+                }
+
+                const { track: item, origIndex, isRadio } = row;
                 const isDragged = dragVisIdx === visIdx;
                 const shiftY = getRowShiftY(visIdx);
 
                 return (
                   <div
                     key={`${item.video_id}-${origIndex}`}
-                    onPointerDown={(e) => handleRowPointerDown(e, visIdx, item)}
+                    onPointerDown={(e) => handleRowPointerDown(e, visIdx, item, isRadio)}
                     onMouseEnter={() => scheduleTrackPreload(item)}
                     onMouseLeave={() => cancelTrackPreload(item.video_id)}
+                    onContextMenu={(e) => {
+                      if (!onAddNext) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openMenuAt(
+                        item,
+                        e.clientX,
+                        e.clientY,
+                        isTrackDownloaded(item, downloadedIds, downloads)
+                      );
+                    }}
                     onClick={() => {
                       if (didDragRef.current) return;
                       onPlayQueueItem(item, origIndex);
@@ -423,7 +571,7 @@ export const QueueDrawer = memo(({
                     }}
                     className={`flex items-center px-3 gap-2.5 border-b border-white/[0.05] hover:bg-white/[0.08] group cursor-grab active:cursor-grabbing ${
                       isDragged ? 'opacity-15' : ''
-                    }`}
+                    } ${isRadio ? 'opacity-85 hover:opacity-100' : ''}`}
                   >
                     <div className="w-4 flex-none flex items-center justify-center text-[#646E8F] group-hover:text-[#D4DCFA]">
                       <GripVertical size={13} />
@@ -446,6 +594,20 @@ export const QueueDrawer = memo(({
                       <div className="text-[10px] text-[#A6B0CF] truncate">{item.artist}</div>
                     </div>
 
+                    {isRadio && onPromoteQueueItem && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPromoteQueueItem(origIndex);
+                        }}
+                        title="Add to Up Next Queue"
+                        className="p-1 text-[#A6B0CF] hover:text-white hover:bg-white/[0.12] rounded-full flex-none transition-colors"
+                      >
+                        <Plus size={13} />
+                      </button>
+                    )}
+
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -466,7 +628,70 @@ export const QueueDrawer = memo(({
             </div>
           )}
         </div>
+
+        {(onToggleShuffle || onCycleRepeat || items.length > 0) && (
+          <div className="flex-none px-3 py-2 border-t border-white/[0.08] bg-white/[0.025] flex items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-1.5">
+              {onToggleShuffle && (
+                <button
+                  type="button"
+                  onClick={onToggleShuffle}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border transition-colors ${
+                    queue?.shuffle
+                      ? 'bg-white/[0.12] border-white/20 text-white'
+                      : 'border-white/[0.08] text-[#9AA5C4] hover:text-white hover:bg-white/[0.06]'
+                  }`}
+                  style={queue?.shuffle ? { color: 'var(--dynamic-accent)' } : undefined}
+                >
+                  <Shuffle size={12} />
+                  <span>Shuffle</span>
+                </button>
+              )}
+              {onCycleRepeat && (
+                <button
+                  type="button"
+                  onClick={onCycleRepeat}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border transition-colors ${
+                    repeatMode !== 'off'
+                      ? 'bg-white/[0.12] border-white/20 text-white'
+                      : 'border-white/[0.08] text-[#9AA5C4] hover:text-white hover:bg-white/[0.06]'
+                  }`}
+                  style={repeatMode !== 'off' ? { color: 'var(--dynamic-accent)' } : undefined}
+                >
+                  {repeatMode === 'one' ? <Repeat1 size={12} /> : <Repeat size={12} />}
+                  <span className="capitalize">{repeatMode === 'off' ? 'Repeat' : repeatMode}</span>
+                </button>
+              )}
+            </div>
+
+            {items.length > 0 && (
+              <button
+                type="button"
+                onClick={onClearQueue}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[#9AA5C4] hover:text-[#FF6B9E] hover:bg-[#FF4D8D]/10 transition-colors"
+              >
+                <Trash2 size={11} />
+                <span>Clear</span>
+              </button>
+            )}
+          </div>
+        )}
       </aside>
+
+      {onAddNext && (
+        <TrackContextMenu
+          menuState={menuState}
+          menuRef={menuRef}
+          onClose={closeMenu}
+          onAddNext={onAddNext}
+          onAppendQueue={onAppendQueue}
+          onOpenArtist={onOpenArtist}
+          onOpenAlbum={onOpenAlbum}
+          onOpenAddToPlaylist={onOpenAddToPlaylist}
+          onDownload={onDownload}
+          onDeleteDownload={onDeleteDownload}
+        />
+      )}
 
       {ghost &&
         createPortal(

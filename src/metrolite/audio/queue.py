@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from metrolite.config import get_config
+from metrolite.library.manager import artist_matches_blocked
 from metrolite.store.db import (
     get_connection,
     get_default_db_path,
@@ -97,6 +98,7 @@ class QueueManager:
         autoplay_radio: bool | None = None,
         auto_persist: bool = False,
         on_queue_changed: Callable[[], None] | None = None,
+        blocked_artists_fn: Callable[[], set[str]] | None = None,
     ) -> None:
         cfg = get_config()
         self._db_path = Path(db_path) if db_path is not None else get_default_db_path()
@@ -106,6 +108,7 @@ class QueueManager:
         )
         self.auto_persist = auto_persist
         self._on_queue_changed = on_queue_changed
+        self.blocked_artists_fn = blocked_artists_fn
 
         self.items: list[Track] = []
         self._original_items: list[Track] = []
@@ -190,30 +193,46 @@ class QueueManager:
             except Exception as e:  # noqa: BLE001
                 logger.error("Error in on_queue_changed callback: %s", e)
 
+    @staticmethod
+    def _tag_track(track: Track, source: Literal["user", "radio"] = "user") -> Track:
+        """Ensure queue tracks carry a valid provenance source ('user' or 'radio')."""
+        effective: Literal["user", "radio"] = track.source if track.source in ("user", "radio") else source
+        if track.source == effective:
+            return track
+        return track.model_copy(update={"source": effective})
+
     def set_queue(self, tracks: list[Track], start_index: int = 0) -> None:
         """Replace the entire queue with new tracks."""
         self.consecutive_errors = 0
-        self.items = list(tracks)
-        self._original_items = list(tracks)
+        tagged = [self._tag_track(t, "user") for t in tracks]
+        self.items = list(tagged)
+        self._original_items = list(tagged)
         self.current_index = max(0, min(start_index, len(self.items) - 1)) if self.items else 0
         if self.shuffle and len(self.items) > 1:
             self._apply_shuffle()
         self._notify()
 
     def append(self, tracks: Track | list[Track]) -> None:
-        """Append one or more tracks to the end of the queue."""
-        new_tracks = [tracks] if isinstance(tracks, Track) else list(tracks)
-        if not new_tracks:
+        """Append one or more tracks to the end of the queue (inserting before radio tail if any)."""
+        raw_tracks = [tracks] if isinstance(tracks, Track) else list(tracks)
+        if not raw_tracks:
             return
-        self.items.extend(new_tracks)
+        new_tracks = [self._tag_track(t, "user") for t in raw_tracks]
+        # Place explicit user appends after existing explicit tracks (ahead of suggested radio)
+        insert_idx = self.current_index + 1 if self.items else 0
+        while insert_idx < len(self.items) and self.items[insert_idx].source != "radio":
+            insert_idx += 1
+        for off, t in enumerate(new_tracks):
+            self.items.insert(insert_idx + off, t)
         self._original_items.extend(new_tracks)
         self._notify()
 
     def add_next(self, tracks: Track | list[Track]) -> None:
         """Insert track(s) immediately after the current playing track."""
-        new_tracks = [tracks] if isinstance(tracks, Track) else list(tracks)
-        if not new_tracks:
+        raw_tracks = [tracks] if isinstance(tracks, Track) else list(tracks)
+        if not raw_tracks:
             return
+        new_tracks = [self._tag_track(t, "user").model_copy(update={"source": "user"}) for t in raw_tracks]
         if not self.items:
             self.items.extend(new_tracks)
             self._original_items.extend(new_tracks)
@@ -224,6 +243,29 @@ class QueueManager:
                 self.items.insert(insert_idx + offset, t)
             self._original_items.extend(new_tracks)
         self._notify()
+
+    def promote(self, idx: int) -> bool:
+        """Promote a suggested radio track into the explicit user queue."""
+        if not (0 <= idx < len(self.items)):
+            return False
+        promoted = self.items[idx].model_copy(update={"source": "user"})
+        # Update _original_items entry if present
+        for o_idx, orig in enumerate(self._original_items):
+            if orig.video_id == promoted.video_id:
+                self._original_items[o_idx] = promoted
+                break
+        if idx <= self.current_index:
+            self.items[idx] = promoted
+            self._notify()
+            return True
+
+        self.items.pop(idx)
+        target_pos = self.current_index + 1
+        while target_pos < len(self.items) and self.items[target_pos].source != "radio":
+            target_pos += 1
+        self.items.insert(target_pos, promoted)
+        self._notify()
+        return True
 
     def remove(self, idx: int) -> Track | None:
         """Remove a track by index, adjusting current_index safely."""
@@ -363,11 +405,17 @@ class QueueManager:
         seed_title_lc = curr.title.lower()
         seed_artist = _primary_artist(curr.artist)
         seed_album = (curr.album or "").strip().lower()
+        blocked_norms: set[str] = set()
+        if callable(self.blocked_artists_fn):
+            with suppress(Exception):
+                blocked_norms = self.blocked_artists_fn() or set()
 
         def _score_and_filter(candidates: list[Track], base_priority: float) -> list[tuple[float, Track]]:
             scored: list[tuple[float, Track]] = []
             for rank, track in enumerate(candidates):
                 if track.video_id in existing_ids:
+                    continue
+                if blocked_norms and artist_matches_blocked(track.artist, blocked_norms):
                     continue
                 canon = _canonical_title(track.title)
                 if canon in existing_titles:
@@ -457,16 +505,19 @@ class QueueManager:
         # Graceful fallback if strict filtering removed everything from a valid watch list
         if not selected and recommended:
             for track in recommended:
-                if track.video_id not in existing_ids:
+                if track.video_id not in existing_ids and not (
+                    blocked_norms and artist_matches_blocked(track.artist, blocked_norms)
+                ):
                     selected.append(track)
                 if len(selected) >= min(effective_limit, 8):
                     break
 
         if selected:
-            self.items.extend(selected)
-            self._original_items.extend(selected)
+            tagged_radio = [t.model_copy(update={"source": "radio"}) for t in selected]
+            self.items.extend(tagged_radio)
+            self._original_items.extend(tagged_radio)
             self._notify()
-            return len(selected)
+            return len(tagged_radio)
         return 0
 
     async def next_track(self, is_error: bool = False) -> Track | None:

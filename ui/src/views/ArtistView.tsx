@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, useMemo, useRef } from 'react';
+import { memo, useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import {
   Play,
   Shuffle,
@@ -10,6 +10,12 @@ import {
   Search,
   Sparkles,
   UserRound,
+  UserPlus,
+  UserCheck,
+  Pin,
+  PinOff,
+  Radio,
+  UsersRound,
   ChevronDown,
   ChevronUp,
   X,
@@ -17,6 +23,11 @@ import {
 import { TrackImage } from '../components/TrackImage';
 import { ArtistLinks } from '../components/ArtistLinks';
 import { TrackList } from '../components/TrackList';
+import {
+  TrackContextMenu,
+  isTrackDownloaded,
+  useTrackContextMenu,
+} from '../components/TrackContextMenu';
 import { bridgeApi } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
 import type {
@@ -56,6 +67,9 @@ interface ArtistViewProps {
   onOpenAlbum: (album: AlbumNavTarget) => void;
   onOpenArtist: (artist: ArtistNavTarget) => void;
   onClose?: () => void;
+  onArtistFollowChanged?: () => void;
+  onArtistPinChanged?: () => void;
+  onArtistRadioStarted?: () => void;
 }
 
 const artistCache = new Map<string, ArtistProfile>();
@@ -86,37 +100,75 @@ export const ArtistView = memo(({
   onOpenAlbum,
   onOpenArtist,
   onClose,
+  onArtistFollowChanged,
+  onArtistPinChanged,
+  onArtistRadioStarted,
 }: ArtistViewProps) => {
   const cacheKey = `${(target.channelId || '').trim()}::${target.name.trim().toLowerCase()}`;
   const containerRef = useRef<HTMLDivElement>(null);
   const [profile, setProfile] = useState<ArtistProfile | null>(
     () => artistCache.get(cacheKey) || null
   );
+  const [localTracks, setLocalTracks] = useState<Track[]>([]);
+  const [isFollowed, setIsFollowed] = useState<boolean>(false);
+  const [isPinned, setIsPinned] = useState<boolean>(false);
+  const [startingRadio, setStartingRadio] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(!artistCache.has(cacheKey));
   const [error, setError] = useState<string | null>(null);
   const [showAllPopular, setShowAllPopular] = useState<boolean>(false);
   const [expandBio, setExpandBio] = useState<boolean>(false);
   const [catalogFilter, setCatalogFilter] = useState<string>('');
+  const [catalogOfflineOnly, setCatalogOfflineOnly] = useState<boolean>(false);
+  const [releaseFilter, setReleaseFilter] = useState<'all' | 'albums' | 'singles'>('all');
   const [activeSection, setActiveSection] = useState<'overview' | 'catalog'>('overview');
   const reqSeqRef = useRef<number>(0);
+  const { menuState, menuRef, openMenuAt, closeMenu } = useTrackContextMenu();
+
+  const handleRowContextMenu = useCallback(
+    (e: React.MouseEvent, track: Track) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openMenuAt(
+        track,
+        e.clientX,
+        e.clientY,
+        isTrackDownloaded(track, downloadedIds, downloads)
+      );
+    },
+    [openMenuAt, downloadedIds, downloads]
+  );
 
   useEffect(() => {
     setCatalogFilter('');
+    setCatalogOfflineOnly(false);
+    setReleaseFilter('all');
     setShowAllPopular(false);
     setExpandBio(false);
     setActiveSection('overview');
     setError(null);
 
+    const mySeq = ++reqSeqRef.current;
+
+    // Fast < 5ms SQLite local artist tracks
+    bridgeApi
+      .getLocalArtistTracks({ name: target.name, channel_id: target.channelId })
+      .then((rows) => {
+        if (mySeq === reqSeqRef.current) setLocalTracks(rows);
+      })
+      .catch(() => {
+        if (mySeq === reqSeqRef.current) setLocalTracks([]);
+      });
+
     const cached = artistCache.get(cacheKey);
     if (cached) {
       setProfile(cached);
+      setIsFollowed(Boolean(cached.is_followed));
+      setIsPinned(Boolean(cached.is_pinned));
       setLoading(false);
-      return;
+    } else {
+      setProfile(null);
+      setLoading(true);
     }
-
-    const mySeq = ++reqSeqRef.current;
-    setProfile(null);
-    setLoading(true);
 
     bridgeApi
       .getArtistProfile(target.name, target.channelId || undefined)
@@ -128,10 +180,14 @@ export const ArtistView = memo(({
         }
         artistCache.set(cacheKey, data);
         setProfile(data);
+        setIsFollowed(Boolean(data.is_followed));
+        setIsPinned(Boolean(data.is_pinned));
       })
       .catch((err: any) => {
         if (mySeq !== reqSeqRef.current) return;
-        setError(err?.message || 'Unable to load artist catalog');
+        if (!cached) {
+          setError(err?.message || 'Unable to load artist catalog');
+        }
       })
       .finally(() => {
         if (mySeq === reqSeqRef.current) setLoading(false);
@@ -140,21 +196,133 @@ export const ArtistView = memo(({
 
   const popularTracks = profile?.popular_tracks || [];
   const allTracks = profile?.all_tracks || [];
+  const relatedArtists = profile?.related_artists || [];
+
   const releases: ArtistRelease[] = useMemo(() => {
-    const combined = [...(profile?.albums || []), ...(profile?.singles || [])];
-    return combined;
-  }, [profile?.albums, profile?.singles]);
+    const albs = (profile?.albums || []).map((a) => ({ ...a, type: a.type || 'Album' }));
+    const sngs = (profile?.singles || []).map((s) => ({ ...s, type: s.type || 'Single' }));
+    const combined =
+      releaseFilter === 'albums'
+        ? albs
+        : releaseFilter === 'singles'
+        ? sngs
+        : [...albs, ...sngs];
+    return [...combined].sort((a, b) => {
+      const ya = parseInt(String(a.year || '0').slice(0, 4), 10) || 0;
+      const yb = parseInt(String(b.year || '0').slice(0, 4), 10) || 0;
+      return yb - ya;
+    });
+  }, [profile?.albums, profile?.singles, releaseFilter]);
 
   const filteredCatalog = useMemo(() => {
+    let base = allTracks;
+    if (catalogOfflineOnly) {
+      const seen = new Set<string>();
+      base = [...allTracks, ...localTracks].filter((t) => {
+        if (!t.video_id || seen.has(t.video_id)) return false;
+        seen.add(t.video_id);
+        return isTrackDownloaded(t, downloadedIds, downloads);
+      });
+    } else if (base.length === 0 && localTracks.length > 0) {
+      base = localTracks;
+    }
     const q = catalogFilter.trim().toLowerCase();
-    if (!q) return allTracks;
-    return allTracks.filter(
+    if (!q) return base;
+    return base.filter(
       (t) =>
         t.title.toLowerCase().includes(q) ||
         (t.album || '').toLowerCase().includes(q) ||
         t.artist.toLowerCase().includes(q)
     );
-  }, [allTracks, catalogFilter]);
+  }, [allTracks, localTracks, catalogFilter, catalogOfflineOnly, downloadedIds, downloads]);
+
+  const handleToggleFollow = async () => {
+    const artistName = profile?.name || target.name;
+    const channelId = profile?.channel_id || target.channelId;
+    const next = !isFollowed;
+    setIsFollowed(next);
+    try {
+      if (next) {
+        await bridgeApi.followArtist({
+          channel_id: channelId,
+          name: artistName,
+          thumbnail_url: profile?.thumbnail_url,
+        });
+      } else {
+        await bridgeApi.unfollowArtist(channelId || artistName);
+      }
+      if (profile) {
+        const updated = { ...profile, is_followed: next };
+        artistCache.set(cacheKey, updated);
+        setProfile(updated);
+      }
+      onArtistFollowChanged?.();
+    } catch {
+      setIsFollowed(!next);
+    }
+  };
+
+  const handleTogglePinArtist = async () => {
+    const artistName = profile?.name || target.name;
+    const channelId = profile?.channel_id || target.channelId;
+    const next = !isPinned;
+    setIsPinned(next);
+    try {
+      if (next) {
+        await bridgeApi.pinArtist({
+          channel_id: channelId,
+          name: artistName,
+          thumbnail_url: profile?.thumbnail_url,
+        });
+      } else {
+        await bridgeApi.unpinArtist(channelId || artistName);
+      }
+      if (profile) {
+        const updated = { ...profile, is_pinned: next };
+        artistCache.set(cacheKey, updated);
+        setProfile(updated);
+      }
+      onArtistPinChanged?.();
+    } catch {
+      setIsPinned(!next);
+    }
+  };
+
+  const handleStartArtistRadio = async () => {
+    if (startingRadio) return;
+    setStartingRadio(true);
+    try {
+      await bridgeApi.startArtistRadio({
+        channel_id: profile?.channel_id || target.channelId,
+        name: profile?.name || target.name,
+      });
+      onArtistRadioStarted?.();
+    } finally {
+      setStartingRadio(false);
+    }
+  };
+
+  const handlePlayReleaseQuick = async (e: React.MouseEvent, rel: ArtistRelease) => {
+    e.stopPropagation();
+    try {
+      const album = await bridgeApi.getAlbumDetails({
+        browseId: rel.browse_id,
+        title: rel.title,
+        artist: rel.artist || profile?.name || target.name,
+      });
+      if (album.tracks?.length) {
+        onPlayAll(album.tracks, false);
+        return;
+      }
+    } catch {
+      // Fallback to opening album view
+    }
+    onOpenAlbum({
+      browseId: rel.browse_id,
+      title: rel.title,
+      artist: rel.artist || profile?.name || target.name,
+    });
+  };
 
   const visiblePopular = showAllPopular ? popularTracks.slice(0, 10) : popularTracks.slice(0, 5);
 
@@ -235,10 +403,43 @@ export const ArtistView = memo(({
                   className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5"
                 >
                   <Shuffle size={14} />
-                  Shuffle Catalog
+                  Shuffle
                 </button>
               </>
             )}
+            <button
+              type="button"
+              disabled={startingRadio}
+              onClick={() => void handleStartArtistRadio()}
+              className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Radio size={14} style={{ color: 'var(--dynamic-accent)' }} />
+              {startingRadio ? 'Starting...' : 'Radio'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleToggleFollow()}
+              className={`px-3.5 py-2 text-xs font-medium rounded-full flex items-center gap-1.5 border transition-colors ${
+                isFollowed
+                  ? 'bg-white/[0.16] border-white/25 text-white'
+                  : 'ios-liquid-pill text-[#D4DCFA] border-white/10'
+              }`}
+            >
+              {isFollowed ? <UserCheck size={14} className="text-[#34D399]" /> : <UserPlus size={14} />}
+              {isFollowed ? 'Following' : 'Follow'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleTogglePinArtist()}
+              title={isPinned ? 'Unpin Artist from Speed Dial' : 'Pin Artist to Speed Dial'}
+              className={`p-2 rounded-full border transition-colors ${
+                isPinned
+                  ? 'bg-white/[0.16] border-white/25 text-[#F59E0B]'
+                  : 'ios-liquid-pill text-[#A6B0CF] hover:text-white border-white/10'
+              }`}
+            >
+              {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+            </button>
           </div>
         </div>
 
@@ -270,7 +471,28 @@ export const ArtistView = memo(({
           </div>
 
           {activeSection === 'catalog' && allTracks.length > 0 && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/40 border border-white/12 w-full sm:w-64">
+            <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+              <div className="inline-flex items-center gap-0.5 p-0.5 rounded-full bg-white/[0.05] border border-white/[0.09]">
+                <button
+                  type="button"
+                  onClick={() => setCatalogOfflineOnly(false)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors ${
+                    !catalogOfflineOnly ? 'bg-[#F4F6FF] text-[#020308] font-semibold' : 'text-[#A6B0CF]'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCatalogOfflineOnly(true)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors ${
+                    catalogOfflineOnly ? 'bg-[#34D399] text-[#020308] font-semibold' : 'text-[#A6B0CF]'
+                  }`}
+                >
+                  Offline Only
+                </button>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/40 border border-white/12 flex-1 sm:w-56">
               <Search size={12} className="text-[#8E99BA] flex-none" />
               <input
                 type="text"
@@ -279,7 +501,7 @@ export const ArtistView = memo(({
                 placeholder={`Filter ${profile?.name || target.name} songs...`}
                 className="bg-transparent text-xs text-[#F4F6FF] placeholder-[#6D7796] focus:outline-none flex-1 min-w-0"
               />
-              {catalogFilter && (
+                {catalogFilter && (
                 <button
                   type="button"
                   onClick={() => setCatalogFilter('')}
@@ -288,6 +510,7 @@ export const ArtistView = memo(({
                   <X size={12} />
                 </button>
               )}
+              </div>
             </div>
           )}
         </div>
@@ -310,7 +533,7 @@ export const ArtistView = memo(({
             </div>
           ))}
         </div>
-      ) : error && !profile ? (
+      ) : error && !profile && localTracks.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-[#A6B0CF] gap-2">
           <UserRound size={32} className="opacity-35" />
           <p className="text-sm font-semibold text-[#F4F6FF]">Could not load artist library</p>
@@ -348,6 +571,72 @@ export const ArtistView = memo(({
           style={{ contain: 'strict', willChange: 'scroll-position' }}
           className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-7"
         >
+          {/* Local-first Your Songs Shelf */}
+          {localTracks.length > 0 && (
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold uppercase tracking-[0.16em] text-[#E6ECF8]">
+                  Your Songs ({localTracks.length})
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => onPlayAll(localTracks, false)}
+                  className="text-[11px] font-medium px-3 py-1 rounded-full ios-liquid-pill text-[#F4F6FF]"
+                >
+                  Play Local Mix
+                </button>
+              </div>
+              <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] overflow-hidden divide-y divide-white/[0.05]">
+                {localTracks.slice(0, 6).map((track, idx) => {
+                  const isCurrent = currentTrackId === track.video_id;
+                  const isOff = isTrackDownloaded(track, downloadedIds, downloads);
+                  const isLiked = likedIds ? likedIds.has(track.video_id) : !!track.is_liked;
+                  return (
+                    <div
+                      key={`local-${track.video_id}-${idx}`}
+                      onClick={() => onPlay(track, idx, localTracks)}
+                      onContextMenu={(e) => handleRowContextMenu(e, track)}
+                      className={`flex items-center px-3.5 py-2 gap-3 hover:bg-white/[0.06] group cursor-pointer transition-colors ${
+                        isCurrent ? 'bg-white/[0.08]' : ''
+                      }`}
+                    >
+                      <div className="w-9 h-9 rounded-lg bg-black/70 border border-white/15 overflow-hidden flex-none">
+                        <TrackImage
+                          src={track.thumbnail_url}
+                          videoId={track.video_id}
+                          size="sm"
+                          iconSize={15}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className="text-xs font-semibold truncate"
+                          style={isCurrent ? { color: 'var(--dynamic-accent)' } : { color: '#F4F6FF' }}
+                        >
+                          {track.title}
+                        </div>
+                        <div className="text-[11px] text-[#9AA5C4] truncate">
+                          {track.album || track.artist}
+                        </div>
+                      </div>
+                      {isOff && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#34D399]/15 text-[#34D399]">
+                          Offline
+                        </span>
+                      )}
+                      {isLiked && (
+                        <Heart size={13} className="fill-[#FF4D8D] text-[#FF4D8D] flex-none" />
+                      )}
+                      <span className="text-[11px] font-mono tabular-nums text-[#8E99BA] flex-none">
+                        {track.duration_s > 0 ? formatDuration(track.duration_s) : ''}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           {/* Popular Tracks */}
           {popularTracks.length > 0 && (
             <section className="space-y-3">
@@ -386,6 +675,7 @@ export const ArtistView = memo(({
                     <div
                       key={`${track.video_id}-${idx}`}
                       onClick={() => onPlay(track, idx, popularTracks)}
+                      onContextMenu={(e) => handleRowContextMenu(e, track)}
                       className={`flex items-center px-3.5 py-2.5 gap-3 hover:bg-white/[0.06] group cursor-pointer transition-colors ${
                         isCurrent ? 'bg-white/[0.08]' : ''
                       }`}
@@ -488,25 +778,42 @@ export const ArtistView = memo(({
           )}
 
           {/* Albums & Singles Discography */}
-          {releases.length > 0 && (
+          {((profile?.albums?.length || 0) > 0 || (profile?.singles?.length || 0) > 0) && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2">
                   <Disc3 size={15} style={{ color: 'var(--dynamic-accent)' }} />
                   <h2 className="text-sm font-bold uppercase tracking-[0.16em] text-[#E6ECF8]">
                     Albums & Singles
                   </h2>
                 </div>
-                <span className="text-[11px] text-[#7A84A6] font-mono tabular-nums">
-                  {releases.length} releases
-                </span>
+                <div className="flex items-center gap-2">
+                  <div className="inline-flex items-center gap-0.5 p-0.5 rounded-full bg-white/[0.05] border border-white/[0.09]">
+                    {(['all', 'albums', 'singles'] as const).map((rf) => (
+                      <button
+                        key={rf}
+                        type="button"
+                        onClick={() => setReleaseFilter(rf)}
+                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-colors ${
+                          releaseFilter === rf
+                            ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                            : 'text-[#A6B0CF] hover:text-white'
+                        }`}
+                      >
+                        {rf === 'all' ? 'All' : rf === 'albums' ? 'Albums' : 'Singles & EPs'}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-[11px] text-[#7A84A6] font-mono tabular-nums">
+                    {releases.length}
+                  </span>
+                </div>
               </div>
 
               <div className="flex gap-3.5 overflow-x-auto no-scrollbar pb-2">
-                {releases.slice(0, 18).map((rel) => (
-                  <button
+                {releases.slice(0, 20).map((rel) => (
+                  <div
                     key={rel.browse_id}
-                    type="button"
                     onClick={() =>
                       onOpenAlbum({
                         browseId: rel.browse_id,
@@ -523,6 +830,14 @@ export const ArtistView = memo(({
                         iconSize={26}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                       />
+                      <button
+                        type="button"
+                        title={`Play ${rel.title}`}
+                        onClick={(e) => void handlePlayReleaseQuick(e, rel)}
+                        className="absolute bottom-2 right-2 w-8 h-8 rounded-full bg-white text-black flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-1 group-hover:translate-y-0 transition-all shadow-lg"
+                      >
+                        <Play size={13} className="fill-current ml-0.5" />
+                      </button>
                     </div>
                     <div className="mt-2.5 px-0.5">
                       <div className="text-xs font-semibold text-[#F4F6FF] truncate">
@@ -532,6 +847,54 @@ export const ArtistView = memo(({
                         {[rel.year, rel.type].filter(Boolean).join(' • ') || 'Release'}
                       </div>
                     </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Fans Also Like Carousel */}
+          {relatedArtists.length > 0 && (
+            <section className="space-y-3">
+              <div className="flex items-center gap-2">
+                <UsersRound size={15} style={{ color: 'var(--dynamic-accent)' }} />
+                <h2 className="text-sm font-bold uppercase tracking-[0.16em] text-[#E6ECF8]">
+                  Fans Also Like
+                </h2>
+              </div>
+              <div className="flex gap-3.5 overflow-x-auto no-scrollbar pb-2">
+                {relatedArtists.map((rel, rIdx) => (
+                  <button
+                    key={`${rel.browse_id || rel.name}-${rIdx}`}
+                    type="button"
+                    onClick={() =>
+                      onOpenArtist({
+                        name: rel.name,
+                        channelId: rel.channel_id || rel.browse_id,
+                      })
+                    }
+                    className="group ios-liquid-card w-[136px] rounded-2xl p-3 flex-none flex flex-col items-center text-center cursor-pointer"
+                  >
+                    <div className="w-20 h-20 rounded-full overflow-hidden bg-[#06080F] border border-white/15 flex items-center justify-center">
+                      {rel.thumbnail_url ? (
+                        <TrackImage
+                          src={rel.thumbnail_url}
+                          size="md"
+                          iconSize={24}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      ) : (
+                        <UserRound size={24} className="text-[#8E99BA]" />
+                      )}
+                    </div>
+                    <div className="mt-2.5 text-xs font-semibold text-[#F4F6FF] truncate w-full">
+                      {rel.name}
+                    </div>
+                    {rel.subscribers && (
+                      <div className="text-[10.5px] text-[#8E99BA] truncate w-full mt-0.5">
+                        {rel.subscribers}
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -586,6 +949,26 @@ export const ArtistView = memo(({
           )}
         </div>
       )}
+
+      <TrackContextMenu
+        menuState={menuState}
+        menuRef={menuRef}
+        onClose={closeMenu}
+        onAddNext={onAddNext}
+        onAppendQueue={onAppendQueue}
+        onOpenArtist={(artistName, artistId) => onOpenArtist({ name: artistName, channelId: artistId })}
+        onOpenAlbum={(albumName, albumId, track) =>
+          onOpenAlbum({
+            browseId: albumId,
+            title: albumName,
+            artist: track.artist,
+            videoId: track.video_id,
+          })
+        }
+        onOpenAddToPlaylist={onOpenAddToPlaylist}
+        onDownload={onDownload}
+        onDeleteDownload={onDeleteDownload}
+      />
     </div>
   );
 });

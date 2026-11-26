@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect } from 'react';
+import { memo, useRef, useEffect, useState, useMemo } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -10,11 +10,15 @@ import {
   PictureInPicture2,
   Download,
   Loader2,
+  HardDriveDownload,
+  RotateCcw,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { OrbitLogo } from './OrbitLogo';
 import { UpdateTabPopover } from './UpdateCenter';
 import { minimizeWindow, toggleMaximizeWindow, closeWindow } from '../api/client';
-import type { UpdateState } from '../api/types';
+import type { DownloadProgress, Track, UpdateState } from '../api/types';
 
 interface TitlebarProps {
   searchQuery: string;
@@ -34,6 +38,11 @@ interface TitlebarProps {
   onCloseUpdateTab: () => void;
   onCheckUpdates: () => void;
   onDownloadAndInstallUpdate: () => void;
+  downloads?: Record<string, DownloadProgress>;
+  downloadTracks?: Record<string, Track>;
+  onRetryDownload?: (videoId: string) => void;
+  onCancelDownload?: (videoId: string) => void;
+  onClearFinishedDownloads?: (videoIds: string[]) => void;
 }
 
 export const Titlebar = memo(({
@@ -54,8 +63,68 @@ export const Titlebar = memo(({
   onCloseUpdateTab,
   onCheckUpdates,
   onDownloadAndInstallUpdate,
+  downloads = {},
+  downloadTracks = {},
+  onRetryDownload,
+  onCancelDownload,
+  onClearFinishedDownloads,
 }: TitlebarProps) => {
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const downloadsPopoverRef = useRef<HTMLDivElement>(null);
+  const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
+
+  const downloadList = useMemo(
+    () => Object.values(downloads).filter((d) => d.status !== 'deleted'),
+    [downloads]
+  );
+  const activeDownloads = useMemo(
+    () =>
+      downloadList.filter(
+        (d) => d.status === 'queued' || d.status === 'downloading' || d.status === 'tagging'
+      ),
+    [downloadList]
+  );
+  const failedDownloads = useMemo(
+    () => downloadList.filter((d) => d.status === 'failed' || d.status === 'error'),
+    [downloadList]
+  );
+  const completedDownloads = useMemo(
+    () => downloadList.filter((d) => d.status === 'completed'),
+    [downloadList]
+  );
+  const showDownloadsPill =
+    activeDownloads.length > 0 || failedDownloads.length > 0 || isDownloadsOpen;
+
+  const avgPercent = useMemo(() => {
+    if (activeDownloads.length === 0) return 100;
+    const sum = activeDownloads.reduce(
+      (acc, d) => acc + Math.max(0, Math.min(100, d.percent ?? d.progress_pct ?? 0)),
+      0
+    );
+    return Math.round(sum / activeDownloads.length);
+  }, [activeDownloads]);
+
+  useEffect(() => {
+    if (!isDownloadsOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (
+        downloadsPopoverRef.current &&
+        e.target instanceof Node &&
+        !downloadsPopoverRef.current.contains(e.target)
+      ) {
+        setIsDownloadsOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsDownloadsOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [isDownloadsOpen]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -149,12 +218,153 @@ export const Titlebar = memo(({
         )}
       </div>
 
-      {/* Right: GitHub App Update Toggle (left of Dynamic Island), Dynamic Island, Settings & Window Controls */}
+      {/* Right: Live Track Downloads Pill + GitHub App Update Toggle + Dynamic Island + Settings & Window Controls */}
       <div className="flex items-center no-drag gap-0.5 sm:gap-1 flex-none">
+        {showDownloadsPill && (
+          <div className="relative mr-1" ref={downloadsPopoverRef}>
+            <button
+              type="button"
+              onClick={() => {
+                if (isUpdateTabOpen) onCloseUpdateTab();
+                setIsDownloadsOpen((v) => !v);
+              }}
+              title="Active Offline Track Downloads"
+              className={`relative h-7 px-2.5 flex items-center gap-1.5 rounded-full text-[11px] font-medium border transition-colors overflow-hidden ${
+                isDownloadsOpen
+                  ? 'bg-white/[0.16] text-white border-white/25'
+                  : failedDownloads.length > 0 && activeDownloads.length === 0
+                  ? 'bg-[#FF4D8D]/15 text-[#FF85B3] border-[#FF4D8D]/30 hover:bg-[#FF4D8D]/25'
+                  : 'bg-white/[0.07] text-[#E6ECFF] border-white/[0.12] hover:bg-white/[0.14]'
+              }`}
+            >
+              {activeDownloads.length > 0 ? (
+                <Loader2 size={12} className="animate-spin text-[#34D399]" />
+              ) : failedDownloads.length > 0 ? (
+                <AlertCircle size={12} className="text-[#FF85B3]" />
+              ) : (
+                <HardDriveDownload size={12} className="text-[#34D399]" />
+              )}
+              <span className="font-mono tabular-nums">
+                {activeDownloads.length > 0
+                  ? `${completedDownloads.length}/${completedDownloads.length + activeDownloads.length} · ${avgPercent}%`
+                  : `${failedDownloads.length} failed`}
+              </span>
+              {activeDownloads.length > 0 && (
+                <span
+                  className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#34D399]/80 origin-left transition-transform duration-200"
+                  style={{ transform: `scaleX(${Math.max(0.05, avgPercent / 100)})` }}
+                />
+              )}
+            </button>
+
+            {isDownloadsOpen && (
+              <div className="absolute right-0 mt-2 w-[310px] ios-liquid-popover eh-popover-in rounded-2xl border border-white/[0.12] p-3 z-[60] shadow-2xl">
+                <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-white/[0.08]">
+                  <div>
+                    <div className="text-[11px] font-semibold text-[#F4F6FF]">Offline Downloads</div>
+                    <div className="text-[10px] text-[#8E99BA]">
+                      {activeDownloads.length} active · {completedDownloads.length} ready
+                    </div>
+                  </div>
+                  {(completedDownloads.length > 0 || failedDownloads.length > 0) && onClearFinishedDownloads && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onClearFinishedDownloads(
+                          [...completedDownloads, ...failedDownloads].map((d) => d.video_id)
+                        )
+                      }
+                      className="text-[10.5px] px-2 py-0.5 rounded-full bg-white/[0.06] hover:bg-white/[0.14] text-[#9AA5C4] hover:text-white transition-colors"
+                    >
+                      Clear Finished
+                    </button>
+                  )}
+                </div>
+
+                <div className="max-h-64 overflow-y-auto no-scrollbar space-y-2">
+                  {downloadList.length === 0 ? (
+                    <div className="py-5 text-center text-[11px] text-[#8E99BA]">
+                      No active downloads
+                    </div>
+                  ) : (
+                    downloadList.map((dl) => {
+                      const meta = downloadTracks[dl.video_id];
+                      const pct = Math.max(0, Math.min(100, Math.round(dl.percent ?? dl.progress_pct ?? 0)));
+                      const isActive =
+                        dl.status === 'queued' || dl.status === 'downloading' || dl.status === 'tagging';
+                      const isFailed = dl.status === 'failed' || dl.status === 'error';
+                      return (
+                        <div
+                          key={dl.video_id}
+                          className="rounded-xl bg-white/[0.04] border border-white/[0.07] p-2.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[12px] font-medium text-[#F4F6FF] truncate">
+                                {meta?.title || dl.video_id}
+                              </div>
+                              <div className="text-[10.5px] text-[#8E99BA] truncate">
+                                {meta?.artist || 'Track'}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 flex-none">
+                              {isFailed && onRetryDownload && (
+                                <button
+                                  type="button"
+                                  title="Retry Download"
+                                  onClick={() => onRetryDownload(dl.video_id)}
+                                  className="w-6 h-6 rounded-full flex items-center justify-center bg-white/[0.08] hover:bg-white/[0.18] text-[#F4F6FF]"
+                                >
+                                  <RotateCcw size={11} />
+                                </button>
+                              )}
+                              {isActive && onCancelDownload && (
+                                <button
+                                  type="button"
+                                  title="Cancel Download"
+                                  onClick={() => onCancelDownload(dl.video_id)}
+                                  className="w-6 h-6 rounded-full flex items-center justify-center bg-white/[0.06] hover:bg-[#FF4D8D]/25 text-[#9AA5C4] hover:text-[#FF85B3]"
+                                >
+                                  <X size={11} />
+                                </button>
+                              )}
+                              {dl.status === 'completed' && (
+                                <CheckCircle2 size={14} className="text-[#34D399]" />
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="mt-2 flex items-center justify-between text-[10px] font-mono text-[#8E99BA]">
+                            <span className="capitalize">
+                              {isFailed ? dl.error || 'Download failed' : dl.status}
+                            </span>
+                            {isActive && <span>{pct}%</span>}
+                          </div>
+                          {isActive && (
+                            <div className="mt-1 h-1 rounded-full bg-white/[0.08] overflow-hidden">
+                              <div
+                                className="h-full bg-[#34D399] origin-left transition-transform duration-150"
+                                style={{ transform: `scaleX(${Math.max(0.03, pct / 100)})` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="relative">
           <button
             type="button"
-            onClick={onToggleUpdateTab}
+            onClick={() => {
+              setIsDownloadsOpen(false);
+              onToggleUpdateTab();
+            }}
             title={
               isDownloadingUpdate
                 ? `Downloading ORBIT v${updateState?.latest_version} (${Math.round(updateState?.progress_pct ?? 0)}%)`

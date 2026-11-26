@@ -374,6 +374,75 @@ class AudioPlayer:
                     self.time_pos = pos
         return self.time_pos
 
+    def _read_mpv_scalar(self, prop_name: str, attr_name: str | None = None) -> Any:
+        """Read a live libmpv runtime property safely without returning unset MagicMocks."""
+        attr = attr_name or prop_name.replace("-", "_").replace("/", "_")
+        val = getattr(self.mpv, attr, None)
+        if isinstance(val, (str, int, float, dict)) and not isinstance(val, bool):
+            return val
+        getter = getattr(self.mpv, "_get_property", None)
+        if callable(getter):
+            with suppress(Exception):
+                raw = getter(prop_name)
+                if isinstance(raw, (str, int, float, dict)) and not isinstance(raw, bool):
+                    return raw
+        return None
+
+    def get_audio_details(self) -> dict[str, Any]:
+        """Read live audio codec, bitrate, sample rate, channel layout, size, and path from libmpv."""
+        codec = self._read_mpv_scalar("audio-codec-name", "audio_codec_name")
+        raw_bitrate = self._read_mpv_scalar("audio-bitrate", "audio_bitrate")
+
+        audio_params = self._read_mpv_scalar("audio-params", "audio_params")
+        samplerate: Any = None
+        channels: Any = None
+        channel_layout: str | None = None
+        if isinstance(audio_params, dict):
+            samplerate = audio_params.get("samplerate")
+            channels = audio_params.get("channel-count")
+            raw_layout = audio_params.get("channels")
+            if isinstance(raw_layout, str) and raw_layout.strip():
+                channel_layout = raw_layout.strip()
+
+        if samplerate is None:
+            samplerate = self._read_mpv_scalar("audio-params/samplerate", "audio_params_samplerate")
+        if channels is None:
+            channels = self._read_mpv_scalar("audio-params/channel-count", "audio_params_channel_count")
+
+        file_size = self._read_mpv_scalar("file-size", "file_size")
+        path_val = self._read_mpv_scalar("path", "path")
+
+        bitrate_kbps: int | None = None
+        if isinstance(raw_bitrate, (int, float)) and raw_bitrate > 0:
+            bitrate_kbps = round(raw_bitrate / 1000) if raw_bitrate >= 1000 else int(raw_bitrate)
+
+        sample_rate_hz: int | None = (
+            int(samplerate) if isinstance(samplerate, (int, float)) and samplerate > 0 else None
+        )
+        channel_count: int | None = (
+            int(channels) if isinstance(channels, (int, float)) and channels > 0 else None
+        )
+        file_size_bytes: int | None = (
+            int(file_size) if isinstance(file_size, (int, float)) and file_size >= 0 else None
+        )
+
+        curr = self.current_track
+        return {
+            "video_id": curr.video_id if curr else None,
+            "title": curr.title if curr else None,
+            "artist": curr.artist if curr else None,
+            "album": curr.album if curr else None,
+            "duration_s": curr.duration_s if curr else int(self.duration or 0),
+            "codec": str(codec).strip() if codec else None,
+            "bitrate_kbps": bitrate_kbps,
+            "sample_rate_hz": sample_rate_hz,
+            "channel_count": channel_count,
+            "channel_layout": channel_layout,
+            "file_size_bytes": file_size_bytes,
+            "path": str(path_val).strip() if path_val else None,
+            "state": self.state,
+        }
+
     def record_error(self) -> int:
         """Record an error and increment consecutive error count."""
         self.consecutive_errors += 1

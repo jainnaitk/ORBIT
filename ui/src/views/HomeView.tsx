@@ -14,6 +14,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Radio,
+  Dices,
+  Pin,
+  PinOff,
+  Disc3,
+  UserRound,
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
 import { ArtistLinks } from '../components/ArtistLinks';
@@ -27,6 +32,7 @@ import type {
   HomeSection,
   PersonalizedHomeResponse,
   DownloadProgress,
+  PinsResponse,
 } from '../api/types';
 import {
   bridgeApi,
@@ -43,6 +49,8 @@ interface HomeViewProps {
   likedIds?: Set<string>;
   downloads?: Record<string, DownloadProgress>;
   downloadedIds?: Set<string>;
+  pins?: PinsResponse | null;
+  libraryVersion?: number;
   onPlayTrack: (track: Track) => void;
   onPlayAll: (tracks: Track[]) => void;
   onToggleLike: (track: Track) => void;
@@ -53,11 +61,16 @@ interface HomeViewProps {
   onDeleteDownload?: (track: Track) => void;
   onOpenArtist?: (artistName: string, artistId?: string | null) => void;
   onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
+  onUnpinTrack?: (videoId: string) => void;
+  onUnpinArtist?: (channelId: string) => void;
+  onSurpriseRadio?: () => void;
 }
 
 function hasPlayableContent(data: PersonalizedHomeResponse | null | undefined): boolean {
   if (!data) return false;
   if (Array.isArray(data.speed_dial) && data.speed_dial.length > 0) return true;
+  if (Array.isArray(data.pinned_tracks) && data.pinned_tracks.length > 0) return true;
+  if (Array.isArray(data.pinned_artists) && data.pinned_artists.length > 0) return true;
   return (data.sections || []).some(
     (sec) =>
       Array.isArray(sec.contents) &&
@@ -280,6 +293,8 @@ export const HomeView = memo(({
   likedIds,
   downloads,
   downloadedIds,
+  pins,
+  libraryVersion = 0,
   onPlayTrack,
   onPlayAll,
   onToggleLike,
@@ -290,6 +305,9 @@ export const HomeView = memo(({
   onDeleteDownload,
   onOpenArtist,
   onOpenAlbum,
+  onUnpinTrack,
+  onUnpinArtist,
+  onSurpriseRadio,
 }: HomeViewProps) => {
   const [activeMood, setActiveMood] = useState<string>('for_you');
   const [homeData, setHomeData] = useState<PersonalizedHomeResponse | null>(
@@ -479,8 +497,19 @@ export const HomeView = memo(({
   };
 
   const speedDial = homeData?.speed_dial || [];
+  const pinnedTracks = pins?.tracks ?? homeData?.pinned_tracks ?? [];
+  const pinnedArtists = pins?.artists ?? homeData?.pinned_artists ?? [];
+  const newReleases = homeData?.new_releases || [];
   const sections: HomeSection[] = homeData?.sections || [];
   const hasRenderableContent = hasPlayableContent(homeData);
+
+  const prevLibVerRef = useRef<number>(libraryVersion);
+  useEffect(() => {
+    if (prevLibVerRef.current !== libraryVersion) {
+      prevLibVerRef.current = libraryVersion;
+      cachedByMood.clear();
+    }
+  }, [libraryVersion]);
 
   return (
     <div
@@ -585,6 +614,208 @@ export const HomeView = memo(({
           </div>
         ) : (
           <>
+            {activeMood === 'for_you' && (pinnedTracks.length > 0 || pinnedArtists.length > 0 || onSurpriseRadio) && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Pin size={14} style={{ color: 'var(--dynamic-accent)' }} />
+                    <h2 className="text-[11px] font-bold uppercase tracking-[0.22em] text-[#A6B0CF]">
+                      Speed Dial & Pins
+                    </h2>
+                  </div>
+                  {pinnedTracks.length > 1 && (
+                    <button
+                      onClick={() => onPlayAll(pinnedTracks)}
+                      className="text-xs text-[#F4F6FF] font-medium px-3 py-1 rounded-full ios-liquid-pill"
+                    >
+                      Play Pinned
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                  {/* Surprise Me Radio Dice Card */}
+                  {onSurpriseRadio && (
+                    <button
+                      type="button"
+                      onClick={onSurpriseRadio}
+                      className="group ios-liquid-card flex items-center gap-3 p-3 rounded-2xl text-left border border-white/[0.14] bg-gradient-to-r from-[rgba(var(--dynamic-accent-rgb),0.18)] to-white/[0.03] hover:brightness-110 transition-all cursor-pointer"
+                    >
+                      <div
+                        className="w-12 h-12 rounded-xl flex items-center justify-center flex-none shadow-md"
+                        style={{ background: 'rgba(var(--dynamic-accent-rgb), 0.24)' }}
+                      >
+                        <Dices size={20} style={{ color: 'var(--dynamic-accent)' }} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold text-[#F4F6FF] truncate">Surprise Me</div>
+                        <div className="text-[11px] text-[#B4BEDB] truncate">
+                          Instant taste-seeded radio
+                        </div>
+                      </div>
+                    </button>
+                  )}
+
+                  {/* Pinned Artist Cards */}
+                  {pinnedArtists.map((art) => (
+                    <div
+                      key={`pin-art-${art.channel_id}`}
+                      onClick={() => onOpenArtist?.(art.name, art.channel_id)}
+                      className="group ios-liquid-card flex items-center gap-3 pr-2.5 p-2 rounded-2xl cursor-pointer relative"
+                    >
+                      <div className="w-12 h-12 rounded-full bg-black border border-white/15 overflow-hidden flex items-center justify-center flex-none">
+                        {art.thumbnail_url ? (
+                          <TrackImage src={art.thumbnail_url} size="sm" iconSize={18} />
+                        ) : (
+                          <UserRound size={18} className="text-[#8E99BA]" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold text-[#F4F6FF] truncate">
+                          {art.name}
+                        </div>
+                        <div className="text-[10.5px] text-[#8E99BA] truncate">Pinned Artist</div>
+                      </div>
+                      {onUnpinArtist && (
+                        <button
+                          type="button"
+                          title="Unpin artist"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUnpinArtist(art.channel_id);
+                          }}
+                          className="p-1.5 rounded-full text-[#8E99BA] hover:text-white hover:bg-white/[0.10] opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <PinOff size={12} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Pinned Track Cards */}
+                  {pinnedTracks.map((track) => {
+                    const isCurrent = currentTrackId === track.video_id;
+                    return (
+                      <div
+                        key={`pin-trk-${track.video_id}`}
+                        onClick={() => onPlayTrack(track)}
+                        onMouseEnter={() => scheduleTrackPreload(track)}
+                        onMouseLeave={() => cancelTrackPreload(track.video_id)}
+                        onContextMenu={(e) => handleTrackContextMenu(e, track)}
+                        className="group ios-liquid-card flex items-center gap-3 pr-2.5 p-2 rounded-2xl cursor-pointer"
+                        style={
+                          isCurrent
+                            ? { borderColor: 'rgba(var(--dynamic-accent-rgb), 0.65)' }
+                            : undefined
+                        }
+                      >
+                        <div className="relative w-12 h-12 rounded-xl bg-black overflow-hidden flex-none border border-white/15">
+                          <TrackImage
+                            src={track.thumbnail_url}
+                            videoId={track.video_id}
+                            size="sm"
+                            iconSize={16}
+                          />
+                          <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                            <Play size={14} className="fill-white text-white ml-0.5" />
+                          </div>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className="text-xs font-semibold truncate"
+                            style={
+                              isCurrent ? { color: 'var(--dynamic-accent)' } : { color: '#F4F6FF' }
+                            }
+                          >
+                            {track.title}
+                          </div>
+                          <ArtistLinks
+                            artist={track.artist}
+                            artistId={track.artist_id}
+                            artists={track.artists}
+                            onOpenArtist={onOpenArtist}
+                            className="text-[11px] text-[#A6B0CF]"
+                          />
+                        </div>
+                        {onUnpinTrack && (
+                          <button
+                            type="button"
+                            title="Unpin track"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUnpinTrack(track.video_id);
+                            }}
+                            className="p-1.5 rounded-full text-[#8E99BA] hover:text-white hover:bg-white/[0.10] opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <PinOff size={12} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {activeMood === 'for_you' && newReleases.length > 0 && (
+              <section className="space-y-3 eh-shelf-section">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Disc3 size={16} style={{ color: 'var(--dynamic-accent)' }} />
+                    <div>
+                      <h2 className="text-lg font-bold tracking-tight text-[#F4F6FF]">
+                        From Artists You Follow
+                      </h2>
+                      <p className="text-[11px] text-[#A6B0CF]">
+                        Latest albums & singles cached daily for you
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-3.5 overflow-x-auto no-scrollbar pb-2">
+                  {newReleases.map((rel, idx) => (
+                    <button
+                      key={`${rel.channel_id}-${rel.browseId || rel.title}-${idx}`}
+                      type="button"
+                      onClick={() =>
+                        onOpenAlbum?.(rel.title, rel.browseId || null, {
+                          video_id: '',
+                          title: rel.title,
+                          artist: rel.artist_name,
+                          artist_id: rel.channel_id,
+                          album: rel.title,
+                          album_id: rel.browseId || null,
+                          duration_s: 0,
+                          thumbnail_url: rel.thumbnail_url,
+                        })
+                      }
+                      className="group ios-liquid-card w-[164px] rounded-2xl p-2.5 flex-none text-left flex flex-col cursor-pointer"
+                    >
+                      <div className="relative aspect-square w-full rounded-xl overflow-hidden bg-[#06080F] border border-white/[0.08]">
+                        <TrackImage
+                          src={rel.thumbnail_url}
+                          size="md"
+                          iconSize={28}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      </div>
+                      <div className="mt-2.5 px-0.5">
+                        <div className="text-xs font-semibold text-[#F4F6FF] truncate">
+                          {rel.title}
+                        </div>
+                        <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
+                          {rel.artist_name}
+                        </div>
+                        <div className="text-[10px] text-[#7A84A6] truncate mt-0.5">
+                          {[rel.year, rel.type].filter(Boolean).join(' • ') || 'New Release'}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {activeMood === 'for_you' && speedDial.length > 0 && (
               <section className="space-y-3">
                 <div className="flex items-center justify-between">

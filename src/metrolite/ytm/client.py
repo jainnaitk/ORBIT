@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import requests
 from pydantic import BaseModel, Field
@@ -55,6 +55,9 @@ class Track(BaseModel):
     album_id: str | None = Field(default=None, description="YouTube Music album browse ID")
     duration_s: int = Field(default=0, description="Duration in seconds")
     thumbnail_url: str | None = Field(default=None, description="Preferred artwork URL")
+    source: Literal["user", "radio"] | None = Field(
+        default=None, description="Queue origin tag ('user' or 'radio')"
+    )
 
 
 def parse_duration(val: Any) -> int:
@@ -764,6 +767,57 @@ class YTMusicClient:
                 if rel_items:
                     artist[target_key] = {"browseId": None, "results": rel_items}
 
+        # Manual fallback for "Fans might also like" / related artists carousel
+        if "related" not in artist:
+            for sec in sections:
+                car = sec.get("musicCarouselShelfRenderer")
+                if not isinstance(car, dict):
+                    continue
+                hdr = (
+                    (car.get("header") or {}).get("musicCarouselShelfBasicHeaderRenderer")
+                    if isinstance(car.get("header"), dict)
+                    else None
+                )
+                if not isinstance(hdr, dict):
+                    continue
+                cat_title = _runs_text(hdr.get("title")).lower()
+                if not any(kw in cat_title for kw in ("fans might", "related", "similar", "also like")):
+                    continue
+                rel_artists: list[dict[str, Any]] = []
+                for entry in car.get("contents") or []:
+                    mtr = entry.get("musicTwoRowItemRenderer") if isinstance(entry, dict) else None
+                    if not isinstance(mtr, dict):
+                        continue
+                    rel_name = _runs_text(mtr.get("title"))
+                    rel_bid = (
+                        (mtr.get("navigationEndpoint") or {})
+                        .get("browseEndpoint", {})
+                        .get("browseId")
+                    )
+                    if not rel_bid:
+                        t_runs = (mtr.get("title") or {}).get("runs")
+                        if isinstance(t_runs, list) and t_runs and isinstance(t_runs[0], dict):
+                            rel_bid = (
+                                (t_runs[0].get("navigationEndpoint") or {})
+                                .get("browseEndpoint", {})
+                                .get("browseId")
+                            )
+                    if not rel_name or not rel_bid:
+                        continue
+                    sub_txt = _runs_text(mtr.get("subtitle"))
+                    subs = sub_txt.split(" ")[0].strip() if sub_txt else None
+                    rel_artists.append(
+                        {
+                            "title": rel_name,
+                            "browseId": str(rel_bid).strip(),
+                            "subscribers": subs,
+                            "thumbnails": _extract_thumbs(mtr.get("thumbnailRenderer") or mtr),
+                        }
+                    )
+                if rel_artists:
+                    artist["related"] = {"results": rel_artists}
+                    break
+
         return artist
 
     def _fetch_artist_data_sync(self, channel_id: str) -> dict[str, Any]:
@@ -789,6 +843,34 @@ class YTMusicClient:
             logger.warning("get_artist failed for %s: %s", channel_id, e)
         return {}
 
+    def _extract_related_artists(self, artist_data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize `related.results` from ytmusicapi get_artist() without extra network calls."""
+        rel_sec = artist_data.get("related")
+        if not isinstance(rel_sec, dict):
+            return []
+        raw_results = rel_sec.get("results")
+        if not isinstance(raw_results, list):
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("browseId") or item.get("channelId") or "").strip()
+            name = str(item.get("title") or item.get("name") or "").strip()
+            if not cid or not name or cid in seen:
+                continue
+            seen.add(cid)
+            out.append(
+                {
+                    "channel_id": cid,
+                    "name": name,
+                    "subscribers": str(item.get("subscribers") or "").strip() or None,
+                    "thumbnail_url": extract_thumbnail_url(item.get("thumbnails")),
+                }
+            )
+        return out
+
     def _get_artist_sync(self, channel_id: str) -> dict[str, Any]:
         artist_dict = self._fetch_artist_data_sync(channel_id)
         if "songs" in artist_dict and isinstance(artist_dict["songs"], dict):
@@ -797,6 +879,7 @@ class YTMusicClient:
                 songs_data["results"] = [try_normalize_track(t) or t for t in songs_data["results"]]
             artist_dict["songs"] = songs_data
         artist_dict["thumbnail_url"] = extract_thumbnail_url(artist_dict.get("thumbnails"))
+        artist_dict["related_artists"] = self._extract_related_artists(artist_dict)
         return artist_dict
 
     async def get_artist(self, channel_id: str) -> dict[str, Any]:
@@ -1031,6 +1114,7 @@ class YTMusicClient:
             "all_tracks": [t.model_dump() for t in all_tracks],
             "albums": albums,
             "singles": singles,
+            "related_artists": self._extract_related_artists(artist_data),
         }
 
     async def get_artist_profile(

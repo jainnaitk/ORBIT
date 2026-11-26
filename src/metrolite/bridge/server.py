@@ -13,7 +13,7 @@ import socket
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -40,7 +40,12 @@ from metrolite.audio.queue import QueueManager
 from metrolite.audio.resolver import StreamResolutionError
 from metrolite.config import get_config
 from metrolite.library.downloader import DownloadManager, DownloadProgress, validate_video_id
-from metrolite.library.manager import LibraryManager
+from metrolite.library.manager import (
+    LibraryManager,
+    artist_matches_blocked,
+    normalize_artist_name,
+    split_artist_names,
+)
 from metrolite.store.db import get_connection, get_default_db_path, init_db
 from metrolite.updates import UpdateManager
 from metrolite.ytm.client import Track, YTMusicClient
@@ -73,37 +78,145 @@ _TRENDING_QUERIES = [
     "new hit songs bollywood pop",
 ]
 
-_MOOD_CONFIG: dict[str, tuple[str, str, list[str]]] = {
-    "trending": (
-        "Trending Right Now",
-        "Hottest tracks climbing the charts",
-        ["top trending songs 2026", "viral hits india 2026", "global top songs"],
-    ),
-    "bollywood": (
-        "Bollywood & Desi Hits",
-        "Latest Hindi, Punjabi & indie favorites",
-        ["latest hindi bollywood hits", "trending punjabi hindi songs", "arijit singh top songs"],
-    ),
-    "chill": (
-        "Chill & Lo-Fi Vibes",
-        "Laid-back beats to unwind",
-        ["chill lofi beats relax", "hindi lofi chill mix", "aesthetic chill indie"],
-    ),
-    "focus": (
-        "Deep Focus & Study",
-        "Distraction-free instrumental flow",
-        ["deep focus study instrumental", "lofi study beats concentration", "ambient focus music"],
-    ),
-    "workout": (
-        "Workout Energy",
-        "High-tempo tracks to keep you moving",
-        ["high energy workout gym music", "punjabi workout bass hits", "electronic workout pump"],
-    ),
-    "latenight": (
-        "Late Night Drives",
-        "Moody acoustics and midnight melodies",
-        ["late night drive hindi indie", "midnight acoustic chill songs", "slowed reverb night vibes"],
-    ),
+_MOOD_CONFIG: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
+    "trending": [
+        (
+            "picks",
+            "compact_grid",
+            "Trending Right Now",
+            "Hottest tracks climbing the charts",
+            ["top trending songs 2026", "viral hits india 2026"],
+        ),
+        (
+            "global",
+            "cards",
+            "Global Pop & Hits",
+            "Worldwide chart-toppers and breaking singles",
+            ["global top songs", "billboard hot hits"],
+        ),
+        (
+            "viral",
+            "cards",
+            "Fresh Viral & Rising",
+            "Tracks surging across playlists this week",
+            ["new viral trending songs", "new music charts"],
+        ),
+    ],
+    "bollywood": [
+        (
+            "picks",
+            "compact_grid",
+            "Bollywood & Desi Hits",
+            "Latest Hindi, Punjabi & indie favorites",
+            ["latest hindi bollywood hits", "trending punjabi hindi songs"],
+        ),
+        (
+            "romantic",
+            "cards",
+            "Romantic & Soulful Melodies",
+            "Timeless Hindi love songs and acoustic vocals",
+            ["arijit singh top songs", "bollywood romantic unplugged hits"],
+        ),
+        (
+            "urban",
+            "cards",
+            "Punjabi & Desi Urban",
+            "High-rotation Punjabi drops and desi pop anthems",
+            ["trending punjabi pop songs", "indian indie pop hits"],
+        ),
+    ],
+    "chill": [
+        (
+            "picks",
+            "compact_grid",
+            "Chill & Lo-Fi Vibes",
+            "Laid-back beats to unwind",
+            ["chill lofi beats relax", "aesthetic chill indie"],
+        ),
+        (
+            "desilofi",
+            "cards",
+            "Hindi Lo-Fi & Unplugged",
+            "Warm evening acoustics and mellow lo-fi",
+            ["hindi lofi chill mix", "bollywood acoustic chill"],
+        ),
+        (
+            "dream",
+            "cards",
+            "Dreamy Indie & Coffeehouse",
+            "Smooth downtempo grooves and soft guitars",
+            ["chill indie pop songs", "coffeehouse acoustic chill"],
+        ),
+    ],
+    "focus": [
+        (
+            "picks",
+            "compact_grid",
+            "Deep Focus & Study",
+            "Distraction-free instrumental flow",
+            ["deep focus study instrumental", "lofi study beats concentration"],
+        ),
+        (
+            "ambient",
+            "cards",
+            "Ambient & Peaceful Piano",
+            "Calm soundscapes for coding, reading & deep work",
+            ["ambient focus music", "peaceful piano instrumental study"],
+        ),
+        (
+            "synth",
+            "cards",
+            "Minimal Synth & Neoclassical",
+            "Steady instrumental textures for sustained concentration",
+            ["neoclassical focus instrumental", "chill synthwave study"],
+        ),
+    ],
+    "workout": [
+        (
+            "picks",
+            "compact_grid",
+            "Workout Energy",
+            "High-tempo tracks to keep you moving",
+            ["high energy workout gym music", "punjabi workout bass hits"],
+        ),
+        (
+            "pump",
+            "cards",
+            "Gym & Power Anthems",
+            "Heavy drops, hip-hop & adrenaline bangers",
+            ["gym motivation hip hop workout", "desi hip hop workout hits"],
+        ),
+        (
+            "cardio",
+            "cards",
+            "Cardio & Running Tempo",
+            "Upbeat electronic & pop to lock in your pace",
+            ["electronic workout pump", "cardio running hits"],
+        ),
+    ],
+    "latenight": [
+        (
+            "picks",
+            "compact_grid",
+            "Late Night Drives",
+            "Moody acoustics and midnight melodies",
+            ["late night drive hindi indie", "midnight acoustic chill songs"],
+        ),
+        (
+            "afterhours",
+            "cards",
+            "After Hours & Midnight R&B",
+            "Velvet synths and dark-lit city vibes",
+            ["late night r&b chill vibes", "midnight drive pop indie"],
+        ),
+        (
+            "unplugged",
+            "cards",
+            "2 AM Acoustic & Soul",
+            "Stripped-back ballads for quiet hours",
+            ["slowed reverb night vibes", "midnight acoustic ballads"],
+        ),
+    ],
 }
 
 
@@ -218,9 +331,15 @@ class BridgeController:
         self.ws_manager = ws_manager or WebSocketManager()
         self.player = player or AudioPlayer()
         self.ytm = ytm or YTMusicClient()
+        self._blocked_norms: set[str] = set()
         self.queue = queue or QueueManager(
-            db_path=self.db_path, ytm_client=self.ytm, auto_persist=True
+            db_path=self.db_path,
+            ytm_client=self.ytm,
+            auto_persist=True,
+            blocked_artists_fn=lambda: set(self._blocked_norms),
         )
+        if getattr(self.queue, "blocked_artists_fn", None) is None:
+            self.queue.blocked_artists_fn = lambda: set(self._blocked_norms)
         self.library = library or LibraryManager(db_path=self.db_path)
         self.downloader = downloader or DownloadManager(db_path=self.db_path)
         self.updater = updater or UpdateManager()
@@ -231,12 +350,22 @@ class BridgeController:
         self._preload_task: asyncio.Task[None] | None = None
         self._adjacent_prefetch_task: asyncio.Task[None] | None = None
         self._lyrics_prefetch_task: asyncio.Task[None] | None = None
+        self._releases_refresh_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._play_seq: int = 0
         self._shutdown: bool = False
         self._home_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._artist_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._album_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._history_threshold_s: float = 30.0
+        self._pause_listening_history: bool = False
+        self._play_session_vid: str | None = None
+        self._play_session_track: Track | None = None
+        self._play_session_listened_s: float = 0.0
+        self._play_session_last_ts: float | None = None
+        self._play_session_event_id: int | None = None
+        self._play_session_last_flushed_s: int = 0
+        self._play_session_flushing: bool = False
 
         self._bind_callbacks()
 
@@ -357,10 +486,206 @@ class BridgeController:
             logger.debug("Failed reading setting %s: %s", key, e)
         return default
 
+    async def refresh_blocked_cache(self) -> set[str]:
+        """Synchronize the in-memory set of blocked normalized artist names from SQLite."""
+        with suppress(Exception):
+            self._blocked_norms = await self.library.get_blocked_artist_norms()
+        self._home_cache.clear()
+        return self._blocked_norms
+
+    def _filter_blocked_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter out dict items matching any blocked artist."""
+        if not self._blocked_norms:
+            return items
+        return [
+            item
+            for item in items
+            if not artist_matches_blocked(str(item.get("artist") or ""), self._blocked_norms)
+        ]
+
+    def _accumulate_play_session(self) -> None:
+        """Add elapsed wall-clock seconds to the active track play session."""
+        if self._play_session_vid is None or self._play_session_last_ts is None:
+            return
+        now = time.monotonic()
+        delta = max(0.0, min(5.0, now - self._play_session_last_ts))
+        self._play_session_listened_s += delta
+        self._play_session_last_ts = now
+
+    def _pause_play_session(self) -> None:
+        self._accumulate_play_session()
+        self._play_session_last_ts = None
+
+    def _reset_play_session(self, track: Track | None, playing: bool = False) -> None:
+        self._play_session_vid = track.video_id if track else None
+        self._play_session_track = track
+        self._play_session_listened_s = 0.0
+        self._play_session_last_ts = time.monotonic() if (playing and track is not None) else None
+        self._play_session_event_id = None
+        self._play_session_last_flushed_s = 0
+
+    async def _flush_play_session(self, force: bool = False) -> None:
+        """Persist qualified play event (>= history_threshold_s) and update duration."""
+        self._accumulate_play_session()
+        if (
+            self._pause_listening_history
+            or not self._play_session_vid
+            or self._play_session_flushing
+        ):
+            return
+        sec = int(self._play_session_listened_s)
+        threshold = max(1, int(self._history_threshold_s or 30))
+        if sec < threshold:
+            return
+        self._play_session_flushing = True
+        try:
+            if self._play_session_event_id is None:
+                eid = await self.library.record_play_event(
+                    self._play_session_vid,
+                    listened_s=sec,
+                    track_meta=self._play_session_track,
+                )
+                self._play_session_event_id = eid
+                self._play_session_last_flushed_s = sec
+            elif (force and sec > self._play_session_last_flushed_s) or (
+                sec >= self._play_session_last_flushed_s + 5
+            ):
+                await self.library.update_play_event_duration(self._play_session_event_id, sec)
+                self._play_session_last_flushed_s = sec
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Play event flush skipped: %s", e)
+        finally:
+            self._play_session_flushing = False
+
+    async def _rotate_play_session(self, next_track: Track | None, playing: bool = True) -> None:
+        """Flush any qualified previous play session before starting the next track."""
+        if self._play_session_vid and (
+            next_track is None or next_track.video_id != self._play_session_vid
+        ):
+            await self._flush_play_session(force=True)
+            self._reset_play_session(next_track, playing=playing)
+        elif next_track is not None:
+            if self._play_session_vid != next_track.video_id:
+                self._reset_play_session(next_track, playing=playing)
+            elif playing and self._play_session_last_ts is None:
+                self._play_session_last_ts = time.monotonic()
+
+    async def _refresh_followed_releases_worker(self, limit_artists: int = 6) -> None:
+        """Fetch latest releases for stale followed artists with bounded concurrency (<= 2)."""
+        try:
+            followed = await self.library.list_followed_artists()
+            if not followed:
+                return
+            cached_rows = await self.library.get_cached_artist_releases()
+            cached_map = {r["channel_id"]: r for r in cached_rows}
+            cutoff = datetime.now(UTC).timestamp() - 86400.0
+            stale: list[dict[str, Any]] = []
+            for art in followed:
+                cid = art["channel_id"]
+                c = cached_map.get(cid)
+                is_stale = True
+                if c and c.get("fetched_at"):
+                    with suppress(Exception):
+                        ts = datetime.fromisoformat(str(c["fetched_at"]))
+                        if ts.timestamp() > cutoff:
+                            is_stale = False
+                if is_stale:
+                    stale.append(art)
+            if not stale:
+                return
+
+            sem = asyncio.Semaphore(2)
+            updated_any = False
+
+            async def _fetch_one(art: dict[str, Any]) -> None:
+                nonlocal updated_any
+                async with sem:
+                    cid = art["channel_id"]
+                    name = art["name"]
+                    lookup_cid = None if str(cid).startswith("local:") else cid
+                    with suppress(Exception):
+                        profile = await self.ytm.get_artist_profile(
+                            name=name, channel_id=lookup_cid
+                        )
+                        combined = [
+                            *[dict(item, type=item.get("type") or "Album") for item in (profile.get("albums") or [])[:4]],
+                            *[dict(item, type=item.get("type") or "Single") for item in (profile.get("singles") or [])[:4]],
+                        ]
+                        def _yr(item: dict[str, Any]) -> int:
+                            try:
+                                return int(str(item.get("year") or "0").strip()[:4])
+                            except (TypeError, ValueError):
+                                return 0
+                        combined.sort(key=_yr, reverse=True)
+                        await self.library.upsert_cached_artist_releases(
+                            channel_id=cid,
+                            artist_name=name,
+                            releases=combined[:6],
+                        )
+                        updated_any = True
+
+            await asyncio.gather(*[_fetch_one(a) for a in stale[:limit_artists]])
+            if updated_any:
+                self._home_cache.pop("for_you", None)
+                await self.ws_manager.broadcast(
+                    "library_changed", {"type": "artist_releases_updated"}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Followed artist releases refresh skipped: %s", e)
+
+    async def get_followed_new_releases(
+        self, refresh: bool = False, trigger_refresh: bool = True
+    ) -> list[dict[str, Any]]:
+        """Return cached releases from followed artists, optionally refreshing stale entries."""
+        if refresh:
+            await self._refresh_followed_releases_worker(limit_artists=8)
+        elif (
+            trigger_refresh
+            and not os.environ.get("PYTEST_CURRENT_TEST")
+            and (self._releases_refresh_task is None or self._releases_refresh_task.done())
+        ):
+            self._releases_refresh_task = self.spawn_task(
+                self._refresh_followed_releases_worker(limit_artists=6)
+            )
+
+        rows = await self.library.get_cached_artist_releases()
+        flattened: list[dict[str, Any]] = []
+        for entry in rows:
+            cid = entry["channel_id"]
+            aname = entry["artist_name"]
+            if self._blocked_norms and artist_matches_blocked(aname, self._blocked_norms):
+                continue
+            for rel in (entry.get("releases") or [])[:3]:
+                if not isinstance(rel, dict) or not rel.get("title"):
+                    continue
+                flattened.append(
+                    {
+                        "channel_id": cid,
+                        "artist_name": aname,
+                        "title": rel.get("title"),
+                        "browseId": rel.get("browseId"),
+                        "year": rel.get("year"),
+                        "type": rel.get("type") or "Release",
+                        "thumbnail_url": rel.get("thumbnail_url"),
+                        "fetched_at": entry.get("fetched_at"),
+                    }
+                )
+
+        def _sort_year(item: dict[str, Any]) -> int:
+            try:
+                return int(str(item.get("year") or "0").strip()[:4])
+            except (TypeError, ValueError):
+                return 0
+
+        flattened.sort(key=_sort_year, reverse=True)
+        return flattened[:18]
+
     async def build_personalized_home(
         self, mood: str = "for_you", refresh: bool = False
     ) -> dict[str, Any]:
-        """Build a fast, personalized home feed adapting to user history, top artists & trends."""
+        """Build a rich, personalized multi-shelf home feed adapting to taste, pins & moods."""
         cache_key = mood.lower().strip() or "for_you"
         now = time.monotonic()
         if not refresh and cache_key in self._home_cache:
@@ -368,66 +693,110 @@ class BridgeController:
             if now < expires_at:
                 return cached_payload
 
+        if not self._blocked_norms:
+            with suppress(Exception):
+                self._blocked_norms = await self.library.get_blocked_artist_norms()
+
         greeting = _time_greeting()
 
-        # Mood-specific view
+        async def _safe_search(query: str | None, limit: int = 14) -> list[dict[str, Any]]:
+            if not query:
+                return []
+            try:
+                res = await self.ytm.search(query, filter_type="songs", limit=limit)
+                return self._filter_blocked_items([t.model_dump() for t in res])
+            except Exception:  # noqa: BLE001
+                return []
+
+        # Multi-shelf mood view
         if cache_key in _MOOD_CONFIG:
-            title, subtitle, queries = _MOOD_CONFIG[cache_key]
-            chosen_query = random.choice(queries) if refresh else queries[0]
-            candidate_queries = [chosen_query, *[q for q in queries if q != chosen_query][:1]]
-            dumped: list[dict[str, Any]] = []
-            for q in candidate_queries:
-                try:
-                    tracks = await self.ytm.search(q, filter_type="songs", limit=18)
-                    dumped = [t.model_dump() for t in tracks]
+            shelf_defs = _MOOD_CONFIG[cache_key]
+
+            async def _fetch_mood_shelf(
+                idx: int, spec: tuple[str, str, str, str, list[str]]
+            ) -> dict[str, Any] | None:
+                shelf_id, layout, title, subtitle, queries = spec
+                chosen_query = random.choice(queries) if refresh else queries[0]
+                candidates = [chosen_query, *[q for q in queries if q != chosen_query][:1]]
+                limit = 16 if layout == "compact_grid" else 14
+                dumped: list[dict[str, Any]] = []
+                for q in candidates:
+                    dumped = await _safe_search(q, limit=limit)
                     if dumped:
                         break
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Mood search failed for %s (%r): %s", cache_key, q, e)
+                if not dumped:
+                    return None
+                if refresh:
+                    random.shuffle(dumped)
+                return {
+                    "id": f"mood_{cache_key}_{shelf_id}_{idx}",
+                    "title": title,
+                    "subtitle": subtitle,
+                    "layout": layout,
+                    "contents": dumped[:limit],
+                }
 
-            mood_sections: list[dict[str, Any]] = (
-                [
-                    {
-                        "id": f"mood_{cache_key}",
-                        "title": title,
-                        "subtitle": subtitle,
-                        "layout": "cards",
-                        "contents": dumped,
-                    }
-                ]
-                if dumped
-                else []
+            raw_mood_sections = await asyncio.gather(
+                *[_fetch_mood_shelf(i, spec) for i, spec in enumerate(shelf_defs)]
             )
+            mood_sections = [s for s in raw_mood_sections if s is not None]
+            speed_dial = (mood_sections[0]["contents"][:6] if mood_sections else [])
             payload = {
                 "greeting": greeting,
-                "speed_dial": [],
+                "speed_dial": speed_dial,
+                "pinned_tracks": [],
+                "pinned_artists": [],
+                "new_releases": [],
                 "sections": mood_sections,
                 "personalized": False,
             }
-            if dumped:
-                if len(self._home_cache) >= 4 and cache_key not in self._home_cache:
+            if mood_sections:
+                if len(self._home_cache) >= 8 and cache_key not in self._home_cache:
                     self._home_cache.pop(next(iter(self._home_cache)), None)
                 self._home_cache[cache_key] = (now + 300.0, payload)
             self.spawn_task(asyncio.to_thread(trim_memory))
             return payload
 
-        # Personalized "For You" view
+        # Full Personalized "For You" view
         most_played: list[dict[str, Any]] = []
         recent_history: list[dict[str, Any]] = []
         liked_tracks: list[dict[str, Any]] = []
+        forgotten_favs: list[dict[str, Any]] = []
+        offline_tracks: list[dict[str, Any]] = []
+        pins_data: dict[str, list[dict[str, Any]]] = {"tracks": [], "artists": []}
+        new_releases: list[dict[str, Any]] = []
 
         with suppress(Exception):
-            most_played, recent_history, liked_tracks = await asyncio.gather(
-                self.library.get_most_played(limit=12),
-                self.library.get_history(limit=12),
+            (
+                most_played,
+                recent_history,
+                liked_tracks,
+                forgotten_favs,
+                offline_tracks,
+                pins_data,
+                new_releases,
+            ) = await asyncio.gather(
+                self.library.get_most_played(limit=16),
+                self.library.get_history(limit=16),
                 self.library.list_liked(),
+                self.library.get_forgotten_favorites(limit=12),
+                self.library.list_offline_tracks(limit=14),
+                self.library.get_pins(),
+                self.get_followed_new_releases(trigger_refresh=True),
             )
 
-        # Build Speed Dial (Jump Back In) from most played + recent + liked
+        pinned_tracks = pins_data.get("tracks", [])
+        pinned_artists = [
+            a
+            for a in pins_data.get("artists", [])
+            if not (self._blocked_norms and artist_matches_blocked(a.get("name", ""), self._blocked_norms))
+        ]
+
+        # Build Speed Dial (Jump Back In) from most played + recent + liked (excluding blocked)
         speed_dial: list[dict[str, Any]] = []
         seen_dial: set[str] = set()
-        for pool in (most_played[:4], recent_history[:4], liked_tracks[:4]):
-            for item in pool:
+        for pool in (most_played[:5], recent_history[:5], liked_tracks[:5]):
+            for item in self._filter_blocked_items(pool):
                 vid = item.get("video_id")
                 if vid and vid not in seen_dial:
                     seen_dial.add(vid)
@@ -437,8 +806,8 @@ class BridgeController:
             if len(speed_dial) >= 6:
                 break
 
-        # Choose personalization seeds from user's listening profile
-        seed_pool = most_played[:8] + liked_tracks[:6] + recent_history[:6]
+        # Choose multiple personalization seeds from user's listening profile
+        seed_pool = self._filter_blocked_items(most_played[:10] + liked_tracks[:8] + recent_history[:8])
         unique_seeds: list[dict[str, Any]] = []
         seen_seed_ids: set[str] = set()
         for s in seed_pool:
@@ -448,28 +817,50 @@ class BridgeController:
                 unique_seeds.append(s)
 
         seed_track: dict[str, Any] | None = None
+        second_seed_track: dict[str, Any] | None = None
         if unique_seeds:
-            seed_track = random.choice(unique_seeds[:6]) if refresh else unique_seeds[0]
+            if refresh and len(unique_seeds) > 1:
+                sampled = random.sample(unique_seeds[:8], k=min(2, len(unique_seeds[:8])))
+                seed_track = sampled[0]
+                second_seed_track = sampled[1] if len(sampled) > 1 else None
+            else:
+                seed_track = unique_seeds[0]
+                second_seed_track = unique_seeds[1] if len(unique_seeds) > 1 else None
 
         # Extract top artists from user's play counts & likes
         artist_scores: dict[str, int] = {}
         for item in most_played:
-            raw_artist = (item.get("artist") or "").split(",")[0].strip()
-            if raw_artist and raw_artist.lower() != "unknown artist":
+            raw_artist = (split_artist_names(item.get("artist")) or [""])[0].strip()
+            if (
+                raw_artist
+                and raw_artist.lower() != "unknown artist"
+                and not artist_matches_blocked(raw_artist, self._blocked_norms)
+            ):
                 artist_scores[raw_artist] = artist_scores.get(raw_artist, 0) + max(
                     1, int(item.get("play_count") or 1)
                 )
-        for item in liked_tracks[:15]:
-            raw_artist = (item.get("artist") or "").split(",")[0].strip()
-            if raw_artist and raw_artist.lower() != "unknown artist":
+        for item in liked_tracks[:18]:
+            raw_artist = (split_artist_names(item.get("artist")) or [""])[0].strip()
+            if (
+                raw_artist
+                and raw_artist.lower() != "unknown artist"
+                and not artist_matches_blocked(raw_artist, self._blocked_norms)
+            ):
                 artist_scores[raw_artist] = artist_scores.get(raw_artist, 0) + 2
 
         top_artists = [
             a for a, _ in sorted(artist_scores.items(), key=lambda kv: kv[1], reverse=True)
         ]
         chosen_artist: str | None = None
+        second_artist: str | None = None
         if top_artists:
-            chosen_artist = random.choice(top_artists[:4]) if refresh else top_artists[0]
+            if refresh and len(top_artists) > 1:
+                picked = random.sample(top_artists[:5], k=min(2, len(top_artists[:5])))
+                chosen_artist = picked[0]
+                second_artist = picked[1] if len(picked) > 1 else None
+            else:
+                chosen_artist = top_artists[0]
+                second_artist = top_artists[1] if len(top_artists) > 1 else None
 
         trending_q = random.choice(_TRENDING_QUERIES) if refresh else _TRENDING_QUERIES[0]
 
@@ -486,35 +877,38 @@ class BridgeController:
                 return []
             try:
                 res = await self.ytm.get_watch_radio(vid, limit=14)
-                return [t.model_dump() for t in res if t.video_id != vid]
+                dumped = [t.model_dump() for t in res if t.video_id != vid]
+                return self._filter_blocked_items(dumped)
             except Exception:  # noqa: BLE001
                 return []
 
-        async def _safe_search(query: str | None, limit: int = 12) -> list[dict[str, Any]]:
-            if not query:
-                return []
-            try:
-                res = await self.ytm.search(query, filter_type="songs", limit=limit)
-                return [t.model_dump() for t in res]
-            except Exception:  # noqa: BLE001
-                return []
-
-        home_raw, radio_tracks, artist_tracks, trending_tracks = await asyncio.gather(
+        (
+            home_raw,
+            radio_tracks,
+            second_radio_tracks,
+            artist_tracks,
+            second_artist_tracks,
+            trending_tracks,
+            chill_discover,
+        ) = await asyncio.gather(
             _safe_home(),
             _safe_radio(seed_track.get("video_id") if seed_track else None),
-            _safe_search(f"{chosen_artist} songs" if chosen_artist else None, limit=12),
-            _safe_search(trending_q, limit=12),
+            _safe_radio(second_seed_track.get("video_id") if second_seed_track else None),
+            _safe_search(f"{chosen_artist} songs" if chosen_artist else None, limit=14),
+            _safe_search(f"{second_artist} songs" if second_artist else None, limit=14),
+            _safe_search(trending_q, limit=14),
+            _safe_search("chill acoustic indie hit songs", limit=14),
         )
 
         if not trending_tracks:
             fallback_trending_q = next((q for q in _TRENDING_QUERIES if q != trending_q), None)
             if fallback_trending_q:
-                trending_tracks = await _safe_search(fallback_trending_q, limit=12)
+                trending_tracks = await _safe_search(fallback_trending_q, limit=14)
 
         sections: list[dict[str, Any]] = []
-        is_personalized = bool(seed_track or most_played or liked_tracks)
+        is_personalized = bool(seed_track or most_played or liked_tracks or pinned_tracks)
 
-        # 1. Quick Picks (Metrolist-style compact grid combining YTM Quick Picks + radio)
+        # 1. Quick Picks (Metrolist-style compact grid combining YTM Quick Picks + radio/trending)
         quick_pick_items: list[dict[str, Any]] = []
         seen_qp: set[str] = set()
         for sec in home_raw:
@@ -524,6 +918,8 @@ class BridgeController:
                 elif isinstance(item, dict) and item.get("video_id"):
                     item_dict = item
                 else:
+                    continue
+                if artist_matches_blocked(str(item_dict.get("artist") or ""), self._blocked_norms):
                     continue
                 vid = item_dict.get("video_id")
                 if vid and vid not in seen_qp:
@@ -562,23 +958,37 @@ class BridgeController:
                     "title": f"Because you played {seed_track.get('title', 'your favorites')}",
                     "subtitle": "Radio mix curated from your personal listening taste",
                     "layout": "cards",
-                    "contents": radio_tracks[:12],
+                    "contents": radio_tracks[:14],
                 }
             )
 
-        # 3. Your Most Played (from user's local play_count stats)
-        if most_played:
+        # 3. Your Most Played
+        filtered_most = self._filter_blocked_items(most_played)
+        if filtered_most:
             sections.append(
                 {
                     "id": "most_played",
                     "title": "Your Most Played",
                     "subtitle": "Songs you keep coming back to",
                     "layout": "cards",
-                    "contents": most_played[:12],
+                    "contents": filtered_most[:14],
                 }
             )
 
-        # 4. More from Top Artist
+        # 4. Forgotten Favorites
+        filtered_forgotten = self._filter_blocked_items(forgotten_favs)
+        if filtered_forgotten:
+            sections.append(
+                {
+                    "id": "forgotten_favorites",
+                    "title": "Forgotten Favorites",
+                    "subtitle": "Past favorites you haven't spun recently",
+                    "layout": "cards",
+                    "contents": filtered_forgotten[:12],
+                }
+            )
+
+        # 5. More from Top Artist
         if chosen_artist and artist_tracks:
             sections.append(
                 {
@@ -586,11 +996,51 @@ class BridgeController:
                     "title": f"More from {chosen_artist}",
                     "subtitle": "Based on your most listened artists",
                     "layout": "cards",
-                    "contents": artist_tracks[:12],
+                    "contents": artist_tracks[:14],
                 }
             )
 
-        # 5. Live Trending Now
+        # 6. Second Artist Mix (richer multi-artist personal feed)
+        if second_artist and second_artist_tracks:
+            sections.append(
+                {
+                    "id": "second_artist",
+                    "title": f"Deep Cut Mix: {second_artist}",
+                    "subtitle": "Because they appear across your library",
+                    "layout": "cards",
+                    "contents": second_artist_tracks[:14],
+                }
+            )
+
+        # 7. Secondary Taste Radio Mix
+        if second_seed_track and second_radio_tracks:
+            primary_ids = {t.get("video_id") for t in radio_tracks}
+            distinct_radio = [t for t in second_radio_tracks if t.get("video_id") not in primary_ids]
+            if len(distinct_radio) >= 4:
+                sections.append(
+                    {
+                        "id": "taste_radio_2",
+                        "title": f"Similar to {second_seed_track.get('title', 'your picks')}",
+                        "subtitle": "Explore closely matched tracks from your history",
+                        "layout": "cards",
+                        "contents": distinct_radio[:14],
+                    }
+                )
+
+        # 8. Ready Offline
+        filtered_offline = self._filter_blocked_items(offline_tracks)
+        if filtered_offline:
+            sections.append(
+                {
+                    "id": "offline_ready",
+                    "title": "Ready Offline",
+                    "subtitle": "Cached on your PC for instant zero-buffering playback",
+                    "layout": "cards",
+                    "contents": filtered_offline[:14],
+                }
+            )
+
+        # 9. Live Trending Now
         if trending_tracks:
             sections.append(
                 {
@@ -598,38 +1048,58 @@ class BridgeController:
                     "title": "Trending Now",
                     "subtitle": "Fresh chart-toppers on YouTube Music",
                     "layout": "cards",
-                    "contents": trending_tracks[:12],
+                    "contents": trending_tracks[:14],
                 }
             )
 
-        # 6. Additional YTM Home sections if available
-        for idx, sec in enumerate(home_raw[1:3]):
-            valid = [
+        # 10. Additional YTM Home sections (up to 4 shelves) + fallback discovery mix
+        added_ytm_count = 0
+        for idx, sec in enumerate(home_raw[1:5]):
+            raw_items = [
                 c.model_dump() if isinstance(c, Track) else c
                 for c in sec.get("contents", [])
                 if isinstance(c, Track) or (isinstance(c, dict) and c.get("video_id"))
             ]
+            valid = self._filter_blocked_items(raw_items)
             if valid:
+                added_ytm_count += 1
                 sections.append(
                     {
                         "id": f"ytm_home_{idx}",
                         "title": sec.get("title") or "Recommended Mixes",
                         "layout": "cards",
-                        "contents": valid[:12],
+                        "contents": valid[:14],
+                    }
+                )
+
+        if added_ytm_count == 0 and chill_discover:
+            seen_t = {t.get("video_id") for t in trending_tracks}
+            fresh_chill = [t for t in chill_discover if t.get("video_id") not in seen_t]
+            if fresh_chill:
+                sections.append(
+                    {
+                        "id": "discover_vibes",
+                        "title": "Recommended Acoustic & Chill",
+                        "subtitle": "Hand-picked mellow vibes to discover",
+                        "layout": "cards",
+                        "contents": fresh_chill[:14],
                     }
                 )
 
         payload = {
             "greeting": greeting,
             "speed_dial": speed_dial,
+            "pinned_tracks": pinned_tracks,
+            "pinned_artists": pinned_artists,
+            "new_releases": new_releases,
             "sections": sections,
             "personalized": is_personalized,
         }
-        has_content = bool(speed_dial) or any(
+        has_content = bool(speed_dial or pinned_tracks or pinned_artists or new_releases) or any(
             bool(sec.get("contents")) for sec in sections
         )
         if has_content:
-            if len(self._home_cache) >= 4 and cache_key not in self._home_cache:
+            if len(self._home_cache) >= 8 and cache_key not in self._home_cache:
                 self._home_cache.pop(next(iter(self._home_cache)), None)
             self._home_cache[cache_key] = (now + 300.0, payload)
         self.spawn_task(asyncio.to_thread(trim_memory))
@@ -700,6 +1170,7 @@ class BridgeController:
             self._schedule_lyrics_prefetch(lyrics_targets)
 
     async def _after_play_started(self, target: Track | None) -> None:
+        await self._rotate_play_session(target, playing=True)
         if os.environ.get("PYTEST_CURRENT_TEST"):
             preview = self.queue.next_track_preview
             if preview:
@@ -709,7 +1180,7 @@ class BridgeController:
 
         self._cancel_pending_prefetch()
 
-        if target is not None:
+        if target is not None and not self._pause_listening_history:
             async def _record() -> None:
                 with suppress(Exception):
                     await self.library.record_play(target.video_id, target)
@@ -908,6 +1379,8 @@ class BridgeController:
                 self._track_changed_payload(next_track),
             )
         else:
+            await self._flush_play_session(force=True)
+            self._reset_play_session(None, playing=False)
             self.player.pause()
             await self.ws_manager.broadcast(
                 "track_changed",
@@ -917,6 +1390,8 @@ class BridgeController:
 
     async def toggle_play_pause(self) -> dict[str, Any]:
         if self.player.state in ("playing", "buffering"):
+            self._pause_play_session()
+            await self._flush_play_session(force=True)
             self.player.pause()
             tick_data = self.get_playback_tick_data()
             await self.ws_manager.broadcast("playback_tick", tick_data)
@@ -945,7 +1420,11 @@ class BridgeController:
             else:
                 target = Track(video_id=video_id, title=video_id)
                 self.queue.append(target)
-                self.queue.current_index = len(self.queue.items) - 1
+                inserted_idx = next(
+                    (i for i, t in enumerate(self.queue.items) if t.video_id == target.video_id),
+                    len(self.queue.items) - 1,
+                )
+                self.queue.current_index = inserted_idx
                 self.queue._notify()
         elif target is not None:
             curr_q = self.queue.current_track
@@ -960,7 +1439,11 @@ class BridgeController:
                     self.queue._notify()
                 else:
                     self.queue.append(target)
-                    self.queue.current_index = len(self.queue.items) - 1
+                    inserted_idx = next(
+                        (i for i, t in enumerate(self.queue.items) if t.video_id == target.video_id),
+                        len(self.queue.items) - 1,
+                    )
+                    self.queue.current_index = inserted_idx
                     self.queue._notify()
 
         curr_target = target
@@ -1002,6 +1485,10 @@ class BridgeController:
                     and getattr(self.player, "loaded_video_id", None) is not None
                 ):
                     self.player.resume()
+                    if curr is not None:
+                        await self._rotate_play_session(curr, playing=True)
+                    elif self._play_session_vid is not None:
+                        self._play_session_last_ts = time.monotonic()
                 elif curr is not None:
                     await self.ws_manager.broadcast(
                         "track_changed",
@@ -1198,6 +1685,18 @@ class BridgeController:
         while not self._shutdown:
             curr_state = self.player.state
             try:
+                if curr_state == "playing":
+                    curr_trk = self.player.current_track or self.queue.current_track
+                    if curr_trk is not None:
+                        if self._play_session_vid != curr_trk.video_id:
+                            self._reset_play_session(curr_trk, playing=True)
+                        elif self._play_session_last_ts is None:
+                            self._play_session_last_ts = time.monotonic()
+                        await self._flush_play_session(force=False)
+                elif last_state == "playing":
+                    self._pause_play_session()
+                    await self._flush_play_session(force=True)
+
                 if curr_state == "playing" or last_state == "playing":
                     if self.ws_manager.active_connections:
                         data = self.get_playback_tick_data()
@@ -1234,11 +1733,14 @@ class BridgeController:
         return None
 
     def shutdown(self) -> None:
+        self._pause_play_session()
         self.stop_tick_loop()
         self.stop_media_keys()
         if hasattr(self.queue, "flush_sync"):
             self.queue.flush_sync()
         self._cancel_pending_prefetch()
+        if self._releases_refresh_task and not self._releases_refresh_task.done():
+            self._releases_refresh_task.cancel()
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
@@ -1302,6 +1804,37 @@ class DownloadTrackRequest(BaseModel):
     track_meta: Track | dict[str, Any] | None = None
 
 
+class PinArtistRequest(BaseModel):
+    channel_id: str | None = None
+    name: str = Field(min_length=1)
+    thumbnail_url: str | None = None
+
+
+class BlockArtistRequest(BaseModel):
+    name: str = Field(min_length=1)
+
+
+class TrackUpdateRequest(BaseModel):
+    title: str | None = None
+    artist: str | None = None
+    album: str | None = None
+
+
+class FollowArtistRequest(BaseModel):
+    channel_id: str | None = None
+    name: str = Field(min_length=1)
+    thumbnail_url: str | None = None
+
+
+class ArtistRadioRequest(BaseModel):
+    channel_id: str | None = None
+    name: str = Field(min_length=1)
+
+
+class SurpriseRadioRequest(BaseModel):
+    seed_video_id: str | None = None
+
+
 def create_app(
     controller: BridgeController | None = None,
     token: str | None = None,
@@ -1314,6 +1847,13 @@ def create_app(
         loop = asyncio.get_running_loop()
         ctrl.set_loop(loop)
         await init_db(ctrl.db_path)
+        await ctrl.refresh_blocked_cache()
+        threshold = await ctrl.get_setting("history_threshold_s", 30)
+        if isinstance(threshold, (int, float)) and threshold > 0:
+            ctrl._history_threshold_s = float(threshold)
+        ctrl._pause_listening_history = bool(
+            await ctrl.get_setting("pause_listening_history", False)
+        )
         if not ctrl.queue.items:
             await ctrl.queue.load_from_db()
         ctrl.start_tick_loop()
@@ -1327,6 +1867,12 @@ def create_app(
 
                 ctrl.spawn_task(backfill_downloaded_lyrics(ctrl.ytm, ctrl.db_path))
 
+                async def _startup_releases_refresh() -> None:
+                    await asyncio.sleep(3.0)
+                    await ctrl._refresh_followed_releases_worker(limit_artists=6)
+
+                ctrl.spawn_task(_startup_releases_refresh())
+
                 upd_cfg = getattr(get_config(), "updates", None)
                 if upd_cfg and upd_cfg.enabled and upd_cfg.check_on_startup:
                     async def _startup_update_check() -> None:
@@ -1337,6 +1883,7 @@ def create_app(
                     ctrl.spawn_task(_startup_update_check())
             yield
         finally:
+            ctrl._pause_play_session()
             ctrl.shutdown()
             with suppress(Exception):
                 from metrolite.ytm.lyrics import close_lyrics_clients
@@ -1547,23 +2094,36 @@ def create_app(
             raise HTTPException(status_code=400, detail="Either name or channel_id is required")
         cache_key = f"{(channel_id or '').strip()}::{(name or '').strip().lower()}"
         now = time.monotonic()
+        cached_payload: dict[str, Any] | None = None
         if cache_key in ctrl._artist_cache:
             exp, payload = ctrl._artist_cache[cache_key]
             if now < exp:
-                return payload
-        try:
-            payload = await ctrl.ytm.get_artist_profile(name=name, channel_id=channel_id)
-            if len(ctrl._artist_cache) >= 8 and cache_key not in ctrl._artist_cache:
-                ctrl._artist_cache.pop(next(iter(ctrl._artist_cache)), None)
-            ctrl._artist_cache[cache_key] = (now + 300.0, payload)
-            ctrl.spawn_task(asyncio.to_thread(trim_memory))
-            return payload
-        except Exception as e:
-            logger.error("Artist profile fetch failed (%r / %r): %s", name, channel_id, e)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to fetch artist profile: {e}",
-            ) from e
+                cached_payload = payload
+        if cached_payload is None:
+            try:
+                cached_payload = await ctrl.ytm.get_artist_profile(name=name, channel_id=channel_id)
+                if len(ctrl._artist_cache) >= 8 and cache_key not in ctrl._artist_cache:
+                    ctrl._artist_cache.pop(next(iter(ctrl._artist_cache)), None)
+                ctrl._artist_cache[cache_key] = (now + 300.0, cached_payload)
+                ctrl.spawn_task(asyncio.to_thread(trim_memory))
+            except Exception as e:
+                logger.error("Artist profile fetch failed (%r / %r): %s", name, channel_id, e)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Failed to fetch artist profile: {e}",
+                ) from e
+
+        artist_name = str(cached_payload.get("artist") or name or "").strip()
+        artist_cid = str(cached_payload.get("channel_id") or channel_id or "").strip() or None
+        is_followed = await ctrl.library.is_artist_followed(channel_id=artist_cid, name=artist_name)
+        pins = await ctrl.library.get_pins()
+        artist_norm = normalize_artist_name(artist_name)
+        is_pinned = any(
+            (artist_cid and p.get("channel_id") == artist_cid)
+            or (artist_norm and normalize_artist_name(p.get("name")) == artist_norm)
+            for p in pins.get("artists", [])
+        )
+        return {**cached_payload, "is_followed": is_followed, "is_pinned": is_pinned}
 
     @app.get("/album", dependencies=[Depends(verify_token)])
     async def get_album_details(
@@ -1618,6 +2178,8 @@ def create_app(
 
     @app.post("/player/pause", dependencies=[Depends(verify_token)])
     async def player_pause() -> dict[str, Any]:
+        ctrl._pause_play_session()
+        await ctrl._flush_play_session(force=True)
         ctrl.player.pause()
         tick_data = ctrl.get_playback_tick_data()
         await ctrl.ws_manager.broadcast("playback_tick", tick_data)
@@ -1757,6 +2319,10 @@ def create_app(
         elif action == "move":
             if body.from_idx is not None and body.to_idx is not None:
                 ctrl.queue.move(body.from_idx, body.to_idx)
+
+        elif action == "promote":
+            if body.index is None or not ctrl.queue.promote(body.index):
+                raise HTTPException(status_code=400, detail="Invalid radio item index to promote")
 
         elif action == "clear":
             ctrl._cancel_pending_prefetch()
@@ -1982,11 +2548,364 @@ def create_app(
                 )
             await conn.commit()
 
+        if "history_threshold_s" in settings_dict:
+            val = settings_dict["history_threshold_s"]
+            if isinstance(val, (int, float)) and val > 0:
+                ctrl._history_threshold_s = float(val)
+        if "pause_listening_history" in settings_dict:
+            ctrl._pause_listening_history = bool(settings_dict["pause_listening_history"])
+
         await ctrl.ws_manager.broadcast(
             "library_changed",
             {"type": "settings_updated", "settings": settings_dict},
         )
         return settings_dict
+
+    @app.get("/player/details", dependencies=[Depends(verify_token)])
+    async def get_player_details(video_id: str | None = Query(default=None)) -> dict[str, Any]:
+        live = ctrl.player.get_audio_details()
+        live_vid = live.get("video_id")
+        target_vid = _require_valid_video_id(video_id) if video_id else live_vid
+        db_row = await ctrl.library.get_track(target_vid) if target_vid else None
+        is_current = bool(target_vid and live_vid and target_vid == live_vid)
+
+        if is_current:
+            result = dict(live)
+        elif db_row is not None:
+            result = {
+                "video_id": db_row.get("video_id"),
+                "title": db_row.get("title"),
+                "artist": db_row.get("artist"),
+                "album": db_row.get("album"),
+                "duration_s": db_row.get("duration_s") or 0,
+                "codec": None,
+                "bitrate_kbps": None,
+                "sample_rate_hz": None,
+                "channel_count": None,
+                "channel_layout": None,
+                "file_size_bytes": db_row.get("file_size_bytes"),
+                "path": db_row.get("local_path"),
+                "state": "idle",
+            }
+        else:
+            result = dict(live)
+            if target_vid and not result.get("video_id"):
+                result["video_id"] = target_vid
+
+        if db_row is not None:
+            result["title"] = db_row.get("title") or result.get("title")
+            result["artist"] = db_row.get("artist") or result.get("artist")
+            result["album"] = db_row.get("album") or result.get("album")
+            result["is_liked"] = bool(db_row.get("is_liked"))
+            result["play_count"] = int(db_row.get("play_count") or 0)
+            result["downloaded_at"] = db_row.get("downloaded_at")
+            local_path = db_row.get("local_path")
+            result["local_path"] = local_path
+            result["is_offline"] = bool(local_path)
+            if result.get("path") is None and local_path:
+                result["path"] = local_path
+            if result.get("file_size_bytes") is None:
+                if db_row.get("file_size_bytes") is not None:
+                    result["file_size_bytes"] = int(db_row["file_size_bytes"])
+                elif local_path:
+                    with suppress(OSError):
+                        p = Path(str(local_path))
+                        if p.is_file():
+                            result["file_size_bytes"] = p.stat().st_size
+        else:
+            result["is_offline"] = False
+            result["local_path"] = None
+            result["play_count"] = 0
+            result["is_liked"] = False
+        return result
+
+    @app.get("/pins", dependencies=[Depends(verify_token)])
+    async def list_pins() -> dict[str, list[dict[str, Any]]]:
+        return await ctrl.library.get_pins()
+
+    @app.post("/pins/artists", dependencies=[Depends(verify_token)])
+    async def pin_artist(body: PinArtistRequest) -> dict[str, Any]:
+        try:
+            pins = await ctrl.library.pin_artist(
+                channel_id=body.channel_id,
+                name=body.name,
+                thumbnail_url=body.thumbnail_url,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast("library_changed", {"type": "pins_updated"})
+        return pins
+
+    @app.delete("/pins/artists/{channel_id:path}", dependencies=[Depends(verify_token)])
+    async def unpin_artist(channel_id: str) -> dict[str, Any]:
+        removed = await ctrl.library.unpin_artist(channel_id)
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast("library_changed", {"type": "pins_updated"})
+        return {"status": "deleted" if removed else "not_found", "channel_id": channel_id}
+
+    @app.post("/pins/{video_id}", dependencies=[Depends(verify_token)])
+    async def pin_track(
+        video_id: str,
+        body: LikeTrackRequest | None = None,
+    ) -> dict[str, Any]:
+        valid_vid = _require_valid_video_id(video_id)
+        pins = await ctrl.library.pin_track(valid_vid, body.track_meta if body else None)
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "pins_updated", "video_id": valid_vid}
+        )
+        return pins
+
+    @app.delete("/pins/{video_id}", dependencies=[Depends(verify_token)])
+    async def unpin_track(video_id: str) -> dict[str, Any]:
+        valid_vid = _require_valid_video_id(video_id)
+        removed = await ctrl.library.unpin_track(valid_vid)
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "pins_updated", "video_id": valid_vid}
+        )
+        return {"status": "deleted" if removed else "not_found", "video_id": valid_vid}
+
+    @app.get("/privacy/blocked-artists", dependencies=[Depends(verify_token)])
+    async def get_blocked_artists() -> list[dict[str, Any]]:
+        return await ctrl.library.list_blocked_artists()
+
+    @app.post("/privacy/blocked-artists", dependencies=[Depends(verify_token)])
+    async def add_blocked_artist(body: BlockArtistRequest) -> dict[str, Any]:
+        try:
+            entry = await ctrl.library.block_artist(body.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await ctrl.refresh_blocked_cache()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "blocked_artists_updated", "entry": entry}
+        )
+        return entry
+
+    @app.delete("/privacy/blocked-artists/{name:path}", dependencies=[Depends(verify_token)])
+    async def remove_blocked_artist(name: str) -> dict[str, Any]:
+        removed = await ctrl.library.unblock_artist(name)
+        await ctrl.refresh_blocked_cache()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "blocked_artists_updated", "name": name}
+        )
+        return {"status": "deleted" if removed else "not_found", "name": name}
+
+    @app.delete("/history/{video_id}", dependencies=[Depends(verify_token)])
+    async def delete_history_entry(video_id: str) -> dict[str, Any]:
+        valid_vid = _require_valid_video_id(video_id)
+        removed = await ctrl.library.remove_from_history(valid_vid)
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "history_updated", "video_id": valid_vid}
+        )
+        return {"status": "deleted" if removed else "not_found", "video_id": valid_vid}
+
+    @app.patch("/tracks/{video_id}", dependencies=[Depends(verify_token)])
+    async def patch_track_metadata(
+        video_id: str,
+        body: TrackUpdateRequest,
+    ) -> dict[str, Any]:
+        valid_vid = _require_valid_video_id(video_id)
+        updated = await ctrl.library.update_track_metadata(
+            valid_vid,
+            title=body.title,
+            artist=body.artist,
+            album=body.album,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Track not found")
+        queue_changed = False
+        for item in ctrl.queue.items:
+            if item.video_id == valid_vid:
+                item.title = updated["title"]
+                item.artist = updated["artist"]
+                item.album = updated.get("album")
+                queue_changed = True
+        if queue_changed:
+            ctrl.queue._notify()
+        if ctrl.player.current_track and ctrl.player.current_track.video_id == valid_vid:
+            ctrl.player.current_track.title = updated["title"]
+            ctrl.player.current_track.artist = updated["artist"]
+            ctrl.player.current_track.album = updated.get("album")
+            await ctrl.ws_manager.broadcast(
+                "track_changed",
+                ctrl._track_changed_payload(ctrl.player.current_track),
+            )
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "track_updated", "video_id": valid_vid, "track": updated}
+        )
+        return updated
+
+    @app.get("/stats", dependencies=[Depends(verify_token)])
+    async def get_listening_stats(range: str = Query(default="1m")) -> dict[str, Any]:
+        try:
+            return await ctrl.library.get_stats(range)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/radio/surprise", dependencies=[Depends(verify_token)])
+    async def start_surprise_radio(
+        body: SurpriseRadioRequest | None = None,
+    ) -> dict[str, Any]:
+        seed_vid = (body.seed_video_id if body else None) or None
+        seed_meta: dict[str, Any] | None = None
+        if seed_vid:
+            seed_vid = _require_valid_video_id(seed_vid)
+        else:
+            liked, played, hist = await asyncio.gather(
+                ctrl.library.list_liked(),
+                ctrl.library.get_most_played(limit=12),
+                ctrl.library.get_history(limit=12),
+            )
+            pool = ctrl._filter_blocked_items(liked[:10] + played[:10] + hist[:10])
+            if pool:
+                seed_meta = random.choice(pool)
+                seed_vid = str(seed_meta["video_id"])
+
+        tracks: list[Track] = []
+        if seed_vid:
+            with suppress(Exception):
+                raw = await ctrl.ytm.get_watch_radio(seed_vid, limit=18)
+                tracks = [
+                    t
+                    for t in raw
+                    if not (
+                        ctrl._blocked_norms
+                        and artist_matches_blocked(t.artist, ctrl._blocked_norms)
+                    )
+                ]
+        if not tracks:
+            try:
+                q = random.choice(_TRENDING_QUERIES)
+                raw = await ctrl.ytm.search(q, filter_type="songs", limit=18)
+                tracks = [
+                    t
+                    for t in raw
+                    if not (
+                        ctrl._blocked_norms
+                        and artist_matches_blocked(t.artist, ctrl._blocked_norms)
+                    )
+                ]
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Surprise radio failed: {e}") from e
+
+        if not tracks:
+            raise HTTPException(status_code=502, detail="No playable tracks available for radio")
+
+        if len(tracks) > 2:
+            head, tail = tracks[0], tracks[1:]
+            random.shuffle(tail)
+            tracks = [head, *tail]
+
+        ctrl._cancel_pending_prefetch()
+        ctrl.queue.set_queue(tracks, start_index=0)
+        if ctrl.queue.current_track:
+            with suppress(StreamResolutionError):
+                await ctrl.play(track=ctrl.queue.current_track)
+        return {"status": "ok", "seed": seed_meta, "queue": ctrl.get_queue_data()}
+
+    @app.get("/artists/library", dependencies=[Depends(verify_token)])
+    async def get_artists_library() -> dict[str, Any]:
+        return await ctrl.library.list_artists_library()
+
+    @app.post("/artists/follow", dependencies=[Depends(verify_token)])
+    async def follow_artist_endpoint(body: FollowArtistRequest) -> dict[str, Any]:
+        try:
+            entry = await ctrl.library.follow_artist(
+                channel_id=body.channel_id,
+                name=body.name,
+                thumbnail_url=body.thumbnail_url,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctrl._home_cache.pop("for_you", None)
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "artist_followed", "artist": entry}
+        )
+        return entry
+
+    @app.delete("/artists/follow/{channel_id:path}", dependencies=[Depends(verify_token)])
+    async def unfollow_artist_endpoint(channel_id: str) -> dict[str, Any]:
+        removed = await ctrl.library.unfollow_artist(channel_id)
+        ctrl._home_cache.pop("for_you", None)
+        await ctrl.ws_manager.broadcast(
+            "library_changed", {"type": "artist_unfollowed", "channel_id": channel_id}
+        )
+        return {"status": "deleted" if removed else "not_found", "channel_id": channel_id}
+
+    @app.get("/artists/local", dependencies=[Depends(verify_token)])
+    async def get_local_artist_songs(
+        name: str | None = Query(default=None),
+        channel_id: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        if not (name and name.strip()) and not (channel_id and channel_id.strip()):
+            raise HTTPException(status_code=400, detail="Either name or channel_id is required")
+        return await ctrl.library.get_local_artist_tracks(name=name, channel_id=channel_id)
+
+    @app.post("/artists/radio", dependencies=[Depends(verify_token)])
+    async def start_artist_radio(body: ArtistRadioRequest) -> dict[str, Any]:
+        lookup_cid = (
+            None
+            if not body.channel_id or str(body.channel_id).startswith("local:")
+            else body.channel_id
+        )
+        profile: dict[str, Any] = {}
+        with suppress(Exception):
+            profile = await ctrl.ytm.get_artist_profile(name=body.name, channel_id=lookup_cid)
+
+        top_raw = profile.get("top_songs") or []
+        seed_tracks: list[Track] = []
+        for item in top_raw:
+            if isinstance(item, dict) and item.get("video_id"):
+                with suppress(Exception):
+                    seed_tracks.append(Track(**item))
+
+        related_tracks: list[Track] = []
+        if seed_tracks:
+            with suppress(Exception):
+                related_tracks = await ctrl.ytm.get_watch_radio(seed_tracks[0].video_id, limit=14)
+        if not seed_tracks and not related_tracks:
+            with suppress(Exception):
+                related_tracks = await ctrl.ytm.search(
+                    f"{body.name} songs", filter_type="songs", limit=16
+                )
+
+        merged: list[Track] = []
+        seen_ids: set[str] = set()
+        for t in [*seed_tracks[:8], *related_tracks]:
+            if t.video_id in seen_ids:
+                continue
+            if ctrl._blocked_norms and artist_matches_blocked(t.artist, ctrl._blocked_norms):
+                continue
+            seen_ids.add(t.video_id)
+            merged.append(t)
+
+        if not merged:
+            raise HTTPException(status_code=502, detail="Unable to build artist radio queue")
+
+        if len(merged) > 3:
+            first = merged[0]
+            rest = merged[1:]
+            random.shuffle(rest)
+            merged = [first, *rest]
+
+        ctrl._cancel_pending_prefetch()
+        ctrl.queue.set_queue(merged[:20], start_index=0)
+        if ctrl.queue.current_track:
+            with suppress(StreamResolutionError):
+                await ctrl.play(track=ctrl.queue.current_track)
+        return {
+            "status": "ok",
+            "artist": profile.get("artist") or body.name,
+            "queue": ctrl.get_queue_data(),
+        }
+
+    @app.get("/artists/new-releases", dependencies=[Depends(verify_token)])
+    async def get_artists_new_releases(refresh: bool = Query(default=False)) -> list[dict[str, Any]]:
+        return await ctrl.get_followed_new_releases(refresh=refresh, trigger_refresh=True)
 
     @app.get("/updates/status", dependencies=[Depends(verify_token)])
     async def get_update_status() -> dict[str, Any]:

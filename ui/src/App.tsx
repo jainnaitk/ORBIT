@@ -18,6 +18,9 @@ import { SearchView } from './views/SearchView';
 import { LibraryView } from './views/LibraryView';
 import { ArtistView, type ArtistNavTarget, type AlbumNavTarget } from './views/ArtistView';
 import { AlbumView } from './views/AlbumView';
+import { ArtistsLibraryView } from './views/ArtistsLibraryView';
+import { StatsView } from './views/StatsView';
+import { TrackActionsProvider } from './components/TrackContextMenu';
 import {
   CreatePlaylistModal,
   AddToPlaylistModal,
@@ -41,7 +44,7 @@ import {
 } from './api/client';
 import { extractTrackAccent, DEFAULT_COSMIC_ACCENT } from './utils/colorExtract';
 import { getTrackArtists } from './utils/artists';
-import type { Track, Playlist, EqPreset } from './api/types';
+import type { Track, Playlist, EqPreset, PinsResponse } from './api/types';
 
 type RightDrawerTab = 'none' | 'queue' | 'lyrics';
 
@@ -200,8 +203,15 @@ export default function App() {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [likedTracks, setLikedTracks] = useState<Track[]>([]);
   const [downloadTracks, setDownloadTracks] = useState<Track[]>([]);
+  const [downloadTrackMeta, setDownloadTrackMeta] = useState<Record<string, Track>>({});
+  const [pins, setPins] = useState<PinsResponse>({ tracks: [], artists: [] });
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const [libraryVersion, setLibraryVersion] = useState<number>(0);
+
+  const pinnedTrackIds = useMemo(
+    () => new Set(pins.tracks.map((t) => t.video_id)),
+    [pins.tracks]
+  );
 
   const downloadedIds = useMemo(
     () => new Set(downloadTracks.map((t) => t.video_id)),
@@ -514,6 +524,15 @@ export default function App() {
     [api]
   );
 
+  const refreshPinsOnly = useCallback(async () => {
+    try {
+      const p = await api.getPins();
+      setPins(p);
+    } catch {
+      // Ignore
+    }
+  }, [api]);
+
   const refreshLibraryStats = useCallback(async () => {
     if (refreshInFlightRef.current) {
       refreshPendingRef.current = true;
@@ -522,11 +541,12 @@ export default function App() {
 
     const run = (async () => {
       try {
-        const [pls, lk, dl, settings] = await Promise.allSettled([
+        const [pls, lk, dl, settings, pinsRes] = await Promise.allSettled([
           api.getPlaylists(),
           api.getLiked(),
           api.getDownloads(),
           api.getSettings(),
+          api.getPins(),
         ]);
         if (pls.status === 'fulfilled') setPlaylists(pls.value);
         if (lk.status === 'fulfilled') {
@@ -536,6 +556,9 @@ export default function App() {
         if (dl.status === 'fulfilled') setDownloadTracks(dl.value);
         if (settings.status === 'fulfilled') {
           applySettingsPayload(settings.value);
+        }
+        if (pinsRes.status === 'fulfilled') {
+          setPins(pinsRes.value);
         }
         setLibraryVersion((v) => v + 1);
       } catch {
@@ -567,6 +590,10 @@ export default function App() {
           setDownloadTracks(dl);
           return;
         }
+        if (evtType === 'pins_updated') {
+          await refreshPinsOnly();
+          return;
+        }
         if (
           evtType === 'playlist_created' ||
           evtType === 'playlist_deleted' ||
@@ -588,7 +615,7 @@ export default function App() {
       }
       await refreshLibraryStats();
     },
-    [api, applySettingsPayload, refreshLibraryStats]
+    [api, applySettingsPayload, refreshLibraryStats, refreshPinsOnly]
   );
 
   useEffect(() => {
@@ -951,6 +978,7 @@ export default function App() {
 
   const handleDownload = useCallback(
     async (track: Track) => {
+      setDownloadTrackMeta((prev) => ({ ...prev, [track.video_id]: track }));
       setDownloads((prev) => ({
         ...prev,
         [track.video_id]: {
@@ -966,6 +994,53 @@ export default function App() {
       try { await api.startDownload(track.video_id, track); } catch { /* Ignore */ }
     },
     [api, setDownloads]
+  );
+
+  const handleRetryDownload = useCallback(
+    async (videoId: string) => {
+      const meta = downloadTrackMeta[videoId];
+      setDownloads((prev) => ({
+        ...prev,
+        [videoId]: {
+          video_id: videoId,
+          status: 'queued',
+          percent: 0,
+          progress_pct: 0,
+          downloaded_bytes: 0,
+          total_bytes: 0,
+        },
+      }));
+      try { await api.startDownload(videoId, meta); } catch { /* Ignore */ }
+    },
+    [api, downloadTrackMeta, setDownloads]
+  );
+
+  const handleCancelDownload = useCallback(
+    async (videoId: string) => {
+      setDownloads((prev) => {
+        const next = { ...prev };
+        delete next[videoId];
+        return next;
+      });
+      try {
+        await api.deleteDownload(videoId);
+        toast.show('Download canceled', 'info');
+      } catch { /* Ignore */ }
+    },
+    [api, setDownloads]
+  );
+
+  const handleClearFinishedDownloads = useCallback(
+    (videoIds: string[]) => {
+      setDownloads((prev) => {
+        const next = { ...prev };
+        for (const vid of videoIds) {
+          delete next[vid];
+        }
+        return next;
+      });
+    },
+    [setDownloads]
   );
 
   const handleDeleteDownload = useCallback(
@@ -994,6 +1069,11 @@ export default function App() {
         toast.show('All tracks already downloaded offline', 'info');
         return;
       }
+      setDownloadTrackMeta((prev) => {
+        const next = { ...prev };
+        for (const t of pending) next[t.video_id] = t;
+        return next;
+      });
       setDownloads((prev) => {
         const next = { ...prev };
         for (const t of pending) {
@@ -1043,12 +1123,122 @@ export default function App() {
     try { await api.moveQueue(fromIdx, toIdx); } catch { /* Ignore */ }
   }, [api]);
 
+  const handlePromoteQueueItem = useCallback(async (index: number) => {
+    try {
+      await api.promoteQueue(index);
+      toast.show('Added to Up Next queue', 'accent');
+    } catch { /* Ignore */ }
+  }, [api]);
+
   const handleClearQueue = useCallback(async () => {
     try {
       await api.clearQueue();
       toast.show('Queue cleared', 'info');
     } catch { /* Ignore */ }
   }, [api]);
+
+  const handlePinToggle = useCallback(
+    async (track: Track) => {
+      try {
+        if (pinnedTrackIds.has(track.video_id)) {
+          await api.unpinTrack(track.video_id);
+          setPins((prev) => ({
+            ...prev,
+            tracks: prev.tracks.filter((t) => t.video_id !== track.video_id),
+          }));
+          toast.show(`Unpinned "${track.title}"`, 'info');
+        } else {
+          const updated = await api.pinTrack(track.video_id, track);
+          setPins(updated);
+          toast.show(`Pinned "${track.title}" to Speed Dial`, 'success');
+        }
+      } catch { /* Ignore */ }
+    },
+    [api, pinnedTrackIds]
+  );
+
+  const handleUnpinTrack = useCallback(
+    async (videoId: string) => {
+      setPins((prev) => ({
+        ...prev,
+        tracks: prev.tracks.filter((t) => t.video_id !== videoId),
+      }));
+      try {
+        await api.unpinTrack(videoId);
+      } catch {
+        await refreshPinsOnly();
+      }
+    },
+    [api, refreshPinsOnly]
+  );
+
+  const handleUnpinArtist = useCallback(
+    async (channelId: string) => {
+      setPins((prev) => ({
+        ...prev,
+        artists: prev.artists.filter((a) => a.channel_id !== channelId),
+      }));
+      try {
+        await api.unpinArtist(channelId);
+      } catch {
+        await refreshPinsOnly();
+      }
+    },
+    [api, refreshPinsOnly]
+  );
+
+  const handleStartRadio = useCallback(
+    async (track: Track) => {
+      toast.show(`Starting radio from ${track.title}...`, 'accent');
+      try {
+        await api.startSurpriseRadio(track.video_id);
+      } catch {
+        toast.show('Unable to start radio right now', 'info');
+      }
+    },
+    [api]
+  );
+
+  const handleSurpriseRadio = useCallback(async () => {
+    toast.show('Spinning up Surprise Mix...', 'accent');
+    try {
+      await api.startSurpriseRadio();
+    } catch {
+      toast.show('Unable to launch Surprise Mix', 'info');
+    }
+  }, [api]);
+
+  const handleShareTrack = useCallback((track: Track) => {
+    const url = `https://music.youtube.com/watch?v=${track.video_id}`;
+    void navigator.clipboard?.writeText(url);
+    toast.show('Copied track link to clipboard', 'success');
+  }, []);
+
+  const handleBlockArtist = useCallback(
+    async (artistName: string) => {
+      try {
+        await api.blockArtist(artistName);
+        setLibraryVersion((v) => v + 1);
+        toast.show(`Blocked "${artistName}" from Home & Radio`, 'info');
+      } catch { /* Ignore */ }
+    },
+    [api]
+  );
+
+  const handleSaveTrackMetadata = useCallback(
+    async (track: Track, patch: { title: string; artist: string; album: string | null }) => {
+      await api.updateTrackMetadata(track.video_id, patch);
+      setLikedTracks((prev) =>
+        prev.map((t) => (t.video_id === track.video_id ? { ...t, ...patch } : t))
+      );
+      setDownloadTracks((prev) =>
+        prev.map((t) => (t.video_id === track.video_id ? { ...t, ...patch } : t))
+      );
+      setLibraryVersion((v) => v + 1);
+      toast.show('Track metadata updated', 'success');
+    },
+    [api]
+  );
 
   const handleCreatePlaylist = useCallback(
     async (name: string, description: string) => {
@@ -1370,10 +1560,31 @@ export default function App() {
     ? `album:${activeAlbum?.browseId || ''}:${activeAlbum?.title || ''}`
     : activeTab;
 
+  const trackActionsContextValue = useMemo(
+    () => ({
+      pinnedTrackIds,
+      onPinToggle: handlePinToggle,
+      onStartRadio: handleStartRadio,
+      onShareTrack: handleShareTrack,
+      onBlockArtist: handleBlockArtist,
+      onSaveTrackMetadata: handleSaveTrackMetadata,
+      onOpenAddToPlaylist: handleOpenAddToPlaylist,
+    }),
+    [
+      pinnedTrackIds,
+      handlePinToggle,
+      handleStartRadio,
+      handleShareTrack,
+      handleBlockArtist,
+      handleSaveTrackMetadata,
+      handleOpenAddToPlaylist,
+    ]
+  );
+
   const hideMainShell = isWindowTransitioning || isIslandMode;
 
   return (
-    <>
+    <TrackActionsProvider value={trackActionsContextValue}>
       {isWindowTransitioning && (
         <div className="fixed inset-0 w-screen h-screen bg-transparent pointer-events-none z-[100]" />
       )}
@@ -1432,6 +1643,11 @@ export default function App() {
           onCloseUpdateTab={handleCloseUpdateTab}
           onCheckUpdates={handleCheckUpdates}
           onDownloadAndInstallUpdate={handleDownloadAndInstallUpdate}
+          downloads={downloads}
+          downloadTracks={downloadTrackMeta}
+          onRetryDownload={handleRetryDownload}
+          onCancelDownload={handleCancelDownload}
+          onClearFinishedDownloads={handleClearFinishedDownloads}
         />
 
         <div className="flex flex-1 min-h-0 overflow-hidden gap-2 sm:gap-3 px-2 sm:px-3 pb-2 relative">
@@ -1460,6 +1676,8 @@ export default function App() {
                   likedIds={likedIds}
                   downloads={downloads}
                   downloadedIds={downloadedIds}
+                  pins={pins}
+                  libraryVersion={libraryVersion}
                   onPlayTrack={handlePlaySingleHomeTrack}
                   onPlayAll={handlePlayAll}
                   onToggleLike={handleToggleLike}
@@ -1468,6 +1686,9 @@ export default function App() {
                   onOpenAddToPlaylist={handleOpenAddToPlaylist}
                   onDownload={handleDownload}
                   onDeleteDownload={handleDeleteDownload}
+                  onUnpinTrack={handleUnpinTrack}
+                  onUnpinArtist={handleUnpinArtist}
+                  onSurpriseRadio={handleSurpriseRadio}
                   onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
                   onOpenAlbum={(albumName, albumId, track) =>
                     handleOpenAlbum({
@@ -1528,6 +1749,25 @@ export default function App() {
                   onOpenAlbum={handleOpenAlbum}
                   onOpenArtist={handleOpenArtist}
                   onClose={handleGoBack}
+                  onArtistFollowChanged={() => setLibraryVersion((v) => v + 1)}
+                  onArtistPinChanged={() => void refreshPinsOnly()}
+                  onArtistRadioStarted={() => setRightDrawer('queue')}
+                />
+              )}
+
+              {activeTab === 'artists' && (
+                <ArtistsLibraryView
+                  libraryVersion={libraryVersion}
+                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+                  onArtistChanged={() => setLibraryVersion((v) => v + 1)}
+                />
+              )}
+
+              {activeTab === 'stats' && (
+                <StatsView
+                  libraryVersion={libraryVersion}
+                  onPlay={handlePlayTrack}
+                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
                 />
               )}
 
@@ -1594,12 +1834,31 @@ export default function App() {
           <QueueDrawer
             isOpen={rightDrawer === 'queue'}
             queue={queue}
+            downloads={downloads}
+            downloadedIds={downloadedIds}
             onClose={handleCloseRightDrawer}
             onPlayQueueItem={handlePlayQueueItem}
             onRemoveQueueItem={handleRemoveQueueItem}
             onMoveQueueItem={handleMoveQueueItem}
+            onPromoteQueueItem={handlePromoteQueueItem}
             onClearQueue={handleClearQueue}
             onToggleAutoplayRadio={handleToggleAutoplayRadio}
+            onToggleShuffle={handleToggleShuffle}
+            onCycleRepeat={handleCycleRepeat}
+            onAddNext={handleAddNext}
+            onAppendQueue={handleAppendQueue}
+            onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+            onOpenAlbum={(albumName, albumId, track) =>
+              handleOpenAlbum({
+                browseId: albumId,
+                title: albumName,
+                artist: track.artist,
+                videoId: track.video_id,
+              })
+            }
+            onOpenAddToPlaylist={handleOpenAddToPlaylist}
+            onDownload={handleDownload}
+            onDeleteDownload={handleDeleteDownload}
           />
 
           {/* Docked 360px Right Side-Panel Lyrics (Browse Home/Search/Library alongside live lyrics) */}
@@ -1679,6 +1938,7 @@ export default function App() {
         onPlayQueueItem={handlePlayQueueItem}
         onRemoveQueueItem={handleRemoveQueueItem}
         onMoveQueueItem={handleMoveQueueItem}
+        onPromoteQueueItem={handlePromoteQueueItem}
         onClearQueue={handleClearQueue}
         onToggleAutoplayRadio={handleToggleAutoplayRadio}
         onOpenAlbum={handleOpenTrackAlbum}
@@ -1711,6 +1971,7 @@ export default function App() {
         onToggleAutoDownloadLiked={handleToggleAutoDownloadLiked}
         lyricsEdgeBlur={lyricsEdgeBlur}
         onToggleLyricsEdgeBlur={handleToggleLyricsEdgeBlur}
+        onPrivacyChanged={() => setLibraryVersion((v) => v + 1)}
       />
 
       <UpdateAvailableModal
@@ -1740,6 +2001,6 @@ export default function App() {
         </div>
       )}
       </div>
-    </>
+    </TrackActionsProvider>
   );
 }

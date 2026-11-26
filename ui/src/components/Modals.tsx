@@ -1,8 +1,9 @@
 import { useState, useEffect, type FC, type FormEvent } from 'react';
-import { X, Plus, ListMusic, Sparkles, Download, AlignLeft } from 'lucide-react';
+import { X, Plus, ListMusic, Sparkles, Download, AlignLeft, EyeOff, Ban } from 'lucide-react';
 import { OrbitLogo } from './OrbitLogo';
+import { bridgeApi } from '../api/client';
 import type { CosmicEffectsMode } from './StarfieldBg';
-import type { Playlist, Track } from '../api/types';
+import type { BlockedArtist, Playlist, Track } from '../api/types';
 
 interface CreatePlaylistModalProps {
   isOpen: boolean;
@@ -198,6 +199,7 @@ interface SettingsModalProps {
   onToggleAutoDownloadLiked: () => void;
   lyricsEdgeBlur: boolean;
   onToggleLyricsEdgeBlur: () => void;
+  onPrivacyChanged?: () => void;
 }
 
 const COSMIC_MODES: { id: CosmicEffectsMode; label: string; desc: string }[] = [
@@ -215,7 +217,23 @@ export const SettingsModal: FC<SettingsModalProps> = ({
   onToggleAutoDownloadLiked,
   lyricsEdgeBlur,
   onToggleLyricsEdgeBlur,
+  onPrivacyChanged,
 }) => {
+  const [pauseHistory, setPauseHistory] = useState(false);
+  const [blockedArtists, setBlockedArtists] = useState<BlockedArtist[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    bridgeApi
+      .getSettings()
+      .then((s) => setPauseHistory(Boolean(s.pause_listening_history)))
+      .catch(() => {});
+    bridgeApi
+      .getBlockedArtists()
+      .then((list) => setBlockedArtists(list))
+      .catch(() => {});
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   return (
@@ -225,7 +243,7 @@ export const SettingsModal: FC<SettingsModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md ios-liquid-popover eh-modal-in rounded-[26px] p-6 space-y-5"
+        className="w-full max-w-md max-h-[84vh] overflow-y-auto no-scrollbar ios-liquid-popover eh-modal-in rounded-[26px] p-6 space-y-5"
       >
         <div className="flex items-center justify-between">
           <h2 className="text-base font-bold text-[#F4F6FF]">Settings</h2>
@@ -326,6 +344,71 @@ export const SettingsModal: FC<SettingsModalProps> = ({
               />
             </button>
           </div>
+
+          {/* Privacy: Pause Listening History */}
+          <div className="flex items-center justify-between p-3.5 rounded-xl bg-white/[0.04] border border-white/10">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-black/50 border border-white/10 flex items-center justify-center flex-none">
+                <EyeOff size={16} className="text-[#A6B0CF]" />
+              </div>
+              <div>
+                <div className="font-semibold text-[#F4F6FF]">Pause Listening History</div>
+                <div className="text-[11px] text-[#9AA5C4] mt-0.5">
+                  Stop logging plays and stats while active
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const next = !pauseHistory;
+                setPauseHistory(next);
+                void bridgeApi.setSettings({ pause_listening_history: next }).catch(() => {});
+              }}
+              aria-pressed={pauseHistory}
+              className={`w-10 h-5 rounded-full p-0.5 transition-colors flex-none ${
+                pauseHistory ? 'bg-[#F59E0B]' : 'bg-white/10 border border-white/15'
+              }`}
+            >
+              <div
+                className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
+                  pauseHistory ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Blocked Artists */}
+          {blockedArtists.length > 0 && (
+            <div className="p-3.5 rounded-xl bg-white/[0.04] border border-white/10 space-y-2.5">
+              <div className="flex items-center gap-2 text-[#F4F6FF] font-semibold">
+                <Ban size={14} className="text-[#FF6B9E]" />
+                <span>Blocked Artists ({blockedArtists.length})</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                {blockedArtists.map((art) => (
+                  <button
+                    key={art.artist_norm}
+                    type="button"
+                    onClick={() => {
+                      setBlockedArtists((prev) =>
+                        prev.filter((b) => b.artist_norm !== art.artist_norm)
+                      );
+                      void bridgeApi
+                        .unblockArtist(art.artist_norm)
+                        .then(() => onPrivacyChanged?.())
+                        .catch(() => {});
+                    }}
+                    title="Click to unblock artist"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-[11px] text-[#E6ECF8]"
+                  >
+                    <span>{art.display_name}</span>
+                    <X size={11} className="text-[#8E99BA]" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Creator Credit */}
           <div className="p-3.5 rounded-xl bg-black/50 border border-white/10 flex items-center justify-between">

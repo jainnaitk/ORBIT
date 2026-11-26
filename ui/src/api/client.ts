@@ -5,18 +5,26 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type {
   AlbumDetails,
+  ArtistNewRelease,
   ArtistProfile,
+  ArtistsLibraryResponse,
+  BlockedArtist,
   BridgeConfig,
   BridgeEventMap,
   DownloadProgress,
   EqPreset,
+  FollowedArtist,
   HomeSection,
+  ListeningStats,
   LyricsResponse,
   PersonalizedHomeResponse,
+  PinsResponse,
   PlaybackTick,
   Playlist,
   QueueData,
+  StatsRange,
   Track,
+  TrackDetails,
   UpdateState,
 } from './types';
 
@@ -623,6 +631,10 @@ export class BridgeApiClient {
     return this.updateQueue({ action: 'move', from_idx, to_idx });
   }
 
+  public async promoteQueue(index: number): Promise<QueueData> {
+    return this.updateQueue({ action: 'promote', index });
+  }
+
   public async clearQueue(): Promise<QueueData> {
     return this.updateQueue({ action: 'clear' });
   }
@@ -743,6 +755,132 @@ export class BridgeApiClient {
     return this.request('/updates/install', {
       method: 'POST',
     });
+  }
+
+  public async getPlayerDetails(videoId?: string): Promise<TrackDetails> {
+    const q = videoId ? `?video_id=${encodeURIComponent(videoId)}` : '';
+    return this.request(`/player/details${q}`);
+  }
+
+  public async getPins(): Promise<PinsResponse> {
+    return this.request('/pins');
+  }
+
+  public async pinTrack(videoId: string, track?: Track): Promise<PinsResponse> {
+    return this.request(`/pins/${encodeURIComponent(videoId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ track_meta: track }),
+    });
+  }
+
+  public async unpinTrack(videoId: string): Promise<{ status: string }> {
+    return this.request(`/pins/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+  }
+
+  public async pinArtist(artist: {
+    channel_id?: string | null;
+    name: string;
+    thumbnail_url?: string | null;
+  }): Promise<PinsResponse> {
+    return this.request('/pins/artists', {
+      method: 'POST',
+      body: JSON.stringify(artist),
+    });
+  }
+
+  public async unpinArtist(channelIdOrName: string): Promise<{ status: string }> {
+    return this.request(`/pins/artists/${encodeURIComponent(channelIdOrName)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async getBlockedArtists(): Promise<BlockedArtist[]> {
+    return this.request('/privacy/blocked-artists');
+  }
+
+  public async blockArtist(name: string): Promise<BlockedArtist> {
+    return this.request('/privacy/blocked-artists', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  public async unblockArtist(name: string): Promise<{ status: string }> {
+    return this.request(`/privacy/blocked-artists/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async removeHistoryEntry(videoId: string): Promise<{ status: string }> {
+    return this.request(`/history/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+  }
+
+  public async updateTrackMetadata(
+    videoId: string,
+    patch: { title?: string; artist?: string; album?: string | null }
+  ): Promise<Track> {
+    return this.request(`/tracks/${encodeURIComponent(videoId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  public async getStats(range: StatsRange = '1m'): Promise<ListeningStats> {
+    return this.request(`/stats?range=${encodeURIComponent(range)}`);
+  }
+
+  public async startSurpriseRadio(
+    seedVideoId?: string
+  ): Promise<{ status: string; seed?: Track | null; queue: QueueData }> {
+    return this.request('/radio/surprise', {
+      method: 'POST',
+      body: JSON.stringify({ seed_video_id: seedVideoId || null }),
+    });
+  }
+
+  public async getArtistsLibrary(): Promise<ArtistsLibraryResponse> {
+    return this.request('/artists/library');
+  }
+
+  public async followArtist(artist: {
+    channel_id?: string | null;
+    name: string;
+    thumbnail_url?: string | null;
+  }): Promise<FollowedArtist> {
+    return this.request('/artists/follow', {
+      method: 'POST',
+      body: JSON.stringify(artist),
+    });
+  }
+
+  public async unfollowArtist(channelIdOrName: string): Promise<{ status: string }> {
+    return this.request(`/artists/follow/${encodeURIComponent(channelIdOrName)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async getLocalArtistTracks(params: {
+    name?: string | null;
+    channel_id?: string | null;
+  }): Promise<Track[]> {
+    const qs = new URLSearchParams();
+    if (params.name) qs.set('name', params.name);
+    if (params.channel_id) qs.set('channel_id', params.channel_id);
+    return this.request(`/artists/local?${qs.toString()}`);
+  }
+
+  public async startArtistRadio(artist: {
+    channel_id?: string | null;
+    name: string;
+  }): Promise<{ status: string; artist: string; queue: QueueData }> {
+    return this.request('/artists/radio', {
+      method: 'POST',
+      body: JSON.stringify(artist),
+    });
+  }
+
+  public async getArtistsNewReleases(refresh: boolean = false): Promise<ArtistNewRelease[]> {
+    return this.request(`/artists/new-releases?refresh=${refresh ? 'true' : 'false'}`);
   }
 }
 

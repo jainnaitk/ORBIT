@@ -22,6 +22,7 @@ export interface Track {
   download_status?: 'none' | 'queued' | 'downloading' | 'completed' | 'failed';
   play_count?: number;
   last_played_at?: string | null;
+  source?: 'user' | 'radio' | null;
 }
 
 export interface ArtistRelease {
@@ -32,6 +33,14 @@ export interface ArtistRelease {
   thumbnail_url?: string | null;
   artist?: string;
   artist_id?: string | null;
+}
+
+export interface RelatedArtist {
+  name: string;
+  browse_id?: string | null;
+  channel_id?: string | null;
+  subscribers?: string | null;
+  thumbnail_url?: string | null;
 }
 
 export interface ArtistProfile {
@@ -45,6 +54,9 @@ export interface ArtistProfile {
   all_tracks: Track[];
   albums: ArtistRelease[];
   singles: ArtistRelease[];
+  related_artists?: RelatedArtist[];
+  is_followed?: boolean;
+  is_pinned?: boolean;
 }
 
 export interface AlbumDetails {
@@ -176,9 +188,116 @@ export interface HomeSection {
   contents: (Track | any)[];
 }
 
+export interface PinnedTrack extends Track {
+  position?: number;
+  pinned_at?: string;
+}
+
+export interface PinnedArtist {
+  channel_id: string;
+  name: string;
+  thumbnail_url?: string | null;
+  position?: number;
+  pinned_at?: string;
+}
+
+export interface PinsResponse {
+  tracks: PinnedTrack[];
+  artists: PinnedArtist[];
+}
+
+export interface BlockedArtist {
+  artist_norm: string;
+  display_name: string;
+  blocked_at: string;
+}
+
+export type StatsRange = '1w' | '1m' | '3m' | '6m' | '1y' | 'all';
+
+export interface StatsTrackItem extends Track {
+  plays: number;
+  listened_s: number;
+}
+
+export interface StatsArtistItem {
+  name: string;
+  artist_norm: string;
+  plays: number;
+  listened_s: number;
+  thumbnail_url?: string | null;
+}
+
+export interface ListeningStats {
+  range: StatsRange;
+  total_plays: number;
+  total_seconds: number;
+  top_tracks: StatsTrackItem[];
+  top_artists: StatsArtistItem[];
+}
+
+export interface FollowedArtist {
+  channel_id: string;
+  name: string;
+  artist_norm: string;
+  thumbnail_url?: string | null;
+  followed_at: string;
+}
+
+export interface LibraryArtistSummary {
+  channel_id: string;
+  name: string;
+  artist_norm: string;
+  thumbnail_url?: string | null;
+  track_count: number;
+  offline_count?: number;
+  liked_count?: number;
+  is_followed?: boolean;
+  followed_at?: string | null;
+}
+
+export interface ArtistsLibraryResponse {
+  followed: LibraryArtistSummary[];
+  in_library: LibraryArtistSummary[];
+}
+
+export interface ArtistNewRelease {
+  channel_id: string;
+  artist_name: string;
+  title: string;
+  browseId?: string | null;
+  year?: string | null;
+  type?: string | null;
+  thumbnail_url?: string | null;
+  fetched_at?: string | null;
+}
+
+export interface TrackDetails {
+  video_id?: string | null;
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  duration_s: number;
+  codec?: string | null;
+  bitrate_kbps?: number | null;
+  sample_rate_hz?: number | null;
+  channel_count?: number | null;
+  channel_layout?: string | null;
+  file_size_bytes?: number | null;
+  path?: string | null;
+  local_path?: string | null;
+  is_offline?: boolean;
+  is_liked?: boolean;
+  play_count?: number;
+  downloaded_at?: string | null;
+  state?: string;
+}
+
 export interface PersonalizedHomeResponse {
   greeting: string;
   speed_dial: Track[];
+  pinned_tracks?: PinnedTrack[];
+  pinned_artists?: PinnedArtist[];
+  new_releases?: ArtistNewRelease[];
   sections: HomeSection[];
   personalized: boolean;
 }

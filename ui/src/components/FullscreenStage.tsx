@@ -21,6 +21,7 @@ import {
   Trash2,
   X,
   GripVertical,
+  Plus,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { ArtistLinks } from './ArtistLinks';
@@ -69,6 +70,7 @@ interface FullscreenStageProps {
   onPlayQueueItem: (track: Track, index: number) => void;
   onRemoveQueueItem: (index: number) => void;
   onMoveQueueItem: (fromIdx: number, toIdx: number) => void;
+  onPromoteQueueItem?: (index: number) => void;
   onClearQueue: () => void;
   onToggleAutoplayRadio: () => void;
   onOpenAlbum?: (track: Track) => void;
@@ -105,6 +107,7 @@ export const FullscreenStage = ({
   onPlayQueueItem,
   onRemoveQueueItem,
   onMoveQueueItem,
+  onPromoteQueueItem,
   onClearQueue,
   onToggleAutoplayRadio,
   onOpenAlbum,
@@ -318,6 +321,7 @@ export const FullscreenStage = ({
   const currentQueueIndex = queue?.current_index ?? 0;
   const autoplayRadio = queue?.autoplay_radio ?? true;
 
+  const QUEUE_HEADER_HEIGHT = 30;
   const upNextEntries = useMemo(() => {
     if (!queueItems.length) return [];
     return queueItems
@@ -325,26 +329,84 @@ export const FullscreenStage = ({
       .filter(({ origIndex }) => !(currentTrack && origIndex === currentQueueIndex));
   }, [queueItems, currentQueueIndex, currentTrack]);
 
+  type StageQueueRow =
+    | { type: 'header'; id: string; label: string; count: number; isRadio: boolean }
+    | { type: 'item'; track: Track; origIndex: number; isRadio: boolean };
+
+  const splitQueueRows = useMemo<StageQueueRow[]>(() => {
+    const userItems = upNextEntries.filter(({ track }) => track.source !== 'radio');
+    const radioItems = upNextEntries.filter(({ track }) => track.source === 'radio');
+    const rows: StageQueueRow[] = [];
+    if (userItems.length > 0) {
+      rows.push({
+        type: 'header',
+        id: 'hdr-stage-user',
+        label: 'Up Next (Queue)',
+        count: userItems.length,
+        isRadio: false,
+      });
+      for (const u of userItems) {
+        rows.push({ type: 'item', track: u.track, origIndex: u.origIndex, isRadio: false });
+      }
+    }
+    if (radioItems.length > 0) {
+      rows.push({
+        type: 'header',
+        id: 'hdr-stage-radio',
+        label: 'Suggested (Radio)',
+        count: radioItems.length,
+        isRadio: true,
+      });
+      for (const r of radioItems) {
+        rows.push({ type: 'item', track: r.track, origIndex: r.origIndex, isRadio: true });
+      }
+    }
+    return rows;
+  }, [upNextEntries]);
+
   const queueVirtualizer = useVirtualizer({
-    count: rendered && activeTab === 'queue' ? upNextEntries.length : 0,
+    count: rendered && activeTab === 'queue' ? splitQueueRows.length : 0,
     getScrollElement: () => queueListRef.current,
-    estimateSize: () => QUEUE_ROW_HEIGHT,
+    estimateSize: (i) => (splitQueueRows[i]?.type === 'header' ? QUEUE_HEADER_HEIGHT : QUEUE_ROW_HEIGHT),
     overscan: 6,
   });
 
-  const recalcOverIndex = (clientY: number, itemCount: number) => {
+  const recalcOverIndex = (
+    clientY: number,
+    rowsSnapshot: StageQueueRow[],
+    isRadioSection: boolean
+  ) => {
     const listEl = queueListRef.current;
-    if (!listEl || itemCount <= 0) return;
+    if (!listEl || rowsSnapshot.length <= 0) return;
     const rect = listEl.getBoundingClientRect();
     const contentY = clientY - rect.top + listEl.scrollTop;
-    const idx = Math.max(0, Math.min(itemCount - 1, Math.floor(contentY / QUEUE_ROW_HEIGHT)));
-    if (idx !== overVisRef.current) {
-      overVisRef.current = idx;
-      setOverVisIdx(idx);
+    let accY = 0;
+    let bestIdx: number | null = null;
+    let bestDist = Infinity;
+    for (let i = 0; i < rowsSnapshot.length; i++) {
+      const r = rowsSnapshot[i];
+      const h = r.type === 'header' ? QUEUE_HEADER_HEIGHT : QUEUE_ROW_HEIGHT;
+      if (r.type === 'item' && r.isRadio === isRadioSection) {
+        const dist = Math.abs(contentY - (accY + h / 2));
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      }
+      accY += h;
+    }
+    if (bestIdx !== null && bestIdx !== overVisRef.current) {
+      overVisRef.current = bestIdx;
+      setOverVisIdx(bestIdx);
     }
   };
 
-  const handleQueueRowPointerDown = (e: React.PointerEvent, visIdx: number, track: Track) => {
+  const handleQueueRowPointerDown = (
+    e: React.PointerEvent,
+    visIdx: number,
+    track: Track,
+    isRadioSection: boolean
+  ) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
 
@@ -355,8 +417,7 @@ export const FullscreenStage = ({
     const startY = e.clientY;
     const rowLeft = listRect ? listRect.left : 0;
     const rowWidth = listRect ? listRect.width : 360;
-    const entriesSnapshot = upNextEntries;
-    const totalCount = entriesSnapshot.length;
+    const rowsSnapshot = splitQueueRows;
 
     dragVisRef.current = visIdx;
     overVisRef.current = visIdx;
@@ -399,7 +460,7 @@ export const FullscreenStage = ({
         const prevTop = el.scrollTop;
         el.scrollTop += delta;
         if (el.scrollTop !== prevTop) {
-          recalcOverIndex(py, totalCount);
+          recalcOverIndex(py, rowsSnapshot, isRadioSection);
         }
       }
       autoScrollRafRef.current = requestAnimationFrame(runAutoScroll);
@@ -427,7 +488,7 @@ export const FullscreenStage = ({
         y: moveEvent.clientY - QUEUE_ROW_HEIGHT * 0.5,
       });
 
-      recalcOverIndex(moveEvent.clientY, totalCount);
+      recalcOverIndex(moveEvent.clientY, rowsSnapshot, isRadioSection);
     };
 
     const onPointerUp = () => {
@@ -446,12 +507,15 @@ export const FullscreenStage = ({
       setOverVisIdx(null);
       setGhost(null);
 
-      if (wasDrag && fromV !== null && toV !== null && fromV !== toV) {
-        const fromOrig = entriesSnapshot[fromV]?.origIndex;
-        const toOrig = entriesSnapshot[toV]?.origIndex;
-        if (fromOrig !== undefined && toOrig !== undefined && fromOrig !== toOrig) {
-          onMoveQueueItem(fromOrig, toOrig);
-        }
+      const fromRow = fromV !== null ? rowsSnapshot[fromV] : undefined;
+      const toRow = toV !== null ? rowsSnapshot[toV] : undefined;
+      if (
+        wasDrag &&
+        fromRow?.type === 'item' &&
+        toRow?.type === 'item' &&
+        fromRow.origIndex !== toRow.origIndex
+      ) {
+        onMoveQueueItem(fromRow.origIndex, toRow.origIndex);
       }
       if (wasDrag) {
         if (resetDragTimerRef.current !== null) clearTimeout(resetDragTimerRef.current);
@@ -470,6 +534,11 @@ export const FullscreenStage = ({
 
   const getQueueRowShiftY = (visIdx: number): number => {
     if (dragVisIdx === null || overVisIdx === null || visIdx === dragVisIdx) return 0;
+    const row = splitQueueRows[visIdx];
+    const dragRow = splitQueueRows[dragVisIdx];
+    if (!row || row.type !== 'item' || !dragRow || dragRow.type !== 'item' || row.isRadio !== dragRow.isRadio) {
+      return 0;
+    }
     if (dragVisIdx < overVisIdx && visIdx > dragVisIdx && visIdx <= overVisIdx) return -QUEUE_ROW_HEIGHT;
     if (dragVisIdx > overVisIdx && visIdx >= overVisIdx && visIdx < dragVisIdx) return QUEUE_ROW_HEIGHT;
     return 0;
@@ -970,15 +1039,38 @@ export const FullscreenStage = ({
                 >
                   {queueVirtualizer.getVirtualItems().map((virtualRow) => {
                     const visIdx = virtualRow.index;
-                    const entry = upNextEntries[visIdx];
-                    if (!entry) return null;
-                    const { track: item, origIndex } = entry;
+                    const row = splitQueueRows[visIdx];
+                    if (!row) return null;
+
+                    if (row.type === 'header') {
+                      return (
+                        <div
+                          key={row.id}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: `${QUEUE_HEADER_HEIGHT}px`,
+                            transform: `translate3d(0, ${virtualRow.start}px, 0)`,
+                          }}
+                          className="flex items-center justify-between px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#8E99BA] border-b border-white/[0.06]"
+                        >
+                          <span>{row.label}</span>
+                          <span className="font-mono tabular-nums text-[9.5px] text-[#7A84A6]">
+                            {row.count}
+                          </span>
+                        </div>
+                      );
+                    }
+
+                    const { track: item, origIndex, isRadio } = row;
                     const isDragged = dragVisIdx === visIdx;
                     const shiftY = getQueueRowShiftY(visIdx);
                     return (
                       <div
                         key={`${item.video_id}-${origIndex}`}
-                        onPointerDown={(e) => handleQueueRowPointerDown(e, visIdx, item)}
+                        onPointerDown={(e) => handleQueueRowPointerDown(e, visIdx, item, isRadio)}
                         onClick={() => {
                           if (didDragRef.current) return;
                           onPlayQueueItem(item, origIndex);
@@ -998,7 +1090,7 @@ export const FullscreenStage = ({
                         }}
                         className={`flex items-center px-3 gap-2.5 rounded-xl hover:bg-white/[0.08] group cursor-grab active:cursor-grabbing ${
                           isDragged ? 'opacity-15' : ''
-                        }`}
+                        } ${isRadio ? 'opacity-85 hover:opacity-100' : ''}`}
                       >
                         <div className="w-4 flex-none flex items-center justify-center text-[#646E8F] group-hover:text-[#D4DCFA]">
                           <GripVertical size={13} />
@@ -1018,6 +1110,19 @@ export const FullscreenStage = ({
                           <div className="text-xs font-medium text-[#F4F6FF] truncate">{item.title}</div>
                           <div className="text-[11px] text-[#A6B0CF] truncate">{item.artist}</div>
                         </div>
+                        {isRadio && onPromoteQueueItem && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onPromoteQueueItem(origIndex);
+                            }}
+                            title="Add to Up Next Queue"
+                            className="p-1.5 text-[#A6B0CF] hover:text-white rounded-full hover:bg-white/[0.12] flex-none"
+                          >
+                            <Plus size={13} />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {

@@ -9,6 +9,8 @@ import {
   ListMusic,
   PanelLeftClose,
   PanelLeftOpen,
+  UsersRound,
+  BarChart3,
 } from 'lucide-react';
 import type { Playlist } from '../api/types';
 
@@ -19,6 +21,8 @@ export type NavTab =
   | 'liked'
   | 'downloads'
   | 'history'
+  | 'artists'
+  | 'stats'
   | 'playlist'
   | 'artist'
   | 'album';
@@ -169,7 +173,9 @@ export const Sidebar = memo(({
           '#FF4D8D'
         )}
         {railItem('downloads', 'Offline', <Download size={16} />, downloadCount, '#34D399')}
+        {railItem('artists', 'Artists', <UsersRound size={16} />)}
         {railItem('history', 'History', <Clock size={16} />)}
+        {railItem('stats', 'Stats', <BarChart3 size={16} />)}
       </nav>
 
       {/* Playlists Section with Crisp Divider */}

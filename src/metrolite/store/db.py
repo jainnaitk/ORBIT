@@ -69,6 +69,53 @@ CREATE TABLE IF NOT EXISTS settings (
     value_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS play_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    played_at TEXT NOT NULL,
+    listened_s INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_play_events_played_at ON play_events(played_at DESC);
+CREATE INDEX IF NOT EXISTS idx_play_events_video_id ON play_events(video_id);
+
+CREATE TABLE IF NOT EXISTS pinned_tracks (
+    video_id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL DEFAULT 0,
+    pinned_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocked_artists (
+    artist_norm TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    blocked_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS followed_artists (
+    channel_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    artist_norm TEXT NOT NULL,
+    thumbnail_url TEXT,
+    followed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_followed_artists_norm ON followed_artists(artist_norm);
+
+CREATE TABLE IF NOT EXISTS pinned_artists (
+    channel_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    thumbnail_url TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
+    pinned_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artist_releases_cache (
+    channel_id TEXT PRIMARY KEY,
+    artist_name TEXT NOT NULL,
+    releases_json TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
 INSERT OR IGNORE INTO queue_state (id, current_index, shuffle, repeat_mode, items_json)
 VALUES (1, 0, 0, 'off', '[]');
 """
