@@ -20,7 +20,7 @@ function formatBytes(bytes?: number): string {
 /**
  * Extract up to `maxItems` brief, human-readable summary lines from GitHub Release markdown.
  */
-function extractBriefChangelog(notes?: string | null, maxItems = 3): string[] {
+function extractBriefChangelog(notes?: string | null, maxItems = 4): string[] {
   if (!notes) return [];
   const trimmed = notes.trim();
   if (!trimmed || /^no github releases published yet/i.test(trimmed)) return [];
@@ -31,7 +31,6 @@ function extractBriefChangelog(notes?: string | null, maxItems = 3): string[] {
     if (!line) continue;
     if (/^#{1,6}\s+/.test(line)) continue;
     if (/^[-*_]{3,}$/.test(line)) continue;
-    if (/^(full changelog|sha256|checksum|https?:\/\/)/i.test(line)) continue;
 
     const cleaned = line
       .replace(/^[-*+•]\s+/, '')
@@ -42,10 +41,22 @@ function extractBriefChangelog(notes?: string | null, maxItems = 3): string[] {
       .trim();
 
     if (cleaned.length < 4) continue;
+    if (/^(full changelog|what'?s changed|sha256|checksum|https?:\/\/)/i.test(cleaned)) continue;
+    if (/github\.com\/[^/\s]+\/[^/\s]+\/compare\//i.test(cleaned)) continue;
+
     items.push(cleaned.length > 96 ? `${cleaned.slice(0, 93).trimEnd()}...` : cleaned);
     if (items.length >= maxItems) break;
   }
   return items;
+}
+
+function resolveChangelogItems(updateState: UpdateState | null, maxItems = 4): string[] {
+  if (!updateState) return [];
+  if (Array.isArray(updateState.changelog) && updateState.changelog.length > 0) {
+    const fromArray = extractBriefChangelog(updateState.changelog.join('\n'), maxItems);
+    if (fromArray.length > 0) return fromArray;
+  }
+  return extractBriefChangelog(updateState.release_notes, maxItems);
 }
 
 interface UpdateAvailableModalProps {
@@ -64,6 +75,7 @@ export const UpdateAvailableModal: FC<UpdateAvailableModalProps> = ({
   if (!isOpen || !updateState || !updateState.update_available) return null;
 
   const sizeLabel = formatBytes(updateState.asset_size);
+  const changelogItems = resolveChangelogItems(updateState, 4);
 
   return (
     <div
@@ -123,9 +135,28 @@ export const UpdateAvailableModal: FC<UpdateAvailableModalProps> = ({
           {sizeLabel && <span className="ml-auto text-[#7A84A6]">{sizeLabel}</span>}
         </div>
 
-        {updateState.release_notes && (
-          <div className="max-h-40 overflow-y-auto rounded-xl bg-black/45 border border-white/[0.08] p-3 text-xs text-[#C6CFE8] whitespace-pre-wrap leading-relaxed">
-            {updateState.release_notes}
+        {changelogItems.length > 0 && (
+          <div className="rounded-2xl bg-black/45 border border-white/[0.08] p-3.5 space-y-2">
+            <div className="text-[10px] font-mono uppercase tracking-[0.16em] text-[#8E99BA]">
+              What&apos;s New
+            </div>
+            <ul className="space-y-1.5">
+              {changelogItems.map((entry, idx) => (
+                <li
+                  key={idx}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.05] border border-white/[0.08] text-[11px] text-[#DCE3FC] leading-snug"
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full flex-none"
+                    style={{
+                      background: 'var(--dynamic-accent)',
+                      boxShadow: '0 0 8px var(--dynamic-accent)',
+                    }}
+                  />
+                  <span className="min-w-0 break-words">{entry}</span>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -176,11 +207,15 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
   const isDownloading = status === 'downloading';
   const isReady = status === 'ready';
   const isLaunched = status === 'launched';
+  const isError = status === 'error';
   const hasUpdate = Boolean(updateState?.update_available);
+  const hasKnownLatest =
+    Boolean(updateState?.latest_version) &&
+    !(isError && !hasUpdate && latestVersion === currentVersion);
   const pct = Math.max(0, Math.min(100, updateState?.progress_pct ?? 0));
   const downloadedLabel = formatBytes(updateState?.downloaded_bytes);
   const totalLabel = formatBytes(updateState?.total_bytes || updateState?.asset_size);
-  const briefChangelog = extractBriefChangelog(updateState?.release_notes, 3);
+  const briefChangelog = resolveChangelogItems(updateState, 4);
 
   return (
     <>
@@ -240,9 +275,13 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
             <span className="text-[#9AA5C4]">Latest on GitHub</span>
             <span
               className="font-mono font-semibold"
-              style={hasUpdate ? { color: 'var(--dynamic-accent)' } : { color: '#F4F6FF' }}
+              style={
+                hasUpdate
+                  ? { color: 'var(--dynamic-accent)' }
+                  : { color: hasKnownLatest || isChecking ? '#F4F6FF' : '#7A84A6' }
+              }
             >
-              {isChecking ? 'Checking...' : `v${latestVersion}`}
+              {isChecking ? 'Checking...' : hasKnownLatest ? `v${latestVersion}` : 'Unavailable'}
             </span>
           </div>
 
@@ -297,12 +336,18 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
               <span>What&apos;s New</span>
               <span style={{ color: 'var(--dynamic-accent)' }}>v{latestVersion}</span>
             </div>
-            <ul className="space-y-1 text-[11px] text-[#CBD4EE] leading-snug">
+            <ul className="space-y-1.5 text-[11px] text-[#DCE3FC] leading-snug">
               {briefChangelog.map((entry, idx) => (
-                <li key={idx} className="flex items-start gap-2">
+                <li
+                  key={idx}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-full bg-white/[0.05] border border-white/[0.08]"
+                >
                   <span
-                    className="w-1 h-1 rounded-full mt-1.5 flex-none"
-                    style={{ background: 'var(--dynamic-accent)' }}
+                    className="w-1.5 h-1.5 rounded-full flex-none"
+                    style={{
+                      background: 'var(--dynamic-accent)',
+                      boxShadow: '0 0 8px var(--dynamic-accent)',
+                    }}
                   />
                   <span className="min-w-0 break-words">{entry}</span>
                 </li>
@@ -337,24 +382,41 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
                 ) : (
                   <>
                     <Download size={12} />
-                    <span>Download</span>
+                    <span>{isError ? 'Retry' : 'Download'}</span>
                   </>
                 )}
               </button>
             </>
           ) : (
             <div className="w-full flex items-center justify-between text-[11px]">
-              <span className="inline-flex items-center gap-1.5 text-[#34D399]">
-                <CheckCircle2 size={13} />
-                <span>{isChecking ? 'Checking GitHub...' : 'Up to date'}</span>
-              </span>
+              {isChecking ? (
+                <span className="inline-flex items-center gap-1.5 text-[#9AA5C4]">
+                  <Loader2 size={13} className="animate-spin" />
+                  <span>Checking GitHub...</span>
+                </span>
+              ) : isError ? (
+                <span className="inline-flex items-center gap-1.5 text-[#FF6B9E]">
+                  <AlertCircle size={13} />
+                  <span>Update check failed</span>
+                </span>
+              ) : isLaunched ? (
+                <span className="inline-flex items-center gap-1.5 text-[#34D399]">
+                  <Rocket size={13} />
+                  <span>Installer launched</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-[#34D399]">
+                  <CheckCircle2 size={13} />
+                  <span>Up to date</span>
+                </span>
+              )}
               <button
                 type="button"
                 onClick={onCheckUpdates}
                 disabled={isChecking}
                 className="px-3 py-1 rounded-full text-[10px] font-medium ios-liquid-pill text-[#DCE3FC] hover:text-white disabled:opacity-45"
               >
-                Check now
+                {isError ? 'Retry' : 'Check now'}
               </button>
             </div>
           )}

@@ -1059,17 +1059,18 @@ export default function App() {
   }, [api, setUpdateState]);
 
   const handleToggleUpdateTab = useCallback(() => {
-    setIsUpdateTabOpen((prev) => {
-      const nextOpen = !prev;
-      if (nextOpen && (!updateState || updateState.status === 'idle')) {
-        void api
-          .checkForUpdates(false)
-          .then((s) => setUpdateState(s))
-          .catch(() => {});
-      }
-      return nextOpen;
-    });
-  }, [api, setUpdateState, updateState]);
+    const nextOpen = !isUpdateTabOpen;
+    setIsUpdateTabOpen(nextOpen);
+    if (
+      nextOpen &&
+      (!updateState || updateState.status === 'idle' || updateState.status === 'error')
+    ) {
+      void api
+        .checkForUpdates(false)
+        .then((s) => setUpdateState(s))
+        .catch(() => {});
+    }
+  }, [api, isUpdateTabOpen, setUpdateState, updateState]);
 
   const handleCloseUpdateTab = useCallback(() => {
     setIsUpdateTabOpen(false);

@@ -1221,14 +1221,22 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
                     .send()
                     .await;
             });
+            for _ in 0..15 {
+                if !is_bridge_healthy() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(180));
         }
-        std::thread::sleep(Duration::from_millis(180));
         terminate_sidecar();
 
         // 2. Spawn installer completely detached from orbit.exe (outside WINDOWS_JOB)
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -1236,11 +1244,11 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
                 std::process::Command::new("msiexec")
                     .arg("/i")
                     .arg(&launch_path)
-                    .creation_flags(CREATE_NEW_PROCESS_GROUP)
+                    .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
                     .spawn()
             } else {
                 std::process::Command::new(&launch_path)
-                    .creation_flags(CREATE_NEW_PROCESS_GROUP)
+                    .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
                     .spawn()
             };
 

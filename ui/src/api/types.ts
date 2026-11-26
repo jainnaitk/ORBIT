@@ -206,6 +206,7 @@ export interface UpdateState {
   update_available: boolean;
   release_name?: string | null;
   release_notes?: string | null;
+  changelog?: string[];
   published_at?: string | null;
   html_url?: string | null;
   asset_name?: string | null;

@@ -3451,13 +3451,12 @@
       changelog: [],
     };
 
-    function extractBriefChangelog(body, maxItems = 3) {
+    function extractBriefChangelog(body, maxItems = 4) {
       if (!body) return [];
       const items = [];
       for (const raw of String(body).split(/\r?\n/)) {
         const line = raw.trim();
         if (!line || /^#{1,6}\s+/.test(line) || /^[-*_]{3,}$/.test(line)) continue;
-        if (/^(full changelog|sha256|checksum|https?:\/\/)/i.test(line)) continue;
         const cleaned = line
           .replace(/^[-*+•]\s+/, '')
           .replace(/^\d+[.)]\s+/, '')
@@ -3466,10 +3465,55 @@
           .replace(/\s+/g, ' ')
           .trim();
         if (cleaned.length < 4) continue;
+        if (/^(full changelog|what'?s changed|sha256|checksum|https?:\/\/)/i.test(cleaned)) continue;
+        if (/github\.com\/[^/\s]+\/[^/\s]+\/compare\//i.test(cleaned)) continue;
         items.push(cleaned.length > 96 ? `${cleaned.slice(0, 93).trimEnd()}...` : cleaned);
         if (items.length >= maxItems) break;
       }
       return items;
+    }
+
+    function parseChangelogMarkdown(markdown, version, maxItems = 4) {
+      if (!markdown) return [];
+      const target = String(version || '').replace(/^v/i, '').trim();
+      const lines = String(markdown).split(/\r?\n/);
+      let inTarget = false;
+      let capturedFirst = false;
+      const collected = [];
+      for (const raw of lines) {
+        const line = raw.trim();
+        const heading = line.match(/^##\s+\[?v?([0-9]+\.[0-9]+\.[0-9]+[^\]]*)\]?/i);
+        if (heading) {
+          if (inTarget || (capturedFirst && !target)) break;
+          const headingVer = heading[1].trim();
+          if (target && headingVer === target) {
+            inTarget = true;
+          } else if (!target && !capturedFirst) {
+            inTarget = true;
+            capturedFirst = true;
+          }
+          continue;
+        }
+        if (inTarget && /^[-*•]\s+/.test(line)) {
+          collected.push(line);
+          if (collected.length >= maxItems) break;
+        }
+      }
+      return extractBriefChangelog(collected.join('\n'), maxItems);
+    }
+
+    async function fetchFallbackChangelog(version) {
+      try {
+        const res = await fetch(`https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/CHANGELOG.md`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) return [];
+        const text = await res.text();
+        const exact = parseChangelogMarkdown(text, version, 4);
+        return exact.length > 0 ? exact : parseChangelogMarkdown(text, '', 4);
+      } catch {
+        return [];
+      }
     }
 
     function updateModalMeta() {
@@ -3480,12 +3524,13 @@
       if (wrap && list) {
         if (RELEASE.changelog.length > 0) {
           list.innerHTML = '';
-          RELEASE.changelog.forEach((txt) => {
+          RELEASE.changelog.slice(0, 4).forEach((txt) => {
             const li = document.createElement('li');
-            li.className = 'flex items-start gap-2';
+            li.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-[11px] text-[#F2F5FC]';
             const dot = document.createElement('span');
-            dot.className = 'w-1.5 h-1.5 rounded-full mt-1 flex-none';
+            dot.className = 'w-1.5 h-1.5 rounded-full flex-none';
             dot.style.background = 'var(--accent)';
+            dot.style.boxShadow = '0 0 8px var(--accent)';
             const span = document.createElement('span');
             span.textContent = txt;
             li.append(dot, span);
@@ -3500,27 +3545,54 @@
 
     async function fetchLatestRelease() {
       updateModalMeta();
-      try {
-        const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`, {
-          headers: { Accept: 'application/vnd.github+json' },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
+      const candidates = [];
+      if (window.location.protocol.startsWith('http')) {
+        candidates.push('/api/release');
+      }
+      candidates.push(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`);
+
+      let data = null;
+      for (const url of candidates) {
+        try {
+          const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json, application/json' } });
+          if (!res.ok) continue;
+          const ctype = (res.headers.get('content-type') || '').toLowerCase();
+          if (!ctype.includes('json')) continue;
+          const parsed = await res.json();
+          if (parsed && parsed.tag_name) {
+            data = parsed;
+            break;
+          }
+        } catch {
+          // Try next endpoint
+        }
+      }
+
+      if (data) {
         const ver = String(data.tag_name || '').replace(/^v/i, '').trim();
         if (ver) RELEASE.version = ver;
-        RELEASE.changelog = extractBriefChangelog(data.body, 3);
+        const rawList = Array.isArray(data.changelog) ? extractBriefChangelog(data.changelog.join('\n'), 4) : [];
+        let notes = rawList.length > 0 ? rawList : extractBriefChangelog(data.body, 4);
+        if (notes.length === 0) {
+          notes = await fetchFallbackChangelog(RELEASE.version);
+        }
+        RELEASE.changelog = notes.slice(0, 4);
+
         const assets = Array.isArray(data.assets) ? data.assets : [];
         const exe =
           assets.find((a) => /setup\.exe$/i.test(a.name || '') && !/^ORBIT-Setup\.exe$/i.test(a.name || '')) ||
           assets.find((a) => /\.exe$/i.test(a.name || ''));
-        if (exe && exe.browser_download_url) {
+        if (exe && (exe.browser_download_url || exe.mirror_download_url)) {
           RELEASE.exeName = exe.name;
-          RELEASE.exeUrl = exe.browser_download_url;
+          RELEASE.exeUrl = exe.browser_download_url || exe.mirror_download_url;
         }
-        updateModalMeta();
-      } catch {
-        // Keep stable ORBIT-Setup.exe fallback
+      } else {
+        const fallbackNotes = await fetchFallbackChangelog('');
+        if (fallbackNotes.length > 0) {
+          RELEASE.changelog = fallbackNotes.slice(0, 4);
+        }
       }
+      updateModalMeta();
     }
 
     function openSetupModal() {

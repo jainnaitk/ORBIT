@@ -120,6 +120,7 @@ class UpdatesConfig(BaseModel):
     github_repo: str = "jainnaitk/ORBIT"
     current_version: str = "1.2.0"
     check_on_startup: bool = True
+    mirror_base_url: str | None = "https://orbit-music.pages.dev"
 
 
 def find_default_config_path() -> Path:
