@@ -465,6 +465,36 @@ async def test_download_update_rejects_sha_mismatch_and_cleans_part_file(
     assert not (updates_dir / "ORBIT-v1.2.0-Setup.exe").exists()
 
 
+def test_launch_installer_passes_in_place_update_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updates_dir = tmp_path / "updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    installer = updates_dir / "ORBIT_1.2.2_x64-setup.exe"
+    installer.write_bytes(b"MZ-test")
+
+    mgr = UpdateManager(
+        github_repo="jainnaitk/ORBIT",
+        current_version="1.2.1",
+        updates_dir=updates_dir,
+    )
+    mgr._state["downloaded_path"] = str(installer)
+
+    captured: list[list[str]] = []
+
+    def _fake_popen(cmd: list[str], **kwargs: Any) -> MagicMock:
+        captured.append(cmd)
+        return MagicMock()
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(updates_mod.sys, "platform", "win32")
+    monkeypatch.setattr(updates_mod.subprocess, "Popen", _fake_popen)
+
+    state = mgr.launch_installer()
+    assert state["status"] == "launched"
+    assert captured == [[str(installer.resolve()), "/P", "/UPDATE", "/R"]]
+
+
 def test_bridge_update_endpoints(tmp_path: Path) -> None:
     updater = UpdateManager(
         github_repo="jainnaitk/ORBIT",

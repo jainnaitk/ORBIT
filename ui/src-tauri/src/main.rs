@@ -1247,16 +1247,21 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
                     .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
                     .spawn()
             } else {
+                // /P = passive progress UI, /UPDATE = overwrite in-place without uninstalling, /R = relaunch ORBIT
                 std::process::Command::new(&launch_path)
+                    .args(["/P", "/UPDATE", "/R"])
                     .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
                     .spawn()
             };
 
             if spawned.is_err() {
                 // Fallback via Windows shell if elevation or shell dispatch is required
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "start", ""])
-                    .arg(&launch_path)
+                let mut fallback = std::process::Command::new("cmd");
+                fallback.args(["/C", "start", ""]).arg(&launch_path);
+                if ext != "msi" {
+                    fallback.args(["/P", "/UPDATE", "/R"]);
+                }
+                let _ = fallback
                     .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
                     .spawn();
             }

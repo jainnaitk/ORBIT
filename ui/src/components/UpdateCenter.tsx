@@ -324,7 +324,7 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
             <div className="flex items-start gap-2 pt-1.5 border-t border-white/[0.07] text-[11px] text-[#34D399]">
               <Rocket size={13} className="flex-none mt-0.5" />
               <span className="leading-snug">
-                Windows installer launched. Follow the setup prompt to complete the upgrade.
+                Windows installer launched. ORBIT will update in place and relaunch.
               </span>
             </div>
           )}

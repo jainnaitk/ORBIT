@@ -25,6 +25,21 @@ const LazyTrayPopup = lazy(() =>
 
 const isTray = isTrayPopupWindow();
 
+if (typeof document !== "undefined") {
+  document.addEventListener("contextmenu", (e) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+    e.preventDefault();
+  });
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <Suspense fallback={null}>{isTray ? <LazyTrayPopup /> : <LazyApp />}</Suspense>
 );

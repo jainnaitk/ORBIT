@@ -1,5 +1,11 @@
 # ORBIT Changelog
 
+## v1.2.3
+- Seamless in-place app updates without uninstall prompts
+- Auto-relaunch ORBIT after installer completes upgrade
+- Disabled default browser right-click context menu
+- Preserved custom track menus and text input copy/paste
+
 ## v1.2.2
 - Individually clickable collaborating and featured artist links
 - Mini multi-artist picker in track context menus

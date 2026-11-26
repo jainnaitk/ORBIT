@@ -798,7 +798,11 @@ class UpdateManager:
 
         try:
             if sys.platform == "win32":
-                cmd = ["msiexec", "/i", str(target)] if ext == ".msi" else [str(target)]
+                cmd = (
+                    ["msiexec", "/i", str(target)]
+                    if ext == ".msi"
+                    else [str(target), "/P", "/UPDATE", "/R"]
+                )
                 detached_flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
                     subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
                 )
@@ -810,9 +814,11 @@ class UpdateManager:
                         creationflags=detached_flags | breakaway_flag,
                     )
                 except OSError:
-                    if ext == ".msi":
+                    try:
                         subprocess.Popen(cmd, close_fds=True, creationflags=detached_flags)
-                    else:
+                    except OSError:
+                        if ext == ".msi":
+                            raise
                         os.startfile(str(target))
             else:
                 raise RuntimeError("Automatic installer launch is supported on Windows only.")
