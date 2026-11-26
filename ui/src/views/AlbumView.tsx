@@ -1,6 +1,7 @@
 import { memo, useEffect, useState, useRef } from 'react';
 import { Play, Shuffle, Download, Disc3 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
+import { ArtistLinks } from '../components/ArtistLinks';
 import { TrackList } from '../components/TrackList';
 import { bridgeApi } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
@@ -149,18 +150,16 @@ export const AlbumView = memo(({
                 {album?.title || target.title || 'Album'}
               </h1>
               <div className="flex items-center gap-2 flex-wrap text-xs text-[#9AA5C4] mt-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    onOpenArtist({
-                      name: displayArtist.split(',')[0].trim(),
-                      channelId: album?.artist_id,
-                    })
+                <ArtistLinks
+                  artist={displayArtist}
+                  artistId={album?.artist_id}
+                  artists={album?.artists}
+                  onOpenArtist={(artistName, artistId) =>
+                    onOpenArtist({ name: artistName, channelId: artistId })
                   }
-                  className="font-semibold text-[#E6ECF8] hover:underline hover:text-white"
-                >
-                  {displayArtist}
-                </button>
+                  className="font-semibold text-[#E6ECF8]"
+                  inline
+                />
                 {album?.year && <span>• {album.year}</span>}
                 {!loading && tracks.length > 0 && (
                   <span className="tabular-nums">

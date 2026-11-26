@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
+import { ArtistLinks } from '../components/ArtistLinks';
 import { TrackList } from '../components/TrackList';
 import { bridgeApi } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
@@ -430,7 +431,15 @@ export const ArtistView = memo(({
                               {track.album}
                             </button>
                           ) : (
-                            track.artist
+                            <ArtistLinks
+                              artist={track.artist}
+                              artistId={track.artist_id}
+                              artists={track.artists}
+                              onOpenArtist={(artistName, artistId) =>
+                                onOpenArtist({ name: artistName, channelId: artistId })
+                              }
+                              className="text-[11px] text-[#9AA5C4]"
+                            />
                           )}
                         </div>
                       </div>

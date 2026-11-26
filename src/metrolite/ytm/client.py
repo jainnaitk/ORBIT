@@ -29,6 +29,13 @@ class YTMNetworkError(YTMError):
     """Network connection or timeout error contacting YouTube Music."""
 
 
+class ArtistCredit(BaseModel):
+    """Individual artist credit with optional YouTube Music browse/channel ID."""
+
+    name: str
+    id: str | None = None
+
+
 class Track(BaseModel):
     """Normalized metadata for a YouTube Music track."""
 
@@ -36,6 +43,9 @@ class Track(BaseModel):
     title: str = Field(default="Unknown Title", description="Track title")
     artist: str = Field(default="Unknown Artist", description="Artist or comma-separated artists")
     artist_id: str | None = Field(default=None, description="Primary YouTube Music artist channel ID")
+    artists: list[ArtistCredit] = Field(
+        default_factory=list, description="Individual collaborating artist credits"
+    )
     album: str | None = Field(default=None, description="Album name")
     album_id: str | None = Field(default=None, description="YouTube Music album browse ID")
     duration_s: int = Field(default=0, description="Duration in seconds")
@@ -156,6 +166,35 @@ def extract_title(raw: Any) -> str:
     return "Unknown Title"
 
 
+def extract_artist_credits(raw: Any) -> list[ArtistCredit]:
+    """Extract ordered individual artist credits from ytmusicapi artists structures."""
+    credits: list[ArtistCredit] = []
+    seen: set[str] = set()
+
+    def _push(name_val: Any, id_val: Any = None) -> None:
+        cleaned = str(name_val or "").strip()
+        if not cleaned:
+            return
+        key = cleaned.lower()
+        cid = str(id_val).strip() if id_val else None
+        if key in seen:
+            return
+        seen.add(key)
+        credits.append(ArtistCredit(name=cleaned, id=cid or None))
+
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                _push(item)
+            elif isinstance(item, dict) and item.get("name"):
+                _push(item.get("name"), item.get("id"))
+    elif isinstance(raw, dict) and raw.get("name"):
+        _push(raw.get("name"), raw.get("id"))
+    elif isinstance(raw, str):
+        _push(raw)
+    return credits
+
+
 def extract_artist_id(raw: Any) -> str | None:
     """Extract the primary artist browse/channel ID from ytmusicapi artists field."""
     if isinstance(raw, list):
@@ -197,6 +236,12 @@ def normalize_track(raw: dict[str, Any], default_album: str | None = None) -> Tr
     raw_artists = raw.get("artists") or raw.get("artist")
     artist = extract_artist(raw_artists)
     artist_id = raw.get("artist_id") or extract_artist_id(raw_artists)
+    raw_credits = raw.get("artists") if isinstance(raw.get("artists"), list) else raw_artists
+    credits = extract_artist_credits(raw_credits)
+    if artist == "Unknown Artist":
+        credits = []
+    elif not credits:
+        credits = [ArtistCredit(name=artist, id=str(artist_id).strip() if artist_id else None)]
     raw_album = raw.get("album")
     album = extract_album(raw_album) or default_album
     album_id = raw.get("album_id") or extract_album_id(raw_album)
@@ -210,6 +255,7 @@ def normalize_track(raw: dict[str, Any], default_album: str | None = None) -> Tr
         title=title,
         artist=artist,
         artist_id=str(artist_id).strip() if artist_id else None,
+        artists=credits,
         album=album,
         album_id=str(album_id).strip() if album_id else None,
         duration_s=duration_s,
@@ -688,7 +734,8 @@ class YTMusicClient:
         channel_id: str | None = None,
     ) -> dict[str, Any]:
         resolved_id = (channel_id or "").strip() or None
-        search_name = (name or "").split(",")[0].strip()
+        raw_name = (name or "").strip()
+        search_name = raw_name
 
         def _search_artist_hit(query_name: str, exclude_id: str | None = None) -> dict[str, Any] | None:
             if not query_name:
@@ -715,6 +762,11 @@ class YTMusicClient:
         search_hit_thumb: str | None = None
         if not resolved_id and search_name:
             best_hit = _search_artist_hit(search_name)
+            if not best_hit and "," in search_name:
+                fallback_name = search_name.split(",")[0].strip()
+                if fallback_name:
+                    search_name = fallback_name
+                    best_hit = _search_artist_hit(search_name)
             if best_hit and best_hit.get("browseId"):
                 resolved_id = str(best_hit["browseId"]).strip()
                 search_hit_thumb = extract_thumbnail_url(best_hit.get("thumbnails"))
@@ -983,6 +1035,9 @@ class YTMusicClient:
                     "title": str(album_data.get("title") or search_title or "Album"),
                     "artist": str(album_data.get("artist") or search_artist or "Unknown Artist"),
                     "artist_id": album_artist_id,
+                    "artists": [
+                        a.model_dump() for a in extract_artist_credits(album_data.get("artists"))
+                    ],
                     "year": str(album_data.get("year") or "").strip() or None,
                     "type": str(album_data.get("type") or "Album"),
                     "description": str(album_data.get("description") or "").strip() or None,

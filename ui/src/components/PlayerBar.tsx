@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, useCallback, type CSSProperties, type ReactNode } from 'react';
 import {
   Play,
   Pause,
@@ -19,15 +19,18 @@ import {
   Maximize2,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { ArtistLinks } from './ArtistLinks';
 import { bridgeSocket } from '../api/client';
 import type { PlaybackTick, QueueData, Track, DownloadProgress, EqPreset } from '../api/types';
 
 function MarqueeText({
   text,
+  children,
   className = '',
   onClick,
 }: {
   text: string;
+  children?: ReactNode;
   className?: string;
   onClick?: () => void;
 }) {
@@ -82,7 +85,7 @@ function MarqueeText({
         style={marqueeStyle}
         className={`eh-marquee-track ${overflowPx > 0 ? 'eh-marquee-active' : ''}`}
       >
-        {text}
+        {children ?? text}
       </span>
     </div>
   );
@@ -113,7 +116,7 @@ interface PlayerBarProps {
   onToggleFullscreen: () => void;
   onOpenFullLyrics: () => void;
   onOpenAlbum: (track: Track) => void;
-  onOpenArtist: (track: Track) => void;
+  onOpenArtist: (track: Track, artistName?: string, artistId?: string | null) => void;
   onTogglePlay: () => void;
   onNext: () => void;
   onPrev: () => void;
@@ -465,11 +468,19 @@ export const PlayerBar = ({
                   <CheckCircle2 size={11} />
                 </span>
               )}
-              <MarqueeText
-                text={currentTrack?.artist || 'ORBIT Desktop'}
-                onClick={() => currentTrack && onOpenArtist(currentTrack)}
-                className={currentTrack ? 'hover:text-white hover:underline cursor-pointer' : ''}
-              />
+              <MarqueeText text={currentTrack?.artist || 'ORBIT Desktop'}>
+                {currentTrack ? (
+                  <ArtistLinks
+                    artist={currentTrack.artist}
+                    artistId={currentTrack.artist_id}
+                    artists={currentTrack.artists}
+                    inline
+                    onOpenArtist={(name, id) => onOpenArtist(currentTrack, name, id)}
+                  />
+                ) : (
+                  'ORBIT Desktop'
+                )}
+              </MarqueeText>
             </div>
           </div>
 

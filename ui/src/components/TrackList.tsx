@@ -17,6 +17,8 @@ import {
   Disc3,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { ArtistLinks } from './ArtistLinks';
+import { getTrackArtists } from '../utils/artists';
 import type { Track, DownloadProgress } from '../api/types';
 
 interface TrackListProps {
@@ -114,8 +116,10 @@ export const TrackList = memo(({
   };
 
   const openMenuAt = (track: Track, x: number, y: number, isDownloaded: boolean) => {
-    const menuWidth = 204;
-    const menuHeight = isDownloaded ? 204 : 172;
+    const artistCount = getTrackArtists(track).length;
+    const menuWidth = 220;
+    const extraArtistHeight = artistCount > 1 ? 48 : 0;
+    const menuHeight = (isDownloaded ? 204 : 172) + extraArtistHeight;
     const left = Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8));
     const openUpward = y + menuHeight > window.innerHeight - 96;
     const top = openUpward ? Math.max(8, y - menuHeight - 4) : y + 4;
@@ -286,20 +290,13 @@ export const TrackList = memo(({
                   >
                     {track.title}
                   </div>
-                  {onOpenArtist ? (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenArtist(track.artist.split(',')[0].trim(), track.artist_id);
-                      }}
-                      className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate"
-                    >
-                      {track.artist}
-                    </button>
-                  ) : (
-                    <div className="text-[11px] text-[#A6B0CF] truncate">{track.artist}</div>
-                  )}
+                  <ArtistLinks
+                    artist={track.artist}
+                    artistId={track.artist_id}
+                    artists={track.artists}
+                    onOpenArtist={onOpenArtist}
+                    className="text-[11px] text-[#A6B0CF]"
+                  />
                 </div>
 
                 {showPlayCount && (track.play_count ?? 0) > 0 && (
@@ -421,7 +418,7 @@ export const TrackList = memo(({
             <div
               onClick={(e) => e.stopPropagation()}
               style={{ top: `${menuState.top}px`, left: `${menuState.left}px` }}
-              className="fixed w-[204px] ios-liquid-popover eh-popover-in rounded-2xl z-[9999] py-1.5 text-xs select-none"
+              className="fixed w-[220px] ios-liquid-popover eh-popover-in rounded-2xl z-[9999] py-1.5 text-xs select-none"
             >
               <button
                 onClick={() => {
@@ -443,21 +440,53 @@ export const TrackList = memo(({
                 <ListPlus size={14} className="text-[#A6B0CF]" />
                 <span>Add to Queue</span>
               </button>
-              {onOpenArtist && (
-                <button
-                  onClick={() => {
-                    onOpenArtist(
-                      menuState.track.artist.split(',')[0].trim(),
-                      menuState.track.artist_id
-                    );
-                    setMenuState(null);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-                >
-                  <UserRound size={14} className="text-[#A6B0CF]" />
-                  <span>Go to Artist</span>
-                </button>
-              )}
+              {onOpenArtist && (() => {
+                const menuArtists = getTrackArtists(menuState.track);
+                if (menuArtists.length <= 1) {
+                  const single = menuArtists[0];
+                  return (
+                    <button
+                      onClick={() => {
+                        onOpenArtist(
+                          single?.name || menuState.track.artist,
+                          single?.channelId ?? menuState.track.artist_id
+                        );
+                        setMenuState(null);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
+                    >
+                      <UserRound size={14} className="text-[#A6B0CF]" />
+                      <span className="truncate">
+                        {single ? `Go to ${single.name}` : 'Go to Artist'}
+                      </span>
+                    </button>
+                  );
+                }
+                return (
+                  <div className="border-t border-white/10 mt-1 pt-1.5 pb-1">
+                    <div className="px-3.5 py-1 flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.14em] text-[#8E99BA]">
+                      <UserRound size={12} className="text-[#8E99BA]" />
+                      <span>Go to Artist</span>
+                    </div>
+                    <div className="px-2.5 py-1 flex flex-wrap gap-1.5">
+                      {menuArtists.map((a, idx) => (
+                        <button
+                          key={`${a.name}-${idx}`}
+                          type="button"
+                          onClick={() => {
+                            onOpenArtist(a.name, a.channelId);
+                            setMenuState(null);
+                          }}
+                          title={`Go to ${a.name}`}
+                          className="max-w-full truncate px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.16] border border-white/[0.10] text-[11px] text-[#F4F6FF] hover:text-white transition-colors"
+                        >
+                          {a.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               {onOpenAlbum && (
                 <button
                   onClick={() => {

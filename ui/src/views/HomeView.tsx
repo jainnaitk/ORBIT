@@ -16,6 +16,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
+import { ArtistLinks } from '../components/ArtistLinks';
 import type { Track, HomeSection, PersonalizedHomeResponse } from '../api/types';
 import { bridgeApi } from '../api/client';
 
@@ -216,20 +217,13 @@ const HorizontalShelf = ({
                 >
                   {item.title}
                 </div>
-                {onOpenArtist ? (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenArtist(item.artist.split(',')[0].trim(), item.artist_id);
-                    }}
-                    className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
-                  >
-                    {item.artist}
-                  </button>
-                ) : (
-                  <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">{item.artist}</div>
-                )}
+                <ArtistLinks
+                  artist={item.artist}
+                  artistId={item.artist_id}
+                  artists={item.artists}
+                  onOpenArtist={onOpenArtist}
+                  className="text-[11px] text-[#A6B0CF] mt-0.5"
+                />
               </div>
             </div>
           );
@@ -521,22 +515,13 @@ export const HomeView = memo(({
                           >
                             {track.title}
                           </div>
-                          {onOpenArtist ? (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onOpenArtist(track.artist.split(',')[0].trim(), track.artist_id);
-                              }}
-                              className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
-                            >
-                              {track.artist}
-                            </button>
-                          ) : (
-                            <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
-                              {track.artist}
-                            </div>
-                          )}
+                          <ArtistLinks
+                            artist={track.artist}
+                            artistId={track.artist_id}
+                            artists={track.artists}
+                            onOpenArtist={onOpenArtist}
+                            className="text-[11px] text-[#A6B0CF] mt-0.5"
+                          />
                         </div>
                         {(track.play_count ?? 0) > 1 && (
                           <span className="text-[10px] font-mono tabular-nums text-[#C8D1EE] bg-white/[0.08] px-2 py-0.5 rounded-full flex-none">
@@ -619,22 +604,13 @@ export const HomeView = memo(({
                               >
                                 {item.title}
                               </div>
-                              {onOpenArtist ? (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onOpenArtist(item.artist.split(',')[0].trim(), item.artist_id);
-                                  }}
-                                  className="block max-w-full text-left text-[11px] text-[#A6B0CF] hover:text-white hover:underline truncate mt-0.5"
-                                >
-                                  {item.artist}
-                                </button>
-                              ) : (
-                                <div className="text-[11px] text-[#A6B0CF] truncate mt-0.5">
-                                  {item.artist}
-                                </div>
-                              )}
+                              <ArtistLinks
+                                artist={item.artist}
+                                artistId={item.artist_id}
+                                artists={item.artists}
+                                onOpenArtist={onOpenArtist}
+                                className="text-[11px] text-[#A6B0CF] mt-0.5"
+                              />
                             </div>
                             <div className="flex items-center gap-0.5 flex-none">
                               <button

@@ -60,7 +60,6 @@ export const StarfieldBg = memo(({
   }, [absorbPulseKey]);
 
   useEffect(() => {
-    if (mode === 'oled') return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -86,6 +85,42 @@ export const StarfieldBg = memo(({
       );
     };
     resize();
+
+    if (mode === 'oled') {
+      const oledStars = Array.from({ length: 85 }, (_, i) => {
+        const tier = i % 3;
+        return {
+          nx: Math.random(),
+          ny: Math.random(),
+          size: tier === 2 ? 1.4 : tier === 1 ? 1.05 : 0.75,
+          tier,
+        };
+      });
+      const OLED_STYLES = [
+        'rgba(225, 236, 255, 0.24)',
+        'rgba(235, 243, 255, 0.44)',
+        'rgba(248, 251, 255, 0.72)',
+      ];
+      const drawOledStars = () => {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, width, height);
+        for (let tier = 0; tier < 3; tier++) {
+          ctx.fillStyle = OLED_STYLES[tier];
+          for (let i = 0; i < oledStars.length; i++) {
+            const s = oledStars[i];
+            if (s.tier !== tier) continue;
+            ctx.fillRect(s.nx * width, s.ny * height, s.size, s.size);
+          }
+        }
+      };
+      drawOledStars();
+      const onResizeOled = () => {
+        resize();
+        drawOledStars();
+      };
+      window.addEventListener('resize', onResizeOled);
+      return () => window.removeEventListener('resize', onResizeOled);
+    }
 
     // 120 crisp small stars — clear through frosted glass with minimal CPU cost
     const stars: Star[] = Array.from({ length: 120 }, (_, i) => {
@@ -421,22 +456,12 @@ export const StarfieldBg = memo(({
     };
   }, [mode]);
 
-  if (mode === 'oled') {
-    return (
-      <div className="pointer-events-none fixed inset-0 z-0 bg-black">
-        <canvas
-          data-bh-webgl="true"
-          data-bh-canvas="true"
-          width={0}
-          height={0}
-          className="hidden"
-        />
-      </div>
-    );
-  }
-
   return (
-    <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden bg-[#020308]">
+    <div
+      className={`pointer-events-none fixed inset-0 z-0 overflow-hidden ${
+        mode === 'oled' ? 'bg-black' : 'bg-[#020308]'
+      }`}
+    >
       <canvas
         ref={canvasRef}
         data-bh-webgl="true"

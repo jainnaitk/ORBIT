@@ -437,3 +437,41 @@ def test_ytm_client_auth_fallback() -> None:
         assert client._yt is not None
         assert mock_yt_cls.call_count == 2
         mock_yt_cls.assert_called_with(auth=None, language="en")
+
+
+def test_normalize_track_preserves_collaborating_artist_credits() -> None:
+    """Test normalizing a collaboration retains per-artist IDs and names."""
+    raw = {
+        "videoId": "collab_1",
+        "title": "Duet Track",
+        "artists": [
+            {"id": "UC_ARTIST_A", "name": "Artist A"},
+            {"id": "UC_ARTIST_B", "name": "Artist B"},
+        ],
+        "duration": "3:10",
+    }
+    track = normalize_track(raw)
+    assert track.artist == "Artist A, Artist B"
+    assert track.artist_id == "UC_ARTIST_A"
+    assert [(a.name, a.id) for a in track.artists] == [
+        ("Artist A", "UC_ARTIST_A"),
+        ("Artist B", "UC_ARTIST_B"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_artist_profile_preserves_comma_artist_name() -> None:
+    """Test artist lookup tries exact name (e.g. 'Tyler, The Creator') before comma splitting."""
+    mock_yt = MagicMock()
+    mock_yt.search.return_value = [
+        {"browseId": "UC_TYLER", "artist": "Tyler, The Creator", "thumbnails": []}
+    ]
+    mock_yt.get_artist.return_value = {
+        "name": "Tyler, The Creator",
+        "songs": {"results": []},
+    }
+
+    client = YTMusicClient(yt_instance=mock_yt)
+    profile = await client.get_artist_profile(name="Tyler, The Creator")
+    assert profile["name"] == "Tyler, The Creator"
+    mock_yt.search.assert_any_call(query="Tyler, The Creator", filter="artists", limit=6)

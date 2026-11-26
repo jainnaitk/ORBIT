@@ -9,6 +9,7 @@ import {
   Maximize2,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { ArtistLinks } from './ArtistLinks';
 import {
   LyricsOverflowMenu,
   LyricsStageBody,
@@ -29,7 +30,7 @@ interface LyricsDrawerProps {
   onClose: () => void;
   onExpandFullscreen: () => void;
   onOpenAlbum?: (track: Track) => void;
-  onOpenArtist?: (track: Track) => void;
+  onOpenArtist?: (track: Track, artistName?: string, artistId?: string | null) => void;
   onSeek: (seconds: number) => void;
   onToggleLike: (track: Track) => void;
   onDownload: (track: Track) => void;
@@ -170,14 +171,17 @@ export const LyricsDrawer = ({
               >
                 {currentTrack.title}
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenArtist?.(currentTrack)}
-                title={`Open ${currentTrack.artist}`}
-                className="block text-left text-[10px] text-[#9AA5C4] hover:text-white hover:underline truncate max-w-full"
-              >
-                {currentTrack.artist}
-              </button>
+              <ArtistLinks
+                artist={currentTrack.artist}
+                artistId={currentTrack.artist_id}
+                artists={currentTrack.artists}
+                onOpenArtist={
+                  onOpenArtist
+                    ? (name, id) => onOpenArtist(currentTrack, name, id)
+                    : undefined
+                }
+                className="text-[10px] text-[#9AA5C4]"
+              />
             </div>
           </div>
           <div className="flex items-center gap-1 flex-none">

@@ -203,7 +203,7 @@ interface SettingsModalProps {
 const COSMIC_MODES: { id: CosmicEffectsMode; label: string; desc: string }[] = [
   { id: 'full', label: 'Full', desc: 'Parallax stars, nebula & halo' },
   { id: 'static', label: 'Static Stars', desc: 'Zero animation, crisp depth' },
-  { id: 'oled', label: 'Minimal OLED', desc: 'True #000000 black void' },
+  { id: 'oled', label: 'Minimal OLED', desc: 'True #000000 black with static stars' },
 ];
 
 export const SettingsModal: FC<SettingsModalProps> = ({

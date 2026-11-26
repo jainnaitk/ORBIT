@@ -1,5 +1,11 @@
 # ORBIT Changelog
 
+## v1.2.2
+- Individually clickable collaborating and featured artist links
+- Mini multi-artist picker in track context menus
+- Preserved per-artist YouTube Music IDs and comma artist names
+- Added subtle static pinpoint stars in Minimal OLED mode
+
 ## v1.2.1
 - Added Cloudflare release mirror fallback for in-app updates
 - Added 4-pill changelog summary in update modal and popover

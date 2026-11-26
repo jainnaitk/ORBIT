@@ -2,11 +2,17 @@
  * ORBIT typed API and WebSocket message specifications.
  */
 
+export interface ArtistCredit {
+  name: string;
+  id?: string | null;
+}
+
 export interface Track {
   video_id: string;
   title: string;
   artist: string;
   artist_id?: string | null;
+  artists?: ArtistCredit[];
   album?: string | null;
   album_id?: string | null;
   duration_s: number;
@@ -46,6 +52,7 @@ export interface AlbumDetails {
   title: string;
   artist: string;
   artist_id?: string | null;
+  artists?: ArtistCredit[];
   year?: string | null;
   type?: string;
   description?: string | null;

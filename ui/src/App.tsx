@@ -38,6 +38,7 @@ import {
   type SavedWindowBounds,
 } from './api/client';
 import { extractTrackAccent, DEFAULT_COSMIC_ACCENT } from './utils/colorExtract';
+import { getTrackArtists } from './utils/artists';
 import type { Track, Playlist, EqPreset } from './api/types';
 
 type RightDrawerTab = 'none' | 'queue' | 'lyrics';
@@ -364,7 +365,7 @@ export default function App() {
 
   const handleOpenArtist = useCallback(
     (target: ArtistNavTarget) => {
-      const cleaned = target.name.split(',')[0].trim();
+      const cleaned = target.name.trim();
       if (!cleaned) return;
       setIsFullscreenStageOpen(false);
       navigateTo('artist', null, { name: cleaned, channelId: target.channelId || null }, null);
@@ -381,10 +382,18 @@ export default function App() {
   );
 
   const handleOpenTrackArtist = useCallback(
-    (track: Track) => {
+    (track: Track, artistName?: string, artistId?: string | null) => {
+      if (artistName && artistName.trim()) {
+        handleOpenArtist({
+          name: artistName.trim(),
+          channelId: artistId ?? null,
+        });
+        return;
+      }
+      const first = getTrackArtists(track)[0];
       handleOpenArtist({
-        name: track.artist.split(',')[0].trim(),
-        channelId: track.artist_id || null,
+        name: first?.name || track.artist,
+        channelId: first?.channelId ?? track.artist_id ?? null,
       });
     },
     [handleOpenArtist]

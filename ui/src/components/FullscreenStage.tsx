@@ -23,6 +23,7 @@ import {
   GripVertical,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { ArtistLinks } from './ArtistLinks';
 import {
   LyricsOverflowMenu,
   LyricsStageBody,
@@ -71,7 +72,7 @@ interface FullscreenStageProps {
   onClearQueue: () => void;
   onToggleAutoplayRadio: () => void;
   onOpenAlbum?: (track: Track) => void;
-  onOpenArtist?: (track: Track) => void;
+  onOpenArtist?: (track: Track, artistName?: string, artistId?: string | null) => void;
 }
 
 function formatTime(secs?: number): string {
@@ -643,17 +644,14 @@ export const FullscreenStage = ({
                   {currentTrack?.title || 'Ready to orbit'}
                 </h1>
                 {currentTrack && onOpenArtist ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      onOpenArtist(currentTrack);
-                    }}
-                    title={`Open Artist: ${currentTrack.artist}`}
-                    className="block max-w-full text-left text-sm text-[#B2BCD9] hover:text-white hover:underline truncate mt-1"
-                  >
-                    {currentTrack.artist}
-                  </button>
+                  <ArtistLinks
+                    artist={currentTrack.artist}
+                    artistId={currentTrack.artist_id}
+                    artists={currentTrack.artists}
+                    onAfterSelect={onClose}
+                    onOpenArtist={(name, id) => onOpenArtist(currentTrack, name, id)}
+                    className="text-sm text-[#B2BCD9] mt-1"
+                  />
                 ) : (
                   <p
                     title={currentTrack?.artist}
