@@ -591,3 +591,40 @@ def test_player_direct_play_sets_headers_and_calls_mpv_play() -> None:
     assert "Accept: */*" in mock_mpv.http_header_fields
     mock_mpv.play.assert_called_once_with("https://stream.googlevideo.com/videoplayback?id=123")
 
+
+@pytest.mark.asyncio
+async def test_resolver_prefetch_dedup_and_skips_cached(tmp_path: Path) -> None:
+    """Verify StreamResolver.prefetch warms uncached streams cleanly while skipping duplicates/cached."""
+    resolver = StreamResolver(db_path=tmp_path / "empty.db")
+    extracted: list[str] = []
+
+    def fake_ydl_init(opts):
+        mock = MagicMock()
+
+        def _extract(url, download=False):
+            vid = url.split("v=")[-1]
+            extracted.append(vid)
+            if vid == "fail_prefetch":
+                raise RuntimeError("Network timeout")
+            return {"url": f"https://stream.googlevideo.com/{vid}"}
+
+        mock.extract_info.side_effect = _extract
+        mock.__enter__.return_value = mock
+        return mock
+
+    with patch("yt_dlp.YoutubeDL", side_effect=fake_ydl_init):
+        # Warm first track manually
+        await resolver.resolve("vid_cached")
+        assert len(extracted) == 1
+
+        # Prefetch overlapping, cached, duplicate, and invalid IDs
+        warmed = await resolver.prefetch(
+            ["vid_cached", "vid_next_1", "vid_next_1", "vid_next_2", "fail_prefetch", "../bad"]
+        )
+        assert warmed == 2
+        assert resolver.is_cached("vid_next_1")
+        assert resolver.is_cached("vid_next_2")
+        assert extracted.count("vid_cached") == 1
+        assert extracted.count("vid_next_1") == 1
+        assert extracted.count("vid_next_2") == 1
+

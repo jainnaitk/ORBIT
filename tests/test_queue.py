@@ -282,3 +282,49 @@ async def test_queue_radio_filters_remixes_and_duplicates() -> None:
     assert "ring_1" not in ids
     assert "clean_dup" not in ids
     assert set(ids) == {"clean_1", "pop_1", "pop_2"}
+
+
+def test_queue_neighbor_tracks_and_repeat_wrap() -> None:
+    """Verify neighbor_tracks returns unique adjacent tracks with priority offsets and wraparound."""
+    tracks = [
+        Track(video_id=f"n{i}", title=f"Track {i}", artist="Artist") for i in range(6)
+    ]
+    qm = QueueManager(autoplay_radio=False)
+    qm.set_queue(tracks, start_index=1)
+
+    neighbors = qm.neighbor_tracks((1, -1, 2, -2, 3))
+    assert [t.video_id for t in neighbors] == ["n2", "n0", "n3", "n4"]
+
+    qm.set_queue(tracks[:4], start_index=0)
+    qm.set_repeat_mode("all")
+    wrapped = qm.neighbor_tracks((1, -1, 2, -2))
+    assert [t.video_id for t in wrapped] == ["n1", "n3", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_queue_step_tracks_single_step_multi_skip() -> None:
+    """Verify step_tracks jumps across multiple tracks with a single index update & notification."""
+    tracks = [
+        Track(video_id=f"s{i}", title=f"Song {i}", artist="Artist") for i in range(6)
+    ]
+    notify_count = 0
+
+    def _on_change() -> None:
+        nonlocal notify_count
+        notify_count += 1
+
+    qm = QueueManager(autoplay_radio=False, on_queue_changed=_on_change)
+    qm.set_queue(tracks, start_index=0)
+    notify_count = 0
+
+    # Skip forward 3 tracks in a single step
+    target = await qm.step_tracks(steps=3, direction=1)
+    assert target is not None and target.video_id == "s3"
+    assert qm.current_index == 3
+    assert notify_count == 1
+
+    # Skip backward 2 tracks in a single step
+    back = await qm.step_tracks(steps=2, direction=-1)
+    assert back is not None and back.video_id == "s1"
+    assert qm.current_index == 1
+    assert notify_count == 2

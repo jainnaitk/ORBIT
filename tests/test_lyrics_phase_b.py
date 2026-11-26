@@ -1096,3 +1096,58 @@ def test_parse_ttml_normalizes_comma_spacing() -> None:
     synced, _, _, _, _ = parse_ttml(ttml)
     assert len(synced) == 1
     assert synced[0]["text"] == "mmm, ga, re, sa, ni"
+
+
+@pytest.mark.asyncio
+async def test_resolve_lyrics_inflight_dedup_and_prefetch_cache() -> None:
+    """Verify concurrent resolve_lyrics calls share one cascade and prefetch_lyrics warms LRU."""
+    import asyncio
+
+    from metrolite.ytm.lyrics import prefetch_lyrics, resolve_lyrics
+
+    _LYRICS_CACHE.clear()
+    cascade_calls: list[str] = []
+
+    async def fake_cascade(
+        _ytm: object,
+        video_id: str,
+        title: str | None = None,
+        artist: str | None = None,
+        duration: int | None = None,
+        custom_query: str | None = None,
+    ) -> dict:
+        cascade_calls.append(video_id)
+        await asyncio.sleep(0.05)
+        return {
+            "synced": [{"type": "line", "time": 1.0, "text": f"Lyrics for {video_id}"}],
+            "lyrics": f"Lyrics for {video_id}",
+            "source": "LRCLIB",
+            "sync_type": "line",
+            "original_lang": "en",
+            "variants": [],
+            "songwriters": [],
+            "offline": False,
+        }
+
+    with patch("metrolite.ytm.lyrics._run_provider_cascade", side_effect=fake_cascade):
+        res1, res2 = await asyncio.gather(
+            resolve_lyrics(None, "dedupVid1", title="Song A", artist="Artist A"),
+            resolve_lyrics(None, "dedupVid1", title="Song A", artist="Artist A"),
+        )
+        assert res1["lyrics"] == "Lyrics for dedupVid1"
+        assert res2["lyrics"] == "Lyrics for dedupVid1"
+        assert cascade_calls.count("dedupVid1") == 1
+
+        # Prefetch should skip already-cached dedupVid1 and warm preVid2
+        warmed = await prefetch_lyrics(
+            None,
+            [
+                Track(video_id="dedupVid1", title="Song A", artist="Artist A"),
+                Track(video_id="preVid2", title="Song B", artist="Artist B"),
+                Track(video_id="preVid2", title="Song B", artist="Artist B"),
+            ],
+        )
+        assert warmed == 1
+        assert "preVid2" in _LYRICS_CACHE
+        assert cascade_calls.count("dedupVid1") == 1
+        assert cascade_calls.count("preVid2") == 1

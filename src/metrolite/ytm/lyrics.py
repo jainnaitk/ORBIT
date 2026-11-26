@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import sqlite3
+import weakref
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -42,9 +46,16 @@ _FEAT_IN_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_MAX_LYRICS_CACHE = 50
+_MAX_LYRICS_CACHE = 64
 _LYRICS_CACHE_SCHEMA_VERSION = 5
 _LYRICS_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_INFLIGHT_LYRICS: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
+_LYRICS_CLIENT_POOL: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+_LYRICS_PREFETCH_SEMS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
 
 _INSTRUMENTAL_MIN_GAP_S = 5.0
 _LINE_ONLY_INSTRUMENTAL_MIN_GAP_S = 10.0
@@ -147,6 +158,40 @@ def _cache_put(video_id: str, data: dict[str, Any]) -> None:
     _LYRICS_CACHE.move_to_end(video_id)
     while len(_LYRICS_CACHE) > _MAX_LYRICS_CACHE:
         _LYRICS_CACHE.popitem(last=False)
+
+
+@asynccontextmanager
+async def _borrow_lyrics_client(timeout: float) -> AsyncIterator[httpx.AsyncClient]:
+    """Reuse a keep-alive httpx client per event loop outside tests to avoid TLS handshakes."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=_HTTP_HEADERS,
+        ) as temp_client:
+            yield temp_client
+        return
+
+    loop = asyncio.get_running_loop()
+    client = _LYRICS_CLIENT_POOL.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=_HTTP_HEADERS,
+            limits=httpx.Limits(max_connections=24, max_keepalive_connections=12),
+        )
+        _LYRICS_CLIENT_POOL[loop] = client
+    yield client
+
+
+async def close_lyrics_clients() -> None:
+    """Close pooled keep-alive HTTP clients on shutdown."""
+    for loop_key, client in list(_LYRICS_CLIENT_POOL.items()):
+        _LYRICS_CLIENT_POOL.pop(loop_key, None)
+        with suppress(Exception):
+            if not client.is_closed:
+                await client.aclose()
 
 
 def _norm_lang_code(raw: str | None) -> str | None:
@@ -1215,15 +1260,17 @@ async def fetch_unison_lyrics(
     if not urls:
         return None
 
+    req_timeout = 1.8 if exact_video_only else 2.6
+
     async def _fetch_one(
         client: httpx.AsyncClient, url: str, params: dict[str, str], is_exact_vid: bool
     ) -> dict[str, Any] | None:
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, timeout=req_timeout)
             # Per Unison spec: 503 LOOKUP_PENDING means BiniLink is resolving a new ID
             if resp.status_code == 503 and is_exact_vid:
-                await asyncio.sleep(0.5)
-                resp = await client.get(url, params=params)
+                await asyncio.sleep(0.3)
+                resp = await client.get(url, params=params, timeout=req_timeout)
             if resp.status_code != 200:
                 return None
             payload = resp.json()
@@ -1371,11 +1418,7 @@ async def fetch_unison_lyrics(
         )
 
     try:
-        async with httpx.AsyncClient(
-            timeout=2.2 if exact_video_only else 2.6,
-            follow_redirects=True,
-            headers=_HTTP_HEADERS,
-        ) as client:
+        async with _borrow_lyrics_client(req_timeout) as client:
             if len(urls) == 1:
                 return await _fetch_one(client, *urls[0])
             results = await asyncio.gather(
@@ -1598,9 +1641,7 @@ async def fetch_lyricsplus_lyrics(
         artist_variants.append("")
 
     try:
-        async with httpx.AsyncClient(
-            timeout=2.8, follow_redirects=True, headers=_HTTP_HEADERS
-        ) as client:
+        async with _borrow_lyrics_client(2.8) as client:
             async def _query_one(
                 base: str, cand_artist: str, include_duration: bool = True
             ) -> dict[str, Any] | None:
@@ -1613,7 +1654,7 @@ async def fetch_lyricsplus_lyrics(
                 if include_duration and duration and duration > 10:
                     params["duration"] = str(int(duration))
                 try:
-                    resp = await client.get(f"{base}/v2/lyrics/get", params=params)
+                    resp = await client.get(f"{base}/v2/lyrics/get", params=params, timeout=2.8)
                     if resp.status_code != 200:
                         return None
                     data = resp.json()
@@ -1699,22 +1740,20 @@ async def fetch_betterlyrics_api(
         params_list.append({"s": clean_title, "a": ""})
 
     try:
-        async with httpx.AsyncClient(
-            timeout=2.6, follow_redirects=True, headers=_HTTP_HEADERS
-        ) as client:
-            for params in params_list:
+        async with _borrow_lyrics_client(2.6) as client:
+            async def _fetch_candidate(params: dict[str, str]) -> tuple[bool, dict[str, Any]] | None:
                 try:
                     resp = await client.get(
-                        "https://api.betterlyrics.org/getLyrics", params=params
+                        "https://api.betterlyrics.org/getLyrics", params=params, timeout=2.6
                     )
                     if resp.status_code != 200:
-                        continue
+                        return None
                     data = resp.json()
                     if not isinstance(data, dict):
-                        continue
+                        return None
                     raw_ttml = data.get("ttml") or data.get("lyrics") or ""
                     if not isinstance(raw_ttml, str) or not raw_ttml.strip():
-                        continue
+                        return None
                     if raw_ttml.lstrip().startswith("<"):
                         synced, sync_type, writers, xml_lang, native_tr = parse_ttml(raw_ttml)
                     elif _LRC_LINE_RE.search(raw_ttml):
@@ -1722,9 +1761,9 @@ async def fetch_betterlyrics_api(
                         sync_type = _compute_sync_type(synced)
                         writers, xml_lang, native_tr = [], None, {}
                     else:
-                        continue
+                        return None
                     if not synced or sync_type == "plain" or not _has_valid_timestamps(synced):
-                        continue
+                        return None
                     if not custom_query and duration and duration > 30:
                         last_t = max(
                             (
@@ -1735,29 +1774,49 @@ async def fetch_betterlyrics_api(
                             default=0.0,
                         )
                         if last_t > float(duration) + 14.0:
-                            continue
-                    return _enrich_lyrics_payload(
-                        {
-                            "synced": synced,
-                            "lyrics": None,
-                            "source": "BetterLyrics",
-                            "sync_type": sync_type,
-                            "credit": "BetterLyrics",
-                            "credit_url": "https://better-lyrics.boidu.dev",
-                            "submitter": None,
-                            "submitter_url": None,
-                            "songwriters": writers,
-                            "offline": False,
-                            # Durationless fallback MUST align to exact-video YTM/SimpMusic
-                            # (prevents 16s-early movie-intro drift like Illuminati!)
-                            "_duration_diff": 0.0 if "d" in params else 6.0,
-                        },
-                        xml_lang=xml_lang,
-                        native_translations=native_tr,
+                            return None
+                    return (
+                        "d" in params,
+                        _enrich_lyrics_payload(
+                            {
+                                "synced": synced,
+                                "lyrics": None,
+                                "source": "BetterLyrics",
+                                "sync_type": sync_type,
+                                "credit": "BetterLyrics",
+                                "credit_url": "https://better-lyrics.boidu.dev",
+                                "submitter": None,
+                                "submitter_url": None,
+                                "songwriters": writers,
+                                "offline": False,
+                                # Durationless fallback MUST align to exact-video YTM/SimpMusic
+                                # (prevents 16s-early movie-intro drift like Illuminati!)
+                                "_duration_diff": 0.0 if "d" in params else 6.0,
+                            },
+                            xml_lang=xml_lang,
+                            native_translations=native_tr,
+                        ),
                     )
                 except Exception as inner_err:  # noqa: BLE001
                     logger.debug("BetterLyrics candidate skipped: %s", inner_err)
-                    continue
+                    return None
+
+            if len(params_list) == 1:
+                single = await _fetch_candidate(params_list[0])
+                return single[1] if single else None
+            cand_results = await asyncio.gather(
+                *(_fetch_candidate(p) for p in params_list),
+                return_exceptions=True,
+            )
+            fallback_res: dict[str, Any] | None = None
+            for item in cand_results:
+                if isinstance(item, tuple):
+                    has_dur, payload = item
+                    if has_dur:
+                        return payload
+                    if fallback_res is None:
+                        fallback_res = payload
+            return fallback_res
     except Exception as e:  # noqa: BLE001
         logger.debug("BetterLyrics API lookup failed for %r: %s", clean_title, e)
     return None
@@ -1953,14 +2012,13 @@ async def fetch_paxsenix_apple_lyrics(
     term = clean_title if custom_query else f"{clean_title} {primary_artist}".strip()
 
     try:
-        async with httpx.AsyncClient(
-            timeout=3.0, follow_redirects=True, headers=_HTTP_HEADERS
-        ) as client:
+        async with _borrow_lyrics_client(3.0) as client:
             async def _itunes_search(country: str) -> list[dict[str, Any]]:
                 try:
                     r = await client.get(
                         "https://itunes.apple.com/search",
                         params={"term": term, "entity": "song", "limit": "6", "country": country},
+                        timeout=3.0,
                     )
                     if r.status_code != 200:
                         return []
@@ -2028,6 +2086,7 @@ async def fetch_paxsenix_apple_lyrics(
                 "https://lyrics.paxsenix.org/apple-music/lyrics",
                 params={"id": str(best_id), "ttml": "true", "v": "2"},
                 headers={"Accept": "*/*"},
+                timeout=3.0,
             )
             if lyr_res.status_code != 200 or not lyr_res.text.strip():
                 return None
@@ -2119,11 +2178,10 @@ async def fetch_simpmusic_lyrics(
     if not video_id:
         return None
     try:
-        async with httpx.AsyncClient(
-            timeout=2.6, follow_redirects=True, headers=_HTTP_HEADERS
-        ) as client:
+        async with _borrow_lyrics_client(2.6) as client:
             resp = await client.get(
-                f"https://api-lyrics.simpmusic.org/v1/{quote(str(video_id))}"
+                f"https://api-lyrics.simpmusic.org/v1/{quote(str(video_id))}",
+                timeout=2.6,
             )
             if resp.status_code != 200:
                 return None
@@ -2230,12 +2288,12 @@ async def fetch_lrc_red_lyrics(
     )
 
     try:
-        async with httpx.AsyncClient(
-            timeout=2.8, follow_redirects=True, headers=_HTTP_HEADERS
-        ) as client:
+        async with _borrow_lyrics_client(2.8) as client:
             hits: list[Any] = []
             for q_str in queries:
-                resp = await client.get("https://lrc.red/search.json", params={"q": q_str})
+                resp = await client.get(
+                    "https://lrc.red/search.json", params={"q": q_str}, timeout=2.8
+                )
                 if resp.status_code != 200:
                     continue
                 search = resp.json()
@@ -2306,9 +2364,17 @@ async def fetch_lrc_red_lyrics(
                 return None
 
             writers: list[str] = []
-            try:
-                meta_res = await client.get(f"https://lrc.red/s/{isrc}.json")
-                if meta_res.status_code == 200:
+            meta_res, ttml_res = await asyncio.gather(
+                client.get(f"https://lrc.red/s/{isrc}.json", timeout=2.8),
+                client.get(
+                    f"https://lrc.red/s/{isrc}.ttml",
+                    headers={"Accept": "*/*"},
+                    timeout=2.8,
+                ),
+                return_exceptions=True,
+            )
+            if not isinstance(meta_res, Exception) and meta_res.status_code == 200:
+                with suppress(Exception):
                     meta = meta_res.json()
                     if isinstance(meta, dict):
                         if isinstance(meta.get("songwriters"), list):
@@ -2317,11 +2383,8 @@ async def fetch_lrc_red_lyrics(
                             ]
                         if str(meta.get("sync") or "").lower() == "none":
                             return None
-            except Exception as e:  # noqa: BLE001
-                logger.debug("lrc.red metadata check skipped for %s: %s", isrc, e)
 
-            ttml_res = await client.get(f"https://lrc.red/s/{isrc}.ttml", headers={"Accept": "*/*"})
-            if ttml_res.status_code != 200 or not ttml_res.text.strip():
+            if isinstance(ttml_res, Exception) or ttml_res.status_code != 200 or not ttml_res.text.strip():
                 return None
 
             synced, sync_type, ttml_writers, xml_lang, native_tr = parse_ttml(ttml_res.text)
@@ -2589,15 +2652,12 @@ async def fetch_lrclib_lyrics(
     primary_artist = artists[0] if artists else ""
 
     try:
-        async with httpx.AsyncClient(
-            timeout=3.0,
-            follow_redirects=True,
-            headers=_HTTP_HEADERS,
-        ) as client:
+        async with _borrow_lyrics_client(3.0) as client:
             if custom_query:
                 resp = await client.get(
                     "https://lrclib.net/api/search",
                     params={"q": custom_query.strip()},
+                    timeout=3.0,
                 )
                 if resp.status_code == 200:
                     arr = resp.json()
@@ -2611,18 +2671,24 @@ async def fetch_lrclib_lyrics(
 
             collected_items: list[dict[str, Any]] = []
 
-            if clean_title and primary_artist:
+            async def _run_exact_get() -> list[dict[str, Any]]:
+                if not (clean_title and primary_artist):
+                    return []
                 params: dict[str, Any] = {
                     "track_name": clean_title,
                     "artist_name": primary_artist,
                 }
                 if duration and duration > 0:
                     params["duration"] = int(duration)
-                resp = await client.get("https://lrclib.net/api/get", params=params)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, dict):
-                        collected_items.append(data)
+                try:
+                    r = await client.get("https://lrclib.net/api/get", params=params, timeout=3.0)
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, dict):
+                            return [data]
+                except Exception as inner_err:  # noqa: BLE001
+                    logger.debug("LRCLIB exact lookup skipped: %s", inner_err)
+                return []
 
             raw_attempts: list[dict[str, str]] = []
             if clean_title and primary_artist:
@@ -2645,7 +2711,7 @@ async def fetch_lrclib_lyrics(
 
             async def _run_raw_search(sp: dict[str, str]) -> list[dict[str, Any]]:
                 try:
-                    r = await client.get("https://lrclib.net/api/search", params=sp)
+                    r = await client.get("https://lrclib.net/api/search", params=sp, timeout=3.0)
                     if r.status_code != 200:
                         return []
                     arr = r.json()
@@ -2653,14 +2719,11 @@ async def fetch_lrclib_lyrics(
                 except Exception:  # noqa: BLE001
                     return []
 
-            if search_attempts:
-                search_lists = await asyncio.gather(
-                    *(_run_raw_search(sp) for sp in search_attempts),
-                    return_exceptions=True,
-                )
-                for chunk in search_lists:
-                    if isinstance(chunk, list):
-                        collected_items.extend(chunk)
+            tasks = [_run_exact_get(), *(_run_raw_search(sp) for sp in search_attempts)]
+            chunks = await asyncio.gather(*tasks, return_exceptions=True)
+            for chunk in chunks:
+                if isinstance(chunk, list):
+                    collected_items.extend(chunk)
 
             if not collected_items:
                 return None
@@ -3224,7 +3287,7 @@ async def _run_provider_cascade(
     }
 
 
-async def resolve_lyrics(
+async def _resolve_lyrics_impl(
     ytm_client: Any,
     video_id: str,
     title: str | None = None,
@@ -3360,6 +3423,125 @@ async def resolve_lyrics(
         _cache_put(video_id, result)
 
     return result
+
+
+async def resolve_lyrics(
+    ytm_client: Any,
+    video_id: str,
+    title: str | None = None,
+    artist: str | None = None,
+    duration: int | None = None,
+    custom_query: str | None = None,
+    query: str | None = None,
+    force: bool = False,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Resolve lyrics with in-flight task deduplication so concurrent fetches share one cascade."""
+    eff_query = (query or custom_query or "").strip()
+    if not force and not eff_query and video_id in _LYRICS_CACHE:
+        _LYRICS_CACHE.move_to_end(video_id)
+        cached = dict(_LYRICS_CACHE[video_id])
+        if cached.get("synced") or cached.get("lyrics"):
+            return cached
+
+    inflight_key = (video_id, eff_query)
+    loop = asyncio.get_running_loop()
+    if not force:
+        existing = _INFLIGHT_LYRICS.get(inflight_key)
+        if existing is not None and not existing.done() and existing.get_loop() is loop:
+            return dict(await asyncio.shield(existing))
+
+    task = asyncio.create_task(
+        _resolve_lyrics_impl(
+            ytm_client,
+            video_id=video_id,
+            title=title,
+            artist=artist,
+            duration=duration,
+            custom_query=custom_query,
+            query=query,
+            force=force,
+            db_path=db_path,
+        )
+    )
+    if not force:
+        _INFLIGHT_LYRICS[inflight_key] = task
+
+        def _cleanup(done_task: asyncio.Task[dict[str, Any]], key: tuple[str, str] = inflight_key) -> None:
+            if _INFLIGHT_LYRICS.get(key) is done_task:
+                _INFLIGHT_LYRICS.pop(key, None)
+            if not done_task.cancelled():
+                done_task.exception()
+
+        task.add_done_callback(_cleanup)
+
+    return dict(await asyncio.shield(task))
+
+
+def _get_lyrics_prefetch_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _LYRICS_PREFETCH_SEMS.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(2)
+        _LYRICS_PREFETCH_SEMS[loop] = sem
+    return sem
+
+
+async def prefetch_lyrics(
+    ytm_client: Any,
+    tracks: Iterable[Any],
+    db_path: Path | str | None = None,
+    max_items: int = 4,
+) -> int:
+    """Silently warm _LYRICS_CACHE for upcoming/hovered tracks without blocking playback."""
+    candidates: list[tuple[str, str | None, str | None, int | None]] = []
+    seen: set[str] = set()
+    for item in tracks:
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            vid = str(item.get("video_id") or "").strip()
+            title = item.get("title")
+            artist = item.get("artist")
+            dur = item.get("duration_s") or item.get("duration")
+        else:
+            vid = str(getattr(item, "video_id", "") or "").strip()
+            title = getattr(item, "title", None)
+            artist = getattr(item, "artist", None)
+            dur = getattr(item, "duration_s", None)
+        if not vid or vid in seen or vid in _LYRICS_CACHE:
+            if vid in _LYRICS_CACHE:
+                _LYRICS_CACHE.move_to_end(vid)
+            continue
+        seen.add(vid)
+        eff_dur = round(float(dur)) if isinstance(dur, (int, float)) and dur > 0 else None
+        candidates.append((vid, title, artist, eff_dur))
+        if len(candidates) >= max_items:
+            break
+
+    if not candidates:
+        return 0
+
+    sem = _get_lyrics_prefetch_semaphore()
+    warmed = 0
+
+    async def _warm_one(vid: str, title: str | None, artist: str | None, dur: int | None) -> None:
+        nonlocal warmed
+        async with sem:
+            with suppress(Exception):
+                res = await resolve_lyrics(
+                    ytm_client,
+                    video_id=vid,
+                    title=title,
+                    artist=artist,
+                    duration=dur,
+                    db_path=db_path,
+                )
+                if res.get("synced") or res.get("lyrics"):
+                    warmed += 1
+
+    await asyncio.gather(*(_warm_one(*c) for c in candidates), return_exceptions=True)
+    return warmed
 
 
 async def cache_lyrics_for_download(

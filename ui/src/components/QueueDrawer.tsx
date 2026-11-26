@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { X, Trash2, Radio, GripVertical, Play } from 'lucide-react';
 import { TrackImage } from './TrackImage';
+import { cancelTrackPreload, scheduleTrackPreload } from '../api/client';
 import { useTwoFingerClose } from '../utils/gestures';
 import type { QueueData, Track } from '../api/types';
 
@@ -402,6 +403,8 @@ export const QueueDrawer = memo(({
                   <div
                     key={`${item.video_id}-${origIndex}`}
                     onPointerDown={(e) => handleRowPointerDown(e, visIdx, item)}
+                    onMouseEnter={() => scheduleTrackPreload(item)}
+                    onMouseLeave={() => cancelTrackPreload(item.video_id)}
                     onClick={() => {
                       if (didDragRef.current) return;
                       onPlayQueueItem(item, origIndex);

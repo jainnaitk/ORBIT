@@ -783,3 +783,45 @@ def test_player_seek_idle_buffering_no_500(
     res3 = client.post("/player/seek", json={"seconds": 30.0}, headers=headers)
     assert res3.status_code == 200
     assert res3.json() == {"time_pos": 0.0}
+
+
+def test_player_preload_and_multi_step_next_prev_endpoints(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Test /player/preload and multi-step /player/next & /player/prev endpoints."""
+    headers = {"X-Bridge-Token": test_token}
+    tracks = [
+        {"video_id": f"fast_{i}", "title": f"Fast {i}", "artist": "Artist"} for i in range(5)
+    ]
+
+    # Preload single and batch video_ids cleanly
+    mock_controller.player.resolver.is_cached = MagicMock(return_value=False)
+    mock_controller.player.resolver.prefetch = AsyncMock(return_value=2)
+    res_pre = client.post(
+        "/player/preload",
+        json={
+            "video_id": "fast_1",
+            "video_ids": ["fast_2"],
+            "title": "Fast 1",
+            "artist": "Artist",
+            "preload_lyrics": True,
+        },
+        headers=headers,
+    )
+    assert res_pre.status_code == 200
+    assert res_pre.json()["status"] == "ok"
+
+    # Set queue at index 0 and multi-skip +2 in one request
+    client.post("/queue", json={"action": "set", "items": tracks, "start_index": 0}, headers=headers)
+    res_nxt = client.post("/player/next?steps=2", headers=headers)
+    assert res_nxt.status_code == 200
+    assert mock_controller.queue.current_index == 2
+    assert res_nxt.json()["current_track"]["video_id"] == "fast_2"
+
+    # Multi-skip -2 back to index 0
+    res_prv = client.post("/player/prev?steps=2", headers=headers)
+    assert res_prv.status_code == 200
+    assert mock_controller.queue.current_index == 0
+    assert res_prv.json()["current_track"]["video_id"] == "fast_0"

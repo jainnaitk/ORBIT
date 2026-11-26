@@ -17,17 +17,34 @@ import {
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
 import { ArtistLinks } from '../components/ArtistLinks';
-import type { Track, HomeSection, PersonalizedHomeResponse } from '../api/types';
-import { bridgeApi } from '../api/client';
+import {
+  TrackContextMenu,
+  isTrackDownloaded,
+  useTrackContextMenu,
+} from '../components/TrackContextMenu';
+import type {
+  Track,
+  HomeSection,
+  PersonalizedHomeResponse,
+  DownloadProgress,
+} from '../api/types';
+import { bridgeApi, cancelTrackPreload, scheduleTrackPreload } from '../api/client';
 
 interface HomeViewProps {
   currentTrackId?: string | null;
   likedIds?: Set<string>;
+  downloads?: Record<string, DownloadProgress>;
+  downloadedIds?: Set<string>;
   onPlayTrack: (track: Track) => void;
   onPlayAll: (tracks: Track[]) => void;
   onToggleLike: (track: Track) => void;
   onAddNext: (track: Track) => void;
+  onAppendQueue?: (track: Track) => void;
+  onOpenAddToPlaylist?: (track: Track) => void;
+  onDownload?: (track: Track) => void;
+  onDeleteDownload?: (track: Track) => void;
   onOpenArtist?: (artistName: string, artistId?: string | null) => void;
+  onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
 }
 
 const MOOD_PRESETS: { id: string; label: string }[] = [
@@ -61,6 +78,7 @@ const HorizontalShelf = ({
   onToggleLike,
   onAddNext,
   onOpenArtist,
+  onContextMenuTrack,
 }: {
   title: string;
   subtitle?: string;
@@ -73,6 +91,7 @@ const HorizontalShelf = ({
   onToggleLike: (t: Track) => void;
   onAddNext: (t: Track) => void;
   onOpenArtist?: (artistName: string, artistId?: string | null) => void;
+  onContextMenuTrack?: (e: React.MouseEvent, t: Track) => void;
 }) => {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [fadeClass, setFadeClass] = useState<string>('shelf-fade-right');
@@ -151,6 +170,9 @@ const HorizontalShelf = ({
             <div
               key={`${item.video_id}-${idx}`}
               onClick={() => onPlayTrack(item)}
+              onMouseEnter={() => scheduleTrackPreload(item)}
+              onMouseLeave={() => cancelTrackPreload(item.video_id)}
+              onContextMenu={(e) => onContextMenuTrack?.(e, item)}
               className="group ios-liquid-card w-[168px] rounded-2xl p-2.5 flex-none cursor-pointer flex flex-col"
               style={
                 isCurrent
@@ -236,11 +258,18 @@ const HorizontalShelf = ({
 export const HomeView = memo(({
   currentTrackId,
   likedIds,
+  downloads,
+  downloadedIds,
   onPlayTrack,
   onPlayAll,
   onToggleLike,
   onAddNext,
+  onAppendQueue,
+  onOpenAddToPlaylist,
+  onDownload,
+  onDeleteDownload,
   onOpenArtist,
+  onOpenAlbum,
 }: HomeViewProps) => {
   const [activeMood, setActiveMood] = useState<string>('for_you');
   const [homeData, setHomeData] = useState<PersonalizedHomeResponse | null>(
@@ -250,6 +279,20 @@ export const HomeView = memo(({
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [greeting] = useState<string>(() => getStableGreeting());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const { menuState, menuRef, openMenuAt, closeMenu } = useTrackContextMenu();
+  const handleTrackContextMenu = useCallback(
+    (e: React.MouseEvent, track: Track) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openMenuAt(
+        track,
+        e.clientX,
+        e.clientY,
+        isTrackDownloaded(track, downloadedIds, downloads)
+      );
+    },
+    [openMenuAt, downloadedIds, downloads]
+  );
   const reqSeqRef = useRef<number>(0);
   const bhCanvasRef = useRef<HTMLElement | null>(null);
   const scrollRafRef = useRef<number>(0);
@@ -488,6 +531,9 @@ export const HomeView = memo(({
                       <div
                         key={`dial-${track.video_id}`}
                         onClick={() => onPlayTrack(track)}
+                        onMouseEnter={() => scheduleTrackPreload(track)}
+                        onMouseLeave={() => cancelTrackPreload(track.video_id)}
+                        onContextMenu={(e) => handleTrackContextMenu(e, track)}
                         className="group ios-liquid-card flex items-center gap-3 pr-3.5 rounded-2xl overflow-hidden cursor-pointer"
                         style={
                           isCurrent
@@ -575,6 +621,9 @@ export const HomeView = memo(({
                           <div
                             key={`${item.video_id}-${idx}`}
                             onClick={() => onPlayTrack(item)}
+                            onMouseEnter={() => scheduleTrackPreload(item)}
+                            onMouseLeave={() => cancelTrackPreload(item.video_id)}
+                            onContextMenu={(e) => handleTrackContextMenu(e, item)}
                             className="group ios-liquid-card flex items-center gap-3 p-2 rounded-2xl cursor-pointer"
                             style={
                               isCurrent
@@ -660,12 +709,26 @@ export const HomeView = memo(({
                   onToggleLike={onToggleLike}
                   onAddNext={onAddNext}
                   onOpenArtist={onOpenArtist}
+                  onContextMenuTrack={handleTrackContextMenu}
                 />
               );
             })}
           </>
         )}
       </div>
+
+      <TrackContextMenu
+        menuState={menuState}
+        menuRef={menuRef}
+        onClose={closeMenu}
+        onAddNext={onAddNext}
+        onAppendQueue={onAppendQueue}
+        onOpenArtist={onOpenArtist}
+        onOpenAlbum={onOpenAlbum}
+        onOpenAddToPlaylist={onOpenAddToPlaylist}
+        onDownload={onDownload}
+        onDeleteDownload={onDeleteDownload}
+      />
     </div>
   );
 });

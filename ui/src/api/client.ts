@@ -284,6 +284,10 @@ export async function launchUpdateInstallerAndQuit(installerPath: string): Promi
 export class BridgeApiClient {
   private config: BridgeConfig | null = null;
   private preloadedIds: Set<string> = new Set();
+  private lyricsCache: Map<string, LyricsResponse> = new Map();
+  private lyricsInflight: Map<string, Promise<LyricsResponse>> = new Map();
+  private lyricsPrefetchedIds: Set<string> = new Set();
+  private static readonly MAX_LYRICS_CACHE = 32;
 
   constructor(config?: BridgeConfig) {
     if (config) this.config = config;
@@ -318,6 +322,26 @@ export class BridgeApiClient {
     return (await res.json()) as T;
   }
 
+  public getCachedLyrics(videoId: string): LyricsResponse | null {
+    if (!videoId) return null;
+    const hit = this.lyricsCache.get(videoId);
+    if (!hit) return null;
+    this.lyricsCache.delete(videoId);
+    this.lyricsCache.set(videoId, hit);
+    return hit;
+  }
+
+  private setCachedLyrics(videoId: string, res: LyricsResponse): void {
+    if (!videoId || (!res.synced?.length && !res.lyrics)) return;
+    if (this.lyricsCache.has(videoId)) {
+      this.lyricsCache.delete(videoId);
+    } else if (this.lyricsCache.size >= BridgeApiClient.MAX_LYRICS_CACHE) {
+      const oldest = this.lyricsCache.keys().next().value;
+      if (oldest) this.lyricsCache.delete(oldest);
+    }
+    this.lyricsCache.set(videoId, res);
+  }
+
   public async getLyrics(
     videoId: string,
     options?: {
@@ -328,6 +352,14 @@ export class BridgeApiClient {
       query?: string;
     }
   ): Promise<LyricsResponse> {
+    const customQuery = options?.query?.trim();
+    if (!options?.force && !customQuery) {
+      const cached = this.getCachedLyrics(videoId);
+      if (cached) return cached;
+      const pending = this.lyricsInflight.get(videoId);
+      if (pending) return pending;
+    }
+
     const params = new URLSearchParams();
     if (options?.title) params.set('title', options.title);
     if (options?.artist) params.set('artist', options.artist);
@@ -335,16 +367,64 @@ export class BridgeApiClient {
       params.set('duration', String(Math.round(options.duration)));
     }
     if (options?.force) params.set('force', 'true');
-    if (options?.query && options.query.trim()) {
-      params.set('query', options.query.trim());
+    if (customQuery) {
+      params.set('query', customQuery);
     }
     const qs = params.toString();
-    return this.request<LyricsResponse>(
+    const reqPromise = this.request<LyricsResponse>(
       `/lyrics/${encodeURIComponent(videoId)}${qs ? '?' + qs : ''}`
-    );
+    ).then((res) => {
+      if (!customQuery) {
+        this.setCachedLyrics(videoId, res);
+      }
+      return res;
+    });
+
+    if (!options?.force && !customQuery) {
+      this.lyricsInflight.set(videoId, reqPromise);
+      reqPromise.finally(() => {
+        if (this.lyricsInflight.get(videoId) === reqPromise) {
+          this.lyricsInflight.delete(videoId);
+        }
+      });
+    }
+    return reqPromise;
   }
 
-  public async preloadTrack(videoId: string): Promise<void> {
+  public prefetchLyrics(
+    track: Pick<Track, 'video_id' | 'title' | 'artist'> & { duration_s?: number }
+  ): void {
+    const vid = track?.video_id;
+    if (!vid || this.lyricsCache.has(vid) || this.lyricsInflight.has(vid)) {
+      if (vid && this.lyricsCache.has(vid)) {
+        this.getCachedLyrics(vid);
+      }
+      return;
+    }
+    if (this.lyricsPrefetchedIds.has(vid)) return;
+    this.lyricsPrefetchedIds.add(vid);
+    if (this.lyricsPrefetchedIds.size > 64) {
+      const oldest = this.lyricsPrefetchedIds.values().next().value;
+      if (oldest) this.lyricsPrefetchedIds.delete(oldest);
+    }
+    void this.getLyrics(vid, {
+      title: track.title,
+      artist: track.artist,
+      duration: track.duration_s,
+    }).catch(() => {
+      this.lyricsPrefetchedIds.delete(vid);
+    });
+  }
+
+  public async preloadTrack(
+    videoId: string,
+    trackMeta?: {
+      title?: string;
+      artist?: string;
+      duration_s?: number;
+      preload_lyrics?: boolean;
+    }
+  ): Promise<void> {
     if (!videoId || this.preloadedIds.has(videoId)) return;
     this.preloadedIds.add(videoId);
     if (this.preloadedIds.size > 60) {
@@ -354,7 +434,13 @@ export class BridgeApiClient {
     try {
       await this.request('/player/preload', {
         method: 'POST',
-        body: JSON.stringify({ video_id: videoId }),
+        body: JSON.stringify({
+          video_id: videoId,
+          ...(trackMeta?.title ? { title: trackMeta.title } : {}),
+          ...(trackMeta?.artist ? { artist: trackMeta.artist } : {}),
+          ...(trackMeta?.duration_s ? { duration_s: trackMeta.duration_s } : {}),
+          ...(trackMeta?.preload_lyrics ? { preload_lyrics: true } : {}),
+        }),
       });
     } catch {
       this.preloadedIds.delete(videoId);
@@ -431,12 +517,14 @@ export class BridgeApiClient {
     return this.request('/player/play', { method: 'POST' });
   }
 
-  public async next(): Promise<{ status: string }> {
-    return this.request('/player/next', { method: 'POST' });
+  public async next(steps: number = 1): Promise<{ status: string }> {
+    const q = steps > 1 ? `?steps=${Math.round(steps)}` : '';
+    return this.request(`/player/next${q}`, { method: 'POST' });
   }
 
-  public async prev(): Promise<{ status: string }> {
-    return this.request('/player/prev', { method: 'POST' });
+  public async prev(steps: number = 1): Promise<{ status: string }> {
+    const q = steps > 1 ? `?steps=${Math.round(steps)}` : '';
+    return this.request(`/player/prev${q}`, { method: 'POST' });
   }
 
   public async seek(seconds: number): Promise<{ time_pos: number }> {
@@ -629,6 +717,43 @@ export class BridgeApiClient {
 
 export const bridgeApi = new BridgeApiClient();
 
+let hoverPreloadTimer: number | null = null;
+let hoverPreloadVid: string | null = null;
+
+/**
+ * Debounced track warmup on hover (stream URL + lyrics) without spamming during fast pointer sweeps.
+ */
+export function scheduleTrackPreload(track: Track | null | undefined, delayMs: number = 85): void {
+  const vid = track?.video_id;
+  if (!vid) return;
+  if (hoverPreloadTimer !== null) {
+    clearTimeout(hoverPreloadTimer);
+    hoverPreloadTimer = null;
+  }
+  hoverPreloadVid = vid;
+  hoverPreloadTimer = window.setTimeout(() => {
+    hoverPreloadTimer = null;
+    if (hoverPreloadVid !== vid) return;
+    void bridgeApi.preloadTrack(vid, {
+      title: track.title,
+      artist: track.artist,
+      duration_s: track.duration_s,
+      preload_lyrics: true,
+    });
+  }, delayMs);
+}
+
+/**
+ * Cancel pending hover preload timer when pointer leaves a track card/row.
+ */
+export function cancelTrackPreload(videoId?: string | null): void {
+  if (hoverPreloadTimer !== null && (!videoId || hoverPreloadVid === videoId)) {
+    clearTimeout(hoverPreloadTimer);
+    hoverPreloadTimer = null;
+    hoverPreloadVid = null;
+  }
+}
+
 export type EventListener<K extends keyof BridgeEventMap> = (data: BridgeEventMap[K]) => void;
 
 export class BridgeSocketClient {
@@ -645,6 +770,35 @@ export class BridgeSocketClient {
   public latestTickAt = 0;
   public latestDuration = 0;
   public latestTrackId: string | null = null;
+  public optimisticTrackId: string | null = null;
+  public optimisticUntil = 0;
+
+  public beginOptimisticSwitch(track: Track | null, ttlMs: number = 8000): void {
+    const vid = track?.video_id ?? null;
+    this.optimisticTrackId = vid;
+    this.optimisticUntil = vid ? Date.now() + ttlMs : 0;
+    this.latestTrackId = vid;
+    this.latestTimePos = 0;
+    this.latestTickAt = performance.now();
+    this.latestDuration = track?.duration_s ?? 0;
+  }
+
+  public clearOptimisticSwitch(expectedVideoId?: string): void {
+    if (!expectedVideoId || this.optimisticTrackId === expectedVideoId) {
+      this.optimisticTrackId = null;
+      this.optimisticUntil = 0;
+    }
+  }
+
+  private isStaleOptimisticEvent(incomingVideoId: string | null): boolean {
+    if (!this.optimisticTrackId) return false;
+    if (Date.now() >= this.optimisticUntil) {
+      this.optimisticTrackId = null;
+      this.optimisticUntil = 0;
+      return false;
+    }
+    return incomingVideoId !== this.optimisticTrackId;
+  }
 
   public onStatusChange(callback: (connected: boolean) => void): () => void {
     this.statusListeners.add(callback);
@@ -690,20 +844,46 @@ export class BridgeSocketClient {
           const parsed = JSON.parse(event.data) as { event: keyof BridgeEventMap; data: any };
           if (parsed && parsed.event) {
             if (parsed.event === 'playback_tick' && parsed.data) {
+              const incomingVid: string | null = parsed.data.current_track?.video_id ?? null;
+              if (this.isStaleOptimisticEvent(incomingVid)) {
+                return;
+              }
+              if (
+                this.optimisticTrackId &&
+                incomingVid === this.optimisticTrackId &&
+                parsed.data.state &&
+                parsed.data.state !== 'buffering'
+              ) {
+                this.clearOptimisticSwitch(this.optimisticTrackId);
+              }
               if (typeof parsed.data.time_pos === 'number') {
                 this.latestTimePos = parsed.data.time_pos;
                 this.latestTickAt = performance.now();
               }
               if (typeof parsed.data.duration === 'number') this.latestDuration = parsed.data.duration;
-              this.latestTrackId = parsed.data.current_track?.video_id ?? null;
+              this.latestTrackId = incomingVid;
             } else if (parsed.event === 'track_changed' && parsed.data) {
-              this.latestTimePos = typeof parsed.data.time_pos === 'number' ? parsed.data.time_pos : 0;
-              this.latestTickAt = performance.now();
               const trk =
                 parsed.data.current_track !== undefined ? parsed.data.current_track : parsed.data.track ?? null;
+              const incomingVid: string | null = trk?.video_id ?? null;
+              if (this.isStaleOptimisticEvent(incomingVid)) {
+                return;
+              }
+              if (
+                this.optimisticTrackId &&
+                incomingVid === this.optimisticTrackId &&
+                parsed.data.state &&
+                parsed.data.state !== 'buffering'
+              ) {
+                this.clearOptimisticSwitch(this.optimisticTrackId);
+              }
+              this.latestTimePos = typeof parsed.data.time_pos === 'number' ? parsed.data.time_pos : 0;
+              this.latestTickAt = performance.now();
               this.latestDuration =
                 typeof parsed.data.duration === 'number' ? parsed.data.duration : trk?.duration_s ?? 0;
-              this.latestTrackId = trk?.video_id ?? null;
+              this.latestTrackId = incomingVid;
+            } else if (parsed.event === 'error') {
+              this.clearOptimisticSwitch();
             }
             if (this.listeners[parsed.event]) {
               const handlers = this.listeners[parsed.event];
@@ -880,6 +1060,14 @@ export function useBridge() {
     syncInitialState();
   }, [syncInitialState]);
 
+  const beginOptimisticSwitch = useCallback((track: Track | null) => {
+    bridgeSocket.beginOptimisticSwitch(track);
+  }, []);
+
+  const clearOptimisticSwitch = useCallback((expectedVideoId?: string) => {
+    bridgeSocket.clearOptimisticSwitch(expectedVideoId);
+  }, []);
+
   return {
     config,
     isConnected,
@@ -894,5 +1082,7 @@ export function useBridge() {
     api: bridgeApi,
     lastError,
     reconnect,
+    beginOptimisticSwitch,
+    clearOptimisticSwitch,
   };
 }

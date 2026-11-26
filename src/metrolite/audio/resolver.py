@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import threading
 import time
+import weakref
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Self
@@ -104,6 +105,9 @@ class StreamResolver:
         self._working_client: str = DEFAULT_CLIENT
         self._cache: dict[str, tuple[ResolvedSource, float]] = {}
         self._inflight: dict[str, asyncio.Task[ResolvedSource]] = {}
+        self._prefetch_sem_map: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, asyncio.Semaphore
+        ] = weakref.WeakKeyDictionary()
         self._user_agents: dict[str, str] = {}
         self._http_headers: dict[str, dict[str, str]] = {}
         self._meta_lock = threading.Lock()
@@ -343,3 +347,46 @@ class StreamResolver:
         stream_url = self._extract_url_sync(video_id)
         self._put_cache(video_id, stream_url, now + self.ttl_s)
         return stream_url
+
+    def _get_prefetch_semaphore(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        sem = self._prefetch_sem_map.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(2)
+            self._prefetch_sem_map[loop] = sem
+        return sem
+
+    async def prefetch(self, video_ids: list[str] | tuple[str, ...]) -> int:
+        """Silently warm stream URLs in background (deduplicated, Semaphore(2) bounded)."""
+        unique_ids: list[str] = []
+        seen: set[str] = set()
+        for vid in video_ids:
+            if not isinstance(vid, str) or not vid or vid in seen:
+                continue
+            try:
+                valid = validate_video_id(vid)
+            except ValueError:
+                continue
+            seen.add(valid)
+            if self.is_cached(valid):
+                continue
+            task = self._inflight.get(valid)
+            if task is not None and not task.done():
+                continue
+            unique_ids.append(valid)
+
+        if not unique_ids:
+            return 0
+
+        sem = self._get_prefetch_semaphore()
+        warmed = 0
+
+        async def _warm_one(vid: str) -> None:
+            nonlocal warmed
+            async with sem:
+                with suppress(Exception):
+                    await self.resolve(vid)
+                    warmed += 1
+
+        await asyncio.gather(*(_warm_one(vid) for vid in unique_ids), return_exceptions=True)
+        return warmed

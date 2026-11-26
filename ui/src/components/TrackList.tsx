@@ -1,5 +1,4 @@
-import { memo, useRef, useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
+import { memo, useRef, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   Play,
@@ -8,17 +7,17 @@ import {
   CheckCircle2,
   Loader2,
   MoreVertical,
-  ListPlus,
-  Radio,
-  PlusCircle,
   Music,
   Trash2,
-  UserRound,
-  Disc3,
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { ArtistLinks } from './ArtistLinks';
-import { getTrackArtists } from '../utils/artists';
+import { cancelTrackPreload, scheduleTrackPreload } from '../api/client';
+import {
+  TrackContextMenu,
+  isTrackDownloaded,
+  useTrackContextMenu,
+} from './TrackContextMenu';
 import type { Track, DownloadProgress } from '../api/types';
 
 interface TrackListProps {
@@ -45,13 +44,6 @@ interface TrackListProps {
   emptyMessage?: string;
 }
 
-interface MenuPosition {
-  track: Track;
-  top: number;
-  left: number;
-  isDownloaded: boolean;
-}
-
 export const TrackList = memo(({
   tracks,
   loading = false,
@@ -76,7 +68,7 @@ export const TrackList = memo(({
   emptyMessage = 'No tracks found.',
 }: TrackListProps) => {
   const parentRef = useRef<HTMLDivElement>(null);
-  const [menuState, setMenuState] = useState<MenuPosition | null>(null);
+  const { menuState, menuRef, openMenuAt, closeMenu } = useTrackContextMenu();
 
   const rowVirtualizer = useVirtualizer({
     count: tracks.length,
@@ -91,39 +83,11 @@ export const TrackList = memo(({
     }
   }, [scrollKey]);
 
-  useEffect(() => {
-    if (!menuState) return;
-    const close = () => setMenuState(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    const scrollEl = parentRef.current;
-    scrollEl?.addEventListener('scroll', close, { passive: true });
-    window.addEventListener('resize', close);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      scrollEl?.removeEventListener('scroll', close);
-      window.removeEventListener('resize', close);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [menuState]);
-
   const formatDuration = (secs?: number): string => {
     if (!secs || isNaN(secs)) return '0:00';
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
-
-  const openMenuAt = (track: Track, x: number, y: number, isDownloaded: boolean) => {
-    const artistCount = getTrackArtists(track).length;
-    const menuWidth = 220;
-    const extraArtistHeight = artistCount > 1 ? 48 : 0;
-    const menuHeight = (isDownloaded ? 204 : 172) + extraArtistHeight;
-    const left = Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8));
-    const openUpward = y + menuHeight > window.innerHeight - 96;
-    const top = openUpward ? Math.max(8, y - menuHeight - 4) : y + 4;
-    setMenuState({ track, top, left, isDownloaded });
   };
 
   if (loading && tracks.length === 0) {
@@ -197,11 +161,7 @@ export const TrackList = memo(({
             const isCurrent = currentTrackId === track.video_id;
             const isLiked = likedIds ? likedIds.has(track.video_id) : !!track.is_liked;
             const downloadProgress = downloads[track.video_id];
-            const isDownloaded =
-              downloadedIds?.has(track.video_id) ||
-              track.download_status === 'completed' ||
-              downloadProgress?.status === 'completed' ||
-              !!track.local_path;
+            const isDownloaded = isTrackDownloaded(track, downloadedIds, downloads);
             const isDownloading =
               downloadProgress?.status === 'downloading' ||
               downloadProgress?.status === 'queued' ||
@@ -227,8 +187,11 @@ export const TrackList = memo(({
                   isCurrent ? 'bg-white/[0.08]' : ''
                 }`}
                 onClick={() => onPlay(track, virtualRow.index)}
+                onMouseEnter={() => scheduleTrackPreload(track)}
+                onMouseLeave={() => cancelTrackPreload(track.video_id)}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   openMenuAt(track, e.clientX, e.clientY, isDownloaded);
                 }}
               >
@@ -386,7 +349,7 @@ export const TrackList = memo(({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isMenuOpen) return setMenuState(null);
+                    if (isMenuOpen) return closeMenu();
                     const rect = e.currentTarget.getBoundingClientRect();
                     openMenuAt(track, rect.right - 204, rect.bottom, isDownloaded);
                   }}
@@ -405,144 +368,18 @@ export const TrackList = memo(({
         </div>
       </div>
 
-      {menuState &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[9998]"
-            onClick={() => setMenuState(null)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMenuState(null);
-            }}
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{ top: `${menuState.top}px`, left: `${menuState.left}px` }}
-              className="fixed w-[220px] ios-liquid-popover eh-popover-in rounded-2xl z-[9999] py-1.5 text-xs select-none"
-            >
-              <button
-                onClick={() => {
-                  onAddNext(menuState.track);
-                  setMenuState(null);
-                }}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-              >
-                <Radio size={14} style={{ color: 'var(--dynamic-accent)' }} />
-                <span>Play Next</span>
-              </button>
-              <button
-                onClick={() => {
-                  onAppendQueue(menuState.track);
-                  setMenuState(null);
-                }}
-                className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-              >
-                <ListPlus size={14} className="text-[#A6B0CF]" />
-                <span>Add to Queue</span>
-              </button>
-              {onOpenArtist && (() => {
-                const menuArtists = getTrackArtists(menuState.track);
-                if (menuArtists.length <= 1) {
-                  const single = menuArtists[0];
-                  return (
-                    <button
-                      onClick={() => {
-                        onOpenArtist(
-                          single?.name || menuState.track.artist,
-                          single?.channelId ?? menuState.track.artist_id
-                        );
-                        setMenuState(null);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-                    >
-                      <UserRound size={14} className="text-[#A6B0CF]" />
-                      <span className="truncate">
-                        {single ? `Go to ${single.name}` : 'Go to Artist'}
-                      </span>
-                    </button>
-                  );
-                }
-                return (
-                  <div className="border-t border-white/10 mt-1 pt-1.5 pb-1">
-                    <div className="px-3.5 py-1 flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.14em] text-[#8E99BA]">
-                      <UserRound size={12} className="text-[#8E99BA]" />
-                      <span>Go to Artist</span>
-                    </div>
-                    <div className="px-2.5 py-1 flex flex-wrap gap-1.5">
-                      {menuArtists.map((a, idx) => (
-                        <button
-                          key={`${a.name}-${idx}`}
-                          type="button"
-                          onClick={() => {
-                            onOpenArtist(a.name, a.channelId);
-                            setMenuState(null);
-                          }}
-                          title={`Go to ${a.name}`}
-                          className="max-w-full truncate px-2.5 py-1 rounded-full bg-white/[0.06] hover:bg-white/[0.16] border border-white/[0.10] text-[11px] text-[#F4F6FF] hover:text-white transition-colors"
-                        >
-                          {a.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
-              {onOpenAlbum && (
-                <button
-                  onClick={() => {
-                    onOpenAlbum(
-                      menuState.track.album || menuState.track.title,
-                      menuState.track.album_id,
-                      menuState.track
-                    );
-                    setMenuState(null);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-                >
-                  <Disc3 size={14} className="text-[#A6B0CF]" />
-                  <span>Go to Album</span>
-                </button>
-              )}
-              {onOpenAddToPlaylist && (
-                <button
-                  onClick={() => {
-                    onOpenAddToPlaylist(menuState.track);
-                    setMenuState(null);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors border-t border-white/10 mt-1 pt-2"
-                >
-                  <PlusCircle size={14} className="text-[#A6B0CF]" />
-                  <span>Add to Playlist...</span>
-                </button>
-              )}
-
-              {menuState.isDownloaded && onDeleteDownload ? (
-                <button
-                  onClick={() => {
-                    onDeleteDownload(menuState.track);
-                    setMenuState(null);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#FF6B9E] hover:bg-[#FF4D8D]/15 text-left transition-colors border-t border-white/10 mt-1 pt-2"
-                >
-                  <Trash2 size={14} />
-                  <span>Delete Offline Download</span>
-                </button>
-              ) : (
-                <button
-                  onClick={() => {
-                    onDownload(menuState.track);
-                    setMenuState(null);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-[#F4F6FF] hover:bg-white/12 text-left transition-colors"
-                >
-                  <Download size={14} className="text-[#34D399]" />
-                  <span>Download Offline</span>
-                </button>
-              )}
-            </div>
-          </div>,
-          document.body
-        )}
+      <TrackContextMenu
+        menuState={menuState}
+        menuRef={menuRef}
+        onClose={closeMenu}
+        onAddNext={onAddNext}
+        onAppendQueue={onAppendQueue}
+        onOpenArtist={onOpenArtist}
+        onOpenAlbum={onOpenAlbum}
+        onOpenAddToPlaylist={onOpenAddToPlaylist}
+        onDownload={onDownload}
+        onDeleteDownload={onDeleteDownload}
+      />
     </>
   );
 });

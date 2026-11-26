@@ -541,6 +541,83 @@ class QueueManager:
         self._notify()
         return self.current_track
 
+    def neighbor_tracks(self, offsets: tuple[int, ...] = (1, -1, 2, -2, 3)) -> list[Track]:
+        """Return unique queue tracks around current_index in priority offset order."""
+        n = len(self.items)
+        if n <= 1:
+            return []
+        curr_id = self.current_track.video_id if self.current_track else None
+        seen: set[str] = {curr_id} if curr_id else set()
+        out: list[Track] = []
+        for off in offsets:
+            if off == 0:
+                continue
+            idx = self.current_index + off
+            if idx < 0 or idx >= n:
+                if self.repeat_mode == "all":
+                    idx = idx % n
+                else:
+                    continue
+            cand = self.items[idx]
+            if cand.video_id in seen:
+                continue
+            seen.add(cand.video_id)
+            out.append(cand)
+        return out
+
+    async def step_tracks(self, steps: int = 1, direction: int = 1) -> Track | None:
+        """Jump forward or backward by `steps` tracks in a single step without intermediate loads."""
+        steps = max(1, int(steps))
+        if direction >= 0 and steps == 1:
+            return await self.next_track()
+        if direction < 0 and steps == 1:
+            return self.prev_track()
+
+        if not self.items:
+            return None
+        self.consecutive_errors = 0
+        if self.repeat_mode == "one":
+            return self.current_track
+
+        n = len(self.items)
+        if direction < 0:
+            target = self.current_index - steps
+            if target < 0:
+                target = (target % n) if self.repeat_mode == "all" else 0
+            self.current_index = target
+            self._notify()
+            return self.current_track
+
+        target = self.current_index + steps
+        if target < n:
+            self.current_index = target
+            self._notify()
+            return self.current_track
+
+        if self.repeat_mode == "all":
+            self.current_index = target % n
+            self._notify()
+            return self.current_track
+
+        if self.autoplay_radio:
+            gen_before = self._generation
+            seed_idx = self.current_index
+            seed_id = self.current_track.video_id if self.current_track else None
+            added = await self.refill_radio(limit=max(15, target - n + 5))
+            if (
+                added > 0
+                and self.current_index == seed_idx
+                and self.current_track is not None
+                and self.current_track.video_id == seed_id
+                and self._generation == gen_before + 1
+                and self.current_index + 1 < len(self.items)
+            ):
+                self.current_index = min(target, len(self.items) - 1)
+                self._notify()
+                return self.current_track
+
+        return None
+
     def save_to_db_sync(self, db_path: Path | str | None = None) -> None:
         """Synchronously persist queue state to SQLite queue_state table."""
         path = Path(db_path) if db_path is not None else self._db_path

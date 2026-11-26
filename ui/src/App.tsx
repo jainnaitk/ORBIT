@@ -56,6 +56,8 @@ export default function App() {
     setUpdateState,
     api,
     lastError,
+    beginOptimisticSwitch,
+    clearOptimisticSwitch,
   } = useBridge();
 
   const [isUpdateTabOpen, setIsUpdateTabOpen] = useState<boolean>(false);
@@ -281,6 +283,41 @@ export default function App() {
       ? `${activeTrack.title} — ${activeTrack.artist} • ORBIT`
       : 'ORBIT';
   }, [activeTrack?.title, activeTrack?.artist]);
+
+  // Keep active track and adjacent queue tracks warm in frontend lyrics cache for 0ms switches
+  useEffect(() => {
+    if (!isConnected) return;
+    const targets: Track[] = [];
+    if (activeTrack?.video_id) targets.push(activeTrack);
+    if (queue && queue.items.length > 0) {
+      const idx = queue.current_index ?? 0;
+      const nextIdx =
+        queue.repeat_mode === 'one'
+          ? idx
+          : idx + 1 < queue.items.length
+          ? idx + 1
+          : queue.repeat_mode === 'all'
+          ? 0
+          : -1;
+      const prevIdx =
+        idx > 0
+          ? idx - 1
+          : queue.repeat_mode === 'all'
+          ? queue.items.length - 1
+          : -1;
+      if (nextIdx >= 0 && queue.items[nextIdx]) targets.push(queue.items[nextIdx]);
+      if (prevIdx >= 0 && prevIdx !== nextIdx && queue.items[prevIdx]) {
+        targets.push(queue.items[prevIdx]);
+      }
+    }
+    const seen = new Set<string>();
+    for (const t of targets) {
+      if (t.video_id && !seen.has(t.video_id)) {
+        seen.add(t.video_id);
+        api.prefetchLyrics(t);
+      }
+    }
+  }, [api, isConnected, activeTrack, queue]);
 
   useEffect(() => {
     let mounted = true;
@@ -642,6 +679,7 @@ export default function App() {
 
   const handlePlayTrack = useCallback(
     async (track: Track, index: number = 0, trackList?: Track[]) => {
+      beginOptimisticSwitch(track);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: track.duration_s,
@@ -666,10 +704,10 @@ export default function App() {
           await api.play(track);
         }
       } catch {
-        // Handled via socket broadcast
+        clearOptimisticSwitch(track.video_id);
       }
     },
-    [api, setPlayback]
+    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback]
   );
 
   const handlePlayAll = useCallback(
@@ -692,6 +730,7 @@ export default function App() {
         ? Math.floor(Math.random() * batch.length)
         : 0;
       const firstTrack = batch[startIndex];
+      beginOptimisticSwitch(firstTrack);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: firstTrack.duration_s,
@@ -704,10 +743,10 @@ export default function App() {
         await api.setShuffle(shuffle);
         await api.setQueue(batch, startIndex, true);
       } catch {
-        // Handled via socket broadcast
+        clearOptimisticSwitch(firstTrack.video_id);
       }
     },
-    [api, setPlayback, setQueue]
+    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback, setQueue]
   );
 
   const handleTogglePlay = useCallback(async () => {
@@ -739,6 +778,7 @@ export default function App() {
   }, [api, playback?.state, playback?.current_track, queue?.current_track, setPlayback]);
 
   const handleNext = useCallback(async () => {
+    let targetVid: string | undefined;
     if (queue && queue.items.length > 0) {
       const nextIdx =
         queue.repeat_mode === 'one'
@@ -750,6 +790,8 @@ export default function App() {
           : -1;
       if (nextIdx >= 0) {
         const nextTrack = queue.items[nextIdx];
+        targetVid = nextTrack.video_id;
+        beginOptimisticSwitch(nextTrack);
         setPlayback((prev) => ({
           time_pos: 0,
           duration: nextTrack.duration_s,
@@ -757,12 +799,20 @@ export default function App() {
           volume: prev ? prev.volume : 80,
           current_track: nextTrack,
         }));
+        setQueue((prev) =>
+          prev ? { ...prev, current_index: nextIdx, current_track: nextTrack } : prev
+        );
       }
     }
-    try { await api.next(); } catch { /* Ignore */ }
-  }, [api, queue, setPlayback]);
+    try {
+      await api.next();
+    } catch {
+      clearOptimisticSwitch(targetVid);
+    }
+  }, [api, beginOptimisticSwitch, clearOptimisticSwitch, queue, setPlayback, setQueue]);
 
   const handlePrev = useCallback(async () => {
+    let targetVid: string | undefined;
     if (queue && queue.items.length > 0) {
       const prevIdx =
         queue.repeat_mode === 'one'
@@ -774,6 +824,8 @@ export default function App() {
           : 0;
       const prevTrack = queue.items[prevIdx];
       if (prevTrack) {
+        targetVid = prevTrack.video_id;
+        beginOptimisticSwitch(prevTrack);
         setPlayback((prev) => ({
           time_pos: 0,
           duration: prevTrack.duration_s,
@@ -781,10 +833,17 @@ export default function App() {
           volume: prev ? prev.volume : 80,
           current_track: prevTrack,
         }));
+        setQueue((prev) =>
+          prev ? { ...prev, current_index: prevIdx, current_track: prevTrack } : prev
+        );
       }
     }
-    try { await api.prev(); } catch { /* Ignore */ }
-  }, [api, queue, setPlayback]);
+    try {
+      await api.prev();
+    } catch {
+      clearOptimisticSwitch(targetVid);
+    }
+  }, [api, beginOptimisticSwitch, clearOptimisticSwitch, queue, setPlayback, setQueue]);
 
   const handleSeek = useCallback(
     async (seconds: number) => {
@@ -1183,6 +1242,7 @@ export default function App() {
 
   const handlePlayQueueItem = useCallback(
     async (track: Track, idx: number) => {
+      beginOptimisticSwitch(track);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: track.duration_s,
@@ -1193,10 +1253,10 @@ export default function App() {
       try {
         await api.jumpQueue(idx, true);
       } catch {
-        // Handled via socket broadcast
+        clearOptimisticSwitch(track.video_id);
       }
     },
-    [api, setPlayback]
+    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback]
   );
 
   const handleEnterIslandAction = useCallback(() => {
@@ -1374,11 +1434,25 @@ export default function App() {
                 <HomeView
                   currentTrackId={activeVideoId}
                   likedIds={likedIds}
+                  downloads={downloads}
+                  downloadedIds={downloadedIds}
                   onPlayTrack={handlePlaySingleHomeTrack}
                   onPlayAll={handlePlayAll}
                   onToggleLike={handleToggleLike}
                   onAddNext={handleAddNext}
+                  onAppendQueue={handleAppendQueue}
+                  onOpenAddToPlaylist={handleOpenAddToPlaylist}
+                  onDownload={handleDownload}
+                  onDeleteDownload={handleDeleteDownload}
                   onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+                  onOpenAlbum={(albumName, albumId, track) =>
+                    handleOpenAlbum({
+                      browseId: albumId,
+                      title: albumName,
+                      artist: track.artist,
+                      videoId: track.video_id,
+                    })
+                  }
                 />
               )}
 

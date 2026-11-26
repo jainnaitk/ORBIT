@@ -1,5 +1,11 @@
 # ORBIT Changelog
 
+## v1.2.4
+- Instant track switching with hover & queue neighbor stream prefetching
+- Instant synced lyrics loading with prefetching, LRU caching, and zero-flash refresh
+- Optimistic switch lock to prevent stale WebSocket flicker on rapid skips
+- Enabled ORBIT track right-click menus across all Home screen cards
+
 ## v1.2.3
 - Seamless in-place app updates without uninstall prompts
 - Auto-relaunch ORBIT after installer completes upgrade

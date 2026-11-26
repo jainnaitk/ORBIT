@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -228,6 +229,8 @@ class BridgeController:
         self._tick_task: asyncio.Task[None] | None = None
         self._radio_task: asyncio.Task[None] | None = None
         self._preload_task: asyncio.Task[None] | None = None
+        self._adjacent_prefetch_task: asyncio.Task[None] | None = None
+        self._lyrics_prefetch_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._play_seq: int = 0
         self._shutdown: bool = False
@@ -619,11 +622,68 @@ class BridgeController:
         return payload
 
     def _cancel_pending_prefetch(self) -> None:
-        """Cancel any in-flight radio refill or gapless preload tasks before switching tracks."""
+        """Cancel any in-flight radio refill, gapless preload, or neighbor/lyrics prefetch tasks."""
         if self._radio_task and not self._radio_task.done():
             self._radio_task.cancel()
         if self._preload_task and not self._preload_task.done():
             self._preload_task.cancel()
+        if self._adjacent_prefetch_task and not self._adjacent_prefetch_task.done():
+            self._adjacent_prefetch_task.cancel()
+        if self._lyrics_prefetch_task and not self._lyrics_prefetch_task.done():
+            self._lyrics_prefetch_task.cancel()
+
+    def _schedule_lyrics_prefetch(self, tracks: list[Track]) -> None:
+        """Warm lyrics cache in background for active/adjacent tracks without blocking audio."""
+        if not tracks or os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        from metrolite.ytm.lyrics import prefetch_lyrics
+
+        if self._lyrics_prefetch_task and not self._lyrics_prefetch_task.done():
+            self._lyrics_prefetch_task.cancel()
+
+        async def _warm() -> None:
+            with suppress(asyncio.CancelledError, Exception):
+                await prefetch_lyrics(self.ytm, tracks, db_path=self.db_path)
+
+        with suppress(RuntimeError):
+            self._lyrics_prefetch_task = self.spawn_task(_warm())
+
+    def _schedule_adjacent_prefetch(self, current_track: Track | None = None) -> None:
+        """Warm stream URLs for neighboring queue tracks (+2, -1, -2, +3) and lyrics."""
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        neighbors = (
+            self.queue.neighbor_tracks((1, -1, 2, -2, 3))
+            if hasattr(self.queue, "neighbor_tracks")
+            else []
+        )
+        preview = self.queue.next_track_preview
+        preview_id = preview.video_id if preview is not None else None
+        stream_ids = [t.video_id for t in neighbors if t.video_id and t.video_id != preview_id]
+        resolver = getattr(self.player, "resolver", None)
+        if (
+            stream_ids
+            and resolver is not None
+            and hasattr(resolver, "prefetch")
+            and inspect.iscoroutinefunction(resolver.prefetch)
+        ):
+            if self._adjacent_prefetch_task and not self._adjacent_prefetch_task.done():
+                self._adjacent_prefetch_task.cancel()
+
+            async def _warm_streams() -> None:
+                with suppress(asyncio.CancelledError, Exception):
+                    await resolver.prefetch(stream_ids)
+                    await asyncio.to_thread(trim_memory)
+
+            with suppress(RuntimeError):
+                self._adjacent_prefetch_task = self.spawn_task(_warm_streams())
+
+        lyrics_targets: list[Track] = []
+        if current_track is not None:
+            lyrics_targets.append(current_track)
+        lyrics_targets.extend(neighbors[:3])
+        if lyrics_targets:
+            self._schedule_lyrics_prefetch(lyrics_targets)
 
     async def _after_play_started(self, target: Track | None) -> None:
         if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -659,6 +719,7 @@ class BridgeController:
                         if curr_preloaded is None or curr_preloaded.video_id != nxt_preview.video_id:
                             with suppress(Exception):
                                 await self.player.preload_next(nxt_preview)
+                    self._schedule_adjacent_prefetch(target or self.queue.current_track)
                     await asyncio.to_thread(trim_memory)
 
             self._radio_task = self.spawn_task(_refill())
@@ -673,6 +734,7 @@ class BridgeController:
                 self._preload_task = self.spawn_task(_preload())
             else:
                 self.spawn_task(asyncio.to_thread(trim_memory))
+            self._schedule_adjacent_prefetch(target or self.queue.current_track)
 
     def sync_preloaded_next(self) -> None:
         """Invalidate stale mpv preloaded tracks and preload the updated next_track_preview."""
@@ -710,6 +772,7 @@ class BridgeController:
 
             with suppress(RuntimeError):
                 self._preload_task = self.spawn_task(_repreload(preview))
+        self._schedule_adjacent_prefetch(self.queue.current_track)
 
     def get_playback_tick_data(self) -> dict[str, Any]:
         live_pos = (
@@ -893,6 +956,7 @@ class BridgeController:
                     "track_changed",
                     self._track_changed_payload(target, state="buffering"),
                 )
+                self._schedule_lyrics_prefetch([target])
                 await self.player.load_and_play(target)
                 if req_seq != self._play_seq:
                     return self.get_playback_tick_data()
@@ -929,6 +993,7 @@ class BridgeController:
                         "track_changed",
                         self._track_changed_payload(curr, state="buffering"),
                     )
+                    self._schedule_lyrics_prefetch([curr])
                     await self.player.load_and_play(curr)
                     if req_seq != self._play_seq:
                         return self.get_playback_tick_data()
@@ -968,24 +1033,30 @@ class BridgeController:
             }
         return self.get_playback_tick_data()
 
-    async def next_track(self) -> dict[str, Any]:
+    async def next_track(self, steps: int = 1) -> dict[str, Any]:
+        steps = max(1, int(steps))
         self.player.reset_errors()
         self.queue.reset_errors()
         self._cancel_pending_prefetch()
         self._play_seq += 1
         req_seq = self._play_seq
-        nxt = await self.queue.next_track()
+        nxt = (
+            await self.queue.next_track()
+            if steps == 1
+            else await self.queue.step_tracks(steps=steps, direction=1)
+        )
         if req_seq != self._play_seq:
             return self.get_playback_tick_data()
         if nxt:
             try:
-                if self.player.switch_to_preloaded_next(nxt):
+                if steps == 1 and self.player.switch_to_preloaded_next(nxt):
                     await self._after_play_started(nxt)
                 else:
                     await self.ws_manager.broadcast(
                         "track_changed",
                         self._track_changed_payload(nxt, state="buffering"),
                     )
+                    self._schedule_lyrics_prefetch([nxt])
                     await self.player.load_and_play(nxt)
                     if req_seq != self._play_seq:
                         return self.get_playback_tick_data()
@@ -1035,19 +1106,25 @@ class BridgeController:
         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
         return self.get_playback_tick_data()
 
-    async def prev_track(self) -> dict[str, Any]:
+    async def prev_track(self, steps: int = 1) -> dict[str, Any]:
+        steps = max(1, int(steps))
         self.player.reset_errors()
         self.queue.reset_errors()
         self._cancel_pending_prefetch()
         self._play_seq += 1
         req_seq = self._play_seq
-        prv = self.queue.prev_track()
+        prv = (
+            self.queue.prev_track()
+            if steps == 1
+            else await self.queue.step_tracks(steps=steps, direction=-1)
+        )
         if prv:
             try:
                 await self.ws_manager.broadcast(
                     "track_changed",
                     self._track_changed_payload(prv, state="buffering"),
                 )
+                self._schedule_lyrics_prefetch([prv])
                 await self.player.load_and_play(prv)
                 if req_seq != self._play_seq:
                     return self.get_playback_tick_data()
@@ -1147,10 +1224,7 @@ class BridgeController:
         self.stop_media_keys()
         if hasattr(self.queue, "flush_sync"):
             self.queue.flush_sync()
-        if self._radio_task and not self._radio_task.done():
-            self._radio_task.cancel()
-        if self._preload_task and not self._preload_task.done():
-            self._preload_task.cancel()
+        self._cancel_pending_prefetch()
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
@@ -1250,6 +1324,10 @@ def create_app(
             yield
         finally:
             ctrl.shutdown()
+            with suppress(Exception):
+                from metrolite.ytm.lyrics import close_lyrics_clients
+
+                await close_lyrics_clients()
 
     app = FastAPI(
         title="MetroLite Bridge API",
@@ -1426,6 +1504,16 @@ def create_app(
         try:
             eff_filter: str | None = None if filter.lower() == "all" else filter
             results = await ctrl.ytm.search(query=q, filter_type=eff_filter, limit=limit)
+            if results and not os.environ.get("PYTEST_CURRENT_TEST"):
+                top_ids = [t.video_id for t in results[:2] if t.video_id]
+                resolver = getattr(ctrl.player, "resolver", None)
+                if (
+                    top_ids
+                    and resolver is not None
+                    and hasattr(resolver, "prefetch")
+                    and inspect.iscoroutinefunction(resolver.prefetch)
+                ):
+                    ctrl.spawn_task(resolver.prefetch(top_ids))
             return [t.model_dump() for t in results]
         except Exception as e:
             logger.error("Search failed for query %r: %s", q, e)
@@ -1525,12 +1613,12 @@ def create_app(
         return await ctrl.toggle_play_pause()
 
     @app.post("/player/next", dependencies=[Depends(verify_token)])
-    async def player_next() -> dict[str, Any]:
-        return await ctrl.next_track()
+    async def player_next(steps: int = Query(default=1, ge=1, le=20)) -> dict[str, Any]:
+        return await ctrl.next_track(steps=steps)
 
     @app.post("/player/prev", dependencies=[Depends(verify_token)])
-    async def player_prev() -> dict[str, Any]:
-        return await ctrl.prev_track()
+    async def player_prev(steps: int = Query(default=1, ge=1, le=20)) -> dict[str, Any]:
+        return await ctrl.prev_track(steps=steps)
 
     @app.post("/player/seek", dependencies=[Depends(verify_token)])
     async def player_seek(
@@ -1548,16 +1636,51 @@ def create_app(
 
     @app.post("/player/preload", dependencies=[Depends(verify_token)])
     async def player_preload(body: dict[str, Any]) -> dict[str, Any]:
-        """Silently warm stream URL cache on track hover for instant playback."""
-        vid = body.get("video_id") if isinstance(body, dict) else None
-        if isinstance(vid, str) and vid:
-            valid_vid = _require_valid_video_id(vid)
-            if not ctrl.player.resolver.is_cached(valid_vid):
-                async def _warm() -> None:
-                    with suppress(Exception):
-                        await ctrl.player.resolver.resolve(valid_vid)
+        """Silently warm stream URL & optional lyrics cache on track hover for instant playback."""
+        if not isinstance(body, dict):
+            return {"status": "ok"}
 
-                ctrl.spawn_task(_warm())
+        raw_ids: list[str] = []
+        single_vid = body.get("video_id")
+        if isinstance(single_vid, str) and single_vid:
+            raw_ids.append(single_vid)
+        extra_ids = body.get("video_ids")
+        if isinstance(extra_ids, list):
+            for item in extra_ids[:3]:
+                if isinstance(item, str) and item:
+                    raw_ids.append(item)
+
+        valid_ids = [_require_valid_video_id(vid) for vid in raw_ids]
+        resolver = getattr(ctrl.player, "resolver", None)
+        if valid_ids and resolver is not None:
+            to_warm = [vid for vid in valid_ids if not resolver.is_cached(vid)]
+            if to_warm:
+                if hasattr(resolver, "prefetch") and inspect.iscoroutinefunction(resolver.prefetch):
+                    ctrl.spawn_task(resolver.prefetch(to_warm))
+                else:
+                    async def _warm_one(vid: str) -> None:
+                        with suppress(Exception):
+                            await resolver.resolve(vid)
+
+                    for vid in to_warm[:2]:
+                        ctrl.spawn_task(_warm_one(vid))
+
+        wants_lyrics = bool(
+            body.get("preload_lyrics") or body.get("title") or body.get("artist")
+        )
+        if valid_ids and wants_lyrics and not os.environ.get("PYTEST_CURRENT_TEST"):
+            from metrolite.ytm.lyrics import prefetch_lyrics
+
+            raw_dur = body.get("duration_s")
+            dur_val = int(raw_dur) if isinstance(raw_dur, (int, float)) and raw_dur > 0 else 0
+            meta_track = Track(
+                video_id=valid_ids[0],
+                title=str(body.get("title") or valid_ids[0]),
+                artist=str(body.get("artist") or "Unknown Artist"),
+                duration_s=dur_val,
+            )
+            ctrl.spawn_task(prefetch_lyrics(ctrl.ytm, [meta_track], db_path=ctrl.db_path))
+
         return {"status": "ok"}
 
     @app.post("/player/eq", dependencies=[Depends(verify_token)])

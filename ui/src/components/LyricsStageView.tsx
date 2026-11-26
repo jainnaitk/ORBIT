@@ -24,6 +24,7 @@ import type {
   LyricLine,
   LyricVariant,
   LyricWord,
+  LyricsResponse,
   LyricsSyncType,
   PlaybackTick,
   QueueData,
@@ -281,6 +282,7 @@ export function useLyricsController({
   const reqSeqRef = useRef<number>(0);
   const fetchedDurRef = useRef<number>(0);
   const durationRefetchedVidRef = useRef<string | null>(null);
+  const activeLoadedVidRef = useRef<string | null>(null);
   const isAutoScrollPausedRef = useRef<boolean>(false);
   isAutoScrollPausedRef.current = isAutoScrollPaused;
 
@@ -636,36 +638,91 @@ export function useLyricsController({
     };
   }, [isSyncVisible, syncFrame]);
 
+  const applyLyricsPayload = useCallback((vid: string, res: LyricsResponse) => {
+    activeLoadedVidRef.current = vid;
+    const lines = res.synced && res.synced.length > 0 ? res.synced : null;
+    const variants = Array.isArray(res.variants) ? res.variants : [];
+    const primarySync: LyricsSyncType = res.sync_type || (lines ? 'line' : 'plain');
+    const syncRank = (st?: LyricsSyncType) => (st === 'word' ? 3 : st === 'line' ? 2 : 1);
+    const eligibleVariants = variants.filter(
+      (v) => syncRank(v.sync_type) >= syncRank(primarySync)
+    );
+    // Default to Word Sync for genuine word-timed tracks, and clean Line Sync for line-only
+    // providers (like LRCLIB) so line-only tracks never suffer from synthetic mid-line drift.
+    const nextMode: LyricsDisplayMode = primarySync === 'word' ? 'word' : 'line';
+    setDisplayModeState(nextMode);
+    displayModeRef.current = nextMode;
+    setRawSyncedLines(lines);
+    setRawPlainLyrics(res.lyrics || null);
+    setRawVariants(eligibleVariants);
+    // Always default to Romanized Latin of EQUAL OR BETTER sync tier (never downgrade word -> line)
+    const romanVariant = eligibleVariants.find((v) => v.code === 'roman');
+    const defaultLatin = romanVariant || eligibleVariants.find((v) => v.script === 'latin');
+    setSelectedVariantCode(defaultLatin ? defaultLatin.code : 'roman');
+    setLyricsSource(res.source || null);
+    setRawSyncType(primarySync);
+    setCredit(res.credit || res.source || null);
+    setSubmitter(res.submitter || null);
+    setSongwriters(Array.isArray(res.songwriters) ? res.songwriters : []);
+    setIsOfflineLrc(Boolean(res.offline));
+  }, []);
+
   const fetchLyrics = useCallback(
     async (opts?: { force?: boolean; silent?: boolean }) => {
       const trk = currentTrackRef.current;
       if (!currentVideoId || !trk) return;
 
       const mySeq = ++reqSeqRef.current;
-      setLoading(true);
-      setRawSyncedLines(null);
-      setRawPlainLyrics(null);
-      setRawVariants([]);
-      setLyricsSource(null);
-      setRawSyncType('plain');
-      setCredit(null);
-      setSubmitter(null);
-      setSongwriters([]);
-      setIsOfflineLrc(false);
-      setActiveLineIdx(-1);
-      activeLineIdxRef.current = -1;
-      committedActiveIdxRef.current = -1;
-      setIsAutoScrollPaused(false);
-      isAutoScrollPausedRef.current = false;
-      lineRefs.current = [];
-      wordSpanRefs.current = [];
-
       const effDur =
         liveDurationRef.current > 0
           ? liveDurationRef.current
           : bridgeSocket.latestTrackId === currentVideoId && bridgeSocket.latestDuration > 0
           ? bridgeSocket.latestDuration
           : trk.duration_s;
+
+      const cached = !opts?.force ? bridgeApi.getCachedLyrics(currentVideoId) : null;
+      if (cached) {
+        fetchedDurRef.current = effDur || 0;
+        if (bridgeSocket.latestTrackId === currentVideoId && bridgeSocket.latestTickAt > 0) {
+          lastServerPosRef.current = bridgeSocket.latestTimePos;
+          lastTickRef.current = bridgeSocket.latestTickAt;
+        }
+        setActiveLineIdx(-1);
+        activeLineIdxRef.current = -1;
+        committedActiveIdxRef.current = -1;
+        setIsAutoScrollPaused(false);
+        isAutoScrollPausedRef.current = false;
+        lineRefs.current = [];
+        wordSpanRefs.current = [];
+        applyLyricsPayload(currentVideoId, cached);
+        setLoading(false);
+        return;
+      }
+
+      const preserveVisible = Boolean(
+        opts?.silent && activeLoadedVidRef.current === currentVideoId
+      );
+      if (!preserveVisible) {
+        activeLoadedVidRef.current = null;
+        setLoading(true);
+        setRawSyncedLines(null);
+        setRawPlainLyrics(null);
+        setRawVariants([]);
+        setLyricsSource(null);
+        setRawSyncType('plain');
+        setCredit(null);
+        setSubmitter(null);
+        setSongwriters([]);
+        setIsOfflineLrc(false);
+        setActiveLineIdx(-1);
+        activeLineIdxRef.current = -1;
+        committedActiveIdxRef.current = -1;
+        setIsAutoScrollPaused(false);
+        isAutoScrollPausedRef.current = false;
+        lineRefs.current = [];
+        wordSpanRefs.current = [];
+      }
+
       fetchedDurRef.current = effDur || 0;
 
       try {
@@ -681,41 +738,22 @@ export function useLyricsController({
           lastServerPosRef.current = bridgeSocket.latestTimePos;
           lastTickRef.current = bridgeSocket.latestTickAt;
         }
-        const lines = res.synced && res.synced.length > 0 ? res.synced : null;
-        const variants = Array.isArray(res.variants) ? res.variants : [];
-        const primarySync: LyricsSyncType = res.sync_type || (lines ? 'line' : 'plain');
-        const syncRank = (st?: LyricsSyncType) => (st === 'word' ? 3 : st === 'line' ? 2 : 1);
-        const eligibleVariants = variants.filter(
-          (v) => syncRank(v.sync_type) >= syncRank(primarySync)
-        );
-        // Default to Word Sync for genuine word-timed tracks, and clean Line Sync for line-only
-        // providers (like LRCLIB) so line-only tracks never suffer from synthetic mid-line drift.
-        const nextMode: LyricsDisplayMode = primarySync === 'word' ? 'word' : 'line';
-        setDisplayModeState(nextMode);
-        displayModeRef.current = nextMode;
-        setRawSyncedLines(lines);
-        setRawPlainLyrics(res.lyrics || null);
-        setRawVariants(eligibleVariants);
-        // Always default to Romanized Latin of EQUAL OR BETTER sync tier (never downgrade word -> line)
-        const romanVariant = eligibleVariants.find((v) => v.code === 'roman');
-        const defaultLatin = romanVariant || eligibleVariants.find((v) => v.script === 'latin');
-        setSelectedVariantCode(defaultLatin ? defaultLatin.code : 'roman');
-        setLyricsSource(res.source || null);
-        setRawSyncType(primarySync);
-        setCredit(res.credit || res.source || null);
-        setSubmitter(res.submitter || null);
-        setSongwriters(Array.isArray(res.songwriters) ? res.songwriters : []);
-        setIsOfflineLrc(Boolean(res.offline));
+        const hasNewContent = Boolean((res.synced && res.synced.length > 0) || res.lyrics);
+        if (!preserveVisible || hasNewContent) {
+          applyLyricsPayload(currentVideoId, res);
+        }
         if (opts?.force && !opts?.silent) {
           toast.show(
-            lines || res.lyrics ? 'Lyrics refreshed' : 'Lyrics not available',
-            lines || res.lyrics ? 'success' : 'info'
+            hasNewContent ? 'Lyrics refreshed' : 'Lyrics not available',
+            hasNewContent ? 'success' : 'info'
           );
         }
       } catch {
         if (mySeq !== reqSeqRef.current) return;
-        setRawSyncedLines(null);
-        setRawPlainLyrics(null);
+        if (!preserveVisible) {
+          setRawSyncedLines(null);
+          setRawPlainLyrics(null);
+        }
         if (opts?.force && !opts?.silent) {
           toast.show('Failed to refetch lyrics', 'error');
         }
@@ -723,7 +761,7 @@ export function useLyricsController({
         if (mySeq === reqSeqRef.current) setLoading(false);
       }
     },
-    [currentVideoId]
+    [currentVideoId, applyLyricsPayload]
   );
 
   // Load persisted offset & lyrics whenever active track changes
