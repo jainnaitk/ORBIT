@@ -1,4 +1,8 @@
-# ORBIT Changelog
+﻿# ORBIT Changelog
+
+## v1.3.0
+- ORBIT v1.3.0 Phase C, full multi-shelf homepage & artist library
+- Performance, stability, and updater improvements
 
 ## v1.2.4
 - Instant track switching with hover & queue neighbor stream prefetching
