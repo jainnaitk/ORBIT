@@ -184,6 +184,7 @@ export const UpdateAvailableModal: FC<UpdateAvailableModalProps> = ({
 
 interface UpdateTabPopoverProps {
   isOpen: boolean;
+  isConnected?: boolean;
   updateState: UpdateState | null;
   onClose: () => void;
   onCheckUpdates: () => void;
@@ -192,6 +193,7 @@ interface UpdateTabPopoverProps {
 
 export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
   isOpen,
+  isConnected = true,
   updateState,
   onClose,
   onCheckUpdates,
@@ -199,8 +201,9 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
 }) => {
   if (!isOpen) return null;
 
+  const fallbackVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.2.6';
   const status = updateState?.status ?? 'idle';
-  const currentVersion = updateState?.current_version ?? '0.1.0';
+  const currentVersion = updateState?.current_version ?? fallbackVersion;
   const latestVersion = updateState?.latest_version ?? currentVersion;
   const repo = updateState?.repo ?? 'jainnaitk/ORBIT';
   const isChecking = status === 'checking';
@@ -403,6 +406,11 @@ export const UpdateTabPopover: FC<UpdateTabPopoverProps> = ({
                 <span className="inline-flex items-center gap-1.5 text-[#34D399]">
                   <Rocket size={13} />
                   <span>Installer launched</span>
+                </span>
+              ) : !isConnected && !updateState ? (
+                <span className="inline-flex items-center gap-1.5 text-[#9AA5C4]">
+                  <Loader2 size={13} className="animate-spin" />
+                  <span>Starting audio engine...</span>
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 text-[#34D399]">

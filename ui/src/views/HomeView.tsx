@@ -28,11 +28,18 @@ import type {
   PersonalizedHomeResponse,
   DownloadProgress,
 } from '../api/types';
-import { bridgeApi, cancelTrackPreload, scheduleTrackPreload } from '../api/client';
+import {
+  bridgeApi,
+  cancelTrackPreload,
+  restartSidecar,
+  scheduleTrackPreload,
+  type BackendDiagnostics,
+} from '../api/client';
 
 interface HomeViewProps {
   currentTrackId?: string | null;
   isConnected?: boolean;
+  backendDiag?: BackendDiagnostics | null;
   likedIds?: Set<string>;
   downloads?: Record<string, DownloadProgress>;
   downloadedIds?: Set<string>;
@@ -269,6 +276,7 @@ const HorizontalShelf = ({
 export const HomeView = memo(({
   currentTrackId,
   isConnected = true,
+  backendDiag = null,
   likedIds,
   downloads,
   downloadedIds,
@@ -548,13 +556,28 @@ export const HomeView = memo(({
           <div className="ios-liquid-card rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-3 max-w-md">
             <Compass size={28} className="text-[#6D7796]" />
             <div>
-              <p className="text-sm font-semibold text-[#F1F4FA]">Unable to load Home feed</p>
-              <p className="text-xs text-[#9AA5C4] mt-1">
-                Check your connection or browse your Offline Downloads and Liked Songs.
+              <p className="text-sm font-semibold text-[#F1F4FA]">
+                {!isConnected
+                  ? backendDiag?.last_error
+                    ? 'Audio engine failed to start'
+                    : 'Connecting to audio engine...'
+                  : 'Unable to load Home feed'}
+              </p>
+              <p className="text-xs text-[#9AA5C4] mt-1 break-words">
+                {!isConnected
+                  ? backendDiag?.last_error ||
+                    'Starting the local playback service. Click Retry if it does not connect in a few seconds.'
+                  : 'Check your connection or browse your Offline Downloads and Liked Songs.'}
               </p>
             </div>
             <button
-              onClick={() => void loadFeed(activeMood, true)}
+              onClick={() => {
+                if (!isConnected) {
+                  void restartSidecar().finally(() => void loadFeed(activeMood, true));
+                } else {
+                  void loadFeed(activeMood, true);
+                }
+              }}
               className="px-4 py-1.5 rounded-full text-xs font-semibold bg-[#F1F4FA] text-[#06080F] hover:opacity-90 transition-opacity"
             >
               Retry

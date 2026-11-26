@@ -628,3 +628,57 @@ async def test_resolver_prefetch_dedup_and_skips_cached(tmp_path: Path) -> None:
         assert extracted.count("vid_next_1") == 1
         assert extracted.count("vid_next_2") == 1
 
+
+def test_ensure_mpv_dll_preloads_bundled_vulkan_fallback(tmp_path: Path, monkeypatch) -> None:
+    """When system vulkan-1.dll is absent, ensure_mpv_dll preloads bundled fallback next to libmpv."""
+    import ctypes
+    import sys
+
+    from metrolite.audio import player as player_mod
+
+    res_dir = tmp_path / "resources"
+    res_dir.mkdir(parents=True, exist_ok=True)
+    libmpv = res_dir / "libmpv-2.dll"
+    vulkan = res_dir / "vulkan-1.dll"
+    libmpv.write_bytes(b"MZ")
+    vulkan.write_bytes(b"MZ")
+
+    loaded: list[str] = []
+
+    def fake_windll(path_or_name: str):
+        loaded.append(path_or_name)
+        if path_or_name == "vulkan-1.dll":
+            raise OSError("missing system vulkan-1.dll")
+        return MagicMock()
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "orbit-backend.exe"))
+    monkeypatch.setattr(ctypes, "WinDLL", fake_windll)
+
+    player_mod.ensure_mpv_dll()
+    assert "vulkan-1.dll" in loaded
+    assert str(vulkan.resolve()) in loaded
+
+
+def test_audio_player_retries_null_ao_on_init_failure(monkeypatch) -> None:
+    """AudioPlayer retries with ao='null' if default audio device initialization fails."""
+    from metrolite.audio import player as player_mod
+
+    calls: list[dict[str, object]] = []
+    mock_mpv_instance = MagicMock()
+
+    def fake_mpv_ctor(**kwargs):
+        calls.append(dict(kwargs))
+        if "ao" not in kwargs:
+            raise RuntimeError("WASAPI init failed")
+        return mock_mpv_instance
+
+    fake_mpv_mod = MagicMock()
+    fake_mpv_mod.MPV.side_effect = fake_mpv_ctor
+    monkeypatch.setattr(player_mod, "mpv", fake_mpv_mod)
+
+    player = AudioPlayer(resolver=MagicMock())
+    assert player.mpv is mock_mpv_instance
+    assert len(calls) == 2
+    assert calls[1].get("ao") == "null"
+

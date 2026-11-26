@@ -14,6 +14,7 @@ use tauri::{
 };
 
 static SIDECAR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+static SIDECAR_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 const ISLAND_PILL_W: f64 = 404.0;
 const ISLAND_PILL_H: f64 = 142.0;
@@ -62,6 +63,36 @@ fn get_bridge_path() -> PathBuf {
     } else {
         PathBuf::from(".localdata").join("metrolite").join("bridge.json")
     }
+}
+
+fn get_backend_log_path() -> PathBuf {
+    get_bridge_path()
+        .parent()
+        .map(|p| p.join("backend.log"))
+        .unwrap_or_else(|| PathBuf::from("backend.log"))
+}
+
+fn set_sidecar_error(msg: Option<String>) {
+    if let Ok(mut lock) = SIDECAR_LAST_ERROR.lock() {
+        *lock = msg;
+    }
+}
+
+fn read_backend_log_tail(max_lines: usize) -> String {
+    let path = get_backend_log_path();
+    let Ok(content) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join(" | ")
 }
 
 #[cfg(windows)]
@@ -1054,6 +1085,7 @@ fn remove_stale_bridge_file() {
 
 fn spawn_sidecar_if_needed() {
     if is_bridge_healthy() {
+        set_sidecar_error(None);
         eprintln!("Bridge server is already running and healthy.");
         return;
     }
@@ -1063,12 +1095,36 @@ fn spawn_sidecar_if_needed() {
     let sidecar_path = match find_sidecar_binary() {
         Some(path) => path,
         None => {
+            set_sidecar_error(Some("Backend executable (orbit-backend.exe) not found in install directory.".to_string()));
             eprintln!("Sidecar binary not found. Dev mode or existing bridge expected.");
             return;
         }
     };
 
+    set_sidecar_error(None);
     eprintln!("Spawning sidecar: {}", sidecar_path.display());
+
+    let log_path = get_backend_log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let open_log_stdio = || -> (std::process::Stdio, std::process::Stdio) {
+        if let Ok(out_file) = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+        {
+            if let Ok(err_file) = out_file.try_clone() {
+                return (
+                    std::process::Stdio::from(out_file),
+                    std::process::Stdio::from(err_file),
+                );
+            }
+        }
+        (std::process::Stdio::null(), std::process::Stdio::null())
+    };
+    let (stdout_cfg, stderr_cfg) = open_log_stdio();
 
     #[cfg(windows)]
     {
@@ -1078,6 +1134,9 @@ fn spawn_sidecar_if_needed() {
 
         let mut cmd = std::process::Command::new(&sidecar_path);
         cmd.arg("run");
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(stdout_cfg);
+        cmd.stderr(stderr_cfg);
         cmd.creation_flags(CREATE_NO_WINDOW);
 
         match cmd.spawn() {
@@ -1091,6 +1150,7 @@ fn spawn_sidecar_if_needed() {
                 }
             }
             Err(e) => {
+                set_sidecar_error(Some(format!("Failed to launch backend engine: {e}")));
                 eprintln!("Failed to spawn sidecar binary: {e}");
             }
         }
@@ -1100,9 +1160,17 @@ fn spawn_sidecar_if_needed() {
     {
         let mut cmd = std::process::Command::new(&sidecar_path);
         cmd.arg("run");
-        if let Ok(child) = cmd.spawn() {
-            if let Ok(mut lock) = SIDECAR_CHILD.lock() {
-                *lock = Some(child);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(stdout_cfg);
+        cmd.stderr(stderr_cfg);
+        match cmd.spawn() {
+            Ok(child) => {
+                if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+                    *lock = Some(child);
+                }
+            }
+            Err(e) => {
+                set_sidecar_error(Some(format!("Failed to launch backend engine: {e}")));
             }
         }
     }
@@ -1112,11 +1180,74 @@ fn wait_for_bridge_ready(timeout_duration: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout_duration {
         if is_bridge_healthy() {
+            set_sidecar_error(None);
             return true;
+        }
+        if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+            if let Some(child) = lock.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let tail = read_backend_log_tail(3);
+                    let msg = if tail.is_empty() {
+                        format!("Backend exited unexpectedly (status: {status}).")
+                    } else {
+                        format!("Backend exited ({status}): {tail}")
+                    };
+                    set_sidecar_error(Some(msg));
+                    *lock = None;
+                    return false;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(80));
     }
     false
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackendDiagnostics {
+    pub healthy: bool,
+    pub sidecar_found: bool,
+    pub last_error: Option<String>,
+    pub log_tail: String,
+}
+
+#[tauri::command]
+fn get_backend_diagnostics() -> BackendDiagnostics {
+    let healthy = is_bridge_healthy();
+    if !healthy {
+        if let Ok(mut lock) = SIDECAR_CHILD.lock() {
+            if let Some(child) = lock.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let tail = read_backend_log_tail(3);
+                    let msg = if tail.is_empty() {
+                        format!("Backend exited unexpectedly (status: {status}).")
+                    } else {
+                        format!("Backend exited ({status}): {tail}")
+                    };
+                    set_sidecar_error(Some(msg));
+                    *lock = None;
+                }
+            }
+        }
+    } else {
+        set_sidecar_error(None);
+    }
+    let last_error = SIDECAR_LAST_ERROR.lock().ok().and_then(|g| g.clone());
+    BackendDiagnostics {
+        healthy,
+        sidecar_found: find_sidecar_binary().is_some(),
+        last_error,
+        log_tail: read_backend_log_tail(4),
+    }
+}
+
+#[tauri::command]
+fn restart_sidecar() -> BackendDiagnostics {
+    if !is_bridge_healthy() {
+        terminate_sidecar();
+        spawn_sidecar_if_needed();
+    }
+    get_backend_diagnostics()
 }
 
 fn terminate_sidecar() {
@@ -1460,7 +1591,9 @@ fn main() {
             open_island_from_tray,
             consume_pending_enter_island,
             quit_from_tray,
-            launch_update_installer
+            launch_update_installer,
+            get_backend_diagnostics,
+            restart_sidecar
         ])
         .build(tauri::generate_context!())
         .expect("error while building metrolite application")

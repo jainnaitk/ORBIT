@@ -27,6 +27,7 @@ import { UpdateAvailableModal } from './components/UpdateCenter';
 import {
   useBridge,
   bridgeSocket,
+  getBackendDiagnostics,
   isTauri,
   enterDynamicIslandWindow,
   exitDynamicIslandWindow,
@@ -35,6 +36,7 @@ import {
   launchUpdateInstallerAndQuit,
   trimProcessMemory,
   waitForNextPaint,
+  type BackendDiagnostics,
   type SavedWindowBounds,
 } from './api/client';
 import { extractTrackAccent, DEFAULT_COSMIC_ACCENT } from './utils/colorExtract';
@@ -110,6 +112,25 @@ export default function App() {
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (isConnected) {
+      setBackendDiag(null);
+      return;
+    }
+    let cancelled = false;
+    const pollDiag = () => {
+      void getBackendDiagnostics().then((diag) => {
+        if (!cancelled && diag) setBackendDiag(diag);
+      });
+    };
+    pollDiag();
+    const timer = window.setInterval(pollDiag, 3500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isConnected]);
+
+  useEffect(() => {
     if (!lastError) {
       setDismissedError(null);
       return;
@@ -146,6 +167,7 @@ export default function App() {
   const [isFullscreenStageOpen, setIsFullscreenStageOpen] = useState<boolean>(false);
   const [stageInitialTab, setStageInitialTab] = useState<FullscreenTab>('lyrics');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [backendDiag, setBackendDiag] = useState<BackendDiagnostics | null>(null);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState<boolean>(false);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
@@ -1434,6 +1456,7 @@ export default function App() {
                 <HomeView
                   currentTrackId={activeVideoId}
                   isConnected={isConnected}
+                  backendDiag={backendDiag}
                   likedIds={likedIds}
                   downloads={downloads}
                   downloadedIds={downloadedIds}

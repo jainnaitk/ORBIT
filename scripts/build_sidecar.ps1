@@ -83,13 +83,41 @@ if (-not (Test-Path $localDll)) {
     Write-Host "Found local libmpv-2.dll at $localDll" -ForegroundColor Green
 }
 
-# 3. Stage libmpv-2.dll for Tauri bundle resources
+# 3. Stage libmpv-2.dll and vulkan-1.dll fallback for Tauri bundle resources
 $resourcesDir = "$Root/ui/src-tauri/resources"
 if (-not (Test-Path $resourcesDir)) {
     New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
 }
 Copy-Item -Path $localDll -Destination "$resourcesDir/libmpv-2.dll" -Force
 Write-Host "Staged libmpv-2.dll to $resourcesDir/libmpv-2.dll" -ForegroundColor Green
+
+$localVulkanDll = "$Root/bin/vulkan-1.dll"
+if (-not (Test-Path $localVulkanDll)) {
+    Write-Host "bin/vulkan-1.dll not found. Downloading Vulkan Loader (win-x64) fallback..." -ForegroundColor Yellow
+    $vulkanPkgUrl = "https://api.nuget.org/v3-flatcontainer/silk.net.vulkan.loader.native/2025.9.12/silk.net.vulkan.loader.native.2025.9.12.nupkg"
+    $vulkanZip = Join-Path $env:TEMP "silk_vulkan_loader.zip"
+    $vulkanExtract = Join-Path $env:TEMP "silk_vulkan_extracted"
+    try {
+        Invoke-WebRequest -Uri $vulkanPkgUrl -OutFile $vulkanZip
+        if (Test-Path $vulkanExtract) { Remove-Item -Recurse -Force $vulkanExtract }
+        Expand-Archive -Path $vulkanZip -DestinationPath $vulkanExtract -Force
+        $extractedVulkan = Join-Path $vulkanExtract "runtimes\win-x64\native\vulkan-1.dll"
+        if (Test-Path $extractedVulkan) {
+            Copy-Item -Path $extractedVulkan -Destination $localVulkanDll -Force
+        }
+    } catch {
+        Write-Host "NuGet Vulkan Loader download failed ($($_.Exception.Message)); checking System32..." -ForegroundColor Yellow
+    }
+    if (-not (Test-Path $localVulkanDll) -and (Test-Path "$env:WINDIR\System32\vulkan-1.dll")) {
+        Copy-Item -Path "$env:WINDIR\System32\vulkan-1.dll" -Destination $localVulkanDll -Force
+    }
+}
+if (Test-Path $localVulkanDll) {
+    Copy-Item -Path $localVulkanDll -Destination "$resourcesDir/vulkan-1.dll" -Force
+    Write-Host "Staged vulkan-1.dll to $resourcesDir/vulkan-1.dll" -ForegroundColor Green
+} else {
+    throw "vulkan-1.dll could not be staged (required by libmpv-2.dll on systems without GPU Vulkan drivers)."
+}
 
 # 4. Build standalone PyInstaller sidecar binary
 $binariesDir = "$Root/ui/src-tauri/binaries"

@@ -53,8 +53,13 @@ function bridgeConfigDevPlugin() {
   };
 }
 
+const pkgJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.json"), "utf-8"));
+
 // https://vitejs.dev/config/
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkgJson.version || "1.2.6"),
+  },
   plugins: [react(), bridgeConfigDevPlugin()],
   clearScreen: false,
   server: {

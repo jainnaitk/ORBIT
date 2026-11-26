@@ -84,6 +84,17 @@ def ensure_mpv_dll() -> None:
                         os.add_dll_directory(bin_str)
                     except OSError:
                         pass
+                # Some shinchiro libmpv-2.dll builds statically import vulkan-1.dll;
+                # prefer system Vulkan loader if installed, otherwise preload bundled fallback.
+                bundled_vulkan = candidate / "vulkan-1.dll"
+                if bundled_vulkan.is_file():
+                    import ctypes
+
+                    try:
+                        ctypes.WinDLL("vulkan-1.dll")
+                    except OSError:
+                        with suppress(OSError):
+                            ctypes.WinDLL(str(bundled_vulkan.resolve()))
                 break
 
 
@@ -195,7 +206,12 @@ class AudioPlayer:
             }
             if getattr(cfg.audio, "normalize_volume", False):
                 mpv_kwargs["af"] = "dynaudnorm"
-            self._mpv = mpv.MPV(**mpv_kwargs)
+            try:
+                self._mpv = mpv.MPV(**mpv_kwargs)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Primary libmpv audio init failed (%s); retrying with null ao fallback", e)
+                mpv_kwargs["ao"] = "null"
+                self._mpv = mpv.MPV(**mpv_kwargs)
 
         self._setup_mpv_observers()
 

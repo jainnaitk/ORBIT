@@ -189,6 +189,7 @@ export const Titlebar = memo(({
 
           <UpdateTabPopover
             isOpen={isUpdateTabOpen}
+            isConnected={isConnected}
             updateState={updateState}
             onClose={onCloseUpdateTab}
             onCheckUpdates={onCheckUpdates}

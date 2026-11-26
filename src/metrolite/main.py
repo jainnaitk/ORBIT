@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from metrolite.config import get_config
 from metrolite.store.db import init_db_sync
@@ -59,9 +60,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_backend_logging(data_dir: str | Path) -> None:
+    """Ensure frozen/GUI-spawned backend always writes startup errors safely."""
+    import logging
+
+    log_dir = Path(data_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "backend.log"
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        handlers: list[logging.Handler] = [logging.FileHandler(log_file, mode="w", encoding="utf-8")]
+        if sys.stderr is not None:
+            handlers.append(logging.StreamHandler(sys.stderr))
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            handlers=handlers,
+        )
+
+
 def run_command(args: argparse.Namespace) -> int:
     """Handle `metrolite run` command."""
+    import logging
     import os
+    import traceback
 
     cfg = get_config(args.config)
     host = args.host or cfg.bridge.host
@@ -69,21 +92,31 @@ def run_command(args: argparse.Namespace) -> int:
 
     # Ensure database is initialized before starting service
     db_path = init_db_sync()
+    if getattr(sys, "frozen", False) or sys.stderr is None:
+        try:
+            _configure_backend_logging(cfg.app.data_dir)
+        except OSError:
+            pass
     print(f"Starting {cfg.app.name} backend on {host}:{port} (db: {db_path})")
 
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return 0
 
-    from metrolite.audio.media_keys import MediaKeysListener
-    from metrolite.bridge.server import BridgeController, BridgeServer
-
-    media_keys = MediaKeysListener() if cfg.hotkeys.enabled else None
-    controller = BridgeController(db_path=db_path, media_keys=media_keys)
-    server = BridgeServer(host=host, port=port, controller=controller)
     try:
+        from metrolite.audio.media_keys import MediaKeysListener
+        from metrolite.bridge.server import BridgeController, BridgeServer
+
+        media_keys = MediaKeysListener() if cfg.hotkeys.enabled else None
+        controller = BridgeController(db_path=db_path, media_keys=media_keys)
+        server = BridgeServer(host=host, port=port, controller=controller)
         server.start_sync()
     except KeyboardInterrupt:
-        server.stop()
+        pass
+    except Exception:
+        logging.getLogger("metrolite").exception("Fatal backend startup error")
+        if sys.stderr is not None:
+            traceback.print_exc(file=sys.stderr)
+        return 1
     return 0
 
 

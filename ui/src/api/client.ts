@@ -63,6 +63,37 @@ export async function fetchBridgeConfig(forceRefresh: boolean = false): Promise<
   return { host: fallbackHost, port: 8766, token: '' };
 }
 
+export interface BackendDiagnostics {
+  healthy: boolean;
+  sidecar_found: boolean;
+  last_error?: string | null;
+  log_tail?: string;
+}
+
+export async function getBackendDiagnostics(): Promise<BackendDiagnostics | null> {
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<BackendDiagnostics>('get_backend_diagnostics');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function restartSidecar(): Promise<BackendDiagnostics | null> {
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<BackendDiagnostics>('restart_sidecar');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function minimizeWindow(): Promise<void> {
   if (isTauri()) {
     try {
