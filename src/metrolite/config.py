@@ -118,7 +118,7 @@ class YTMConfig(BaseModel):
 class UpdatesConfig(BaseModel):
     enabled: bool = True
     github_repo: str = "jainnaitk/ORBIT"
-    current_version: str = "1.2.3"
+    current_version: str = "1.2.4"
     check_on_startup: bool = True
     mirror_base_url: str | None = "https://orbit-music.pages.dev"
 
