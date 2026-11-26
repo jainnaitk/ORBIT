@@ -374,17 +374,19 @@ class BridgeController:
         if cache_key in _MOOD_CONFIG:
             title, subtitle, queries = _MOOD_CONFIG[cache_key]
             chosen_query = random.choice(queries) if refresh else queries[0]
-            try:
-                tracks = await self.ytm.search(chosen_query, filter_type="songs", limit=18)
-                dumped = [t.model_dump() for t in tracks]
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Mood search failed for %s: %s", cache_key, e)
-                dumped = []
+            candidate_queries = [chosen_query, *[q for q in queries if q != chosen_query][:1]]
+            dumped: list[dict[str, Any]] = []
+            for q in candidate_queries:
+                try:
+                    tracks = await self.ytm.search(q, filter_type="songs", limit=18)
+                    dumped = [t.model_dump() for t in tracks]
+                    if dumped:
+                        break
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Mood search failed for %s (%r): %s", cache_key, q, e)
 
-            payload = {
-                "greeting": greeting,
-                "speed_dial": [],
-                "sections": [
+            mood_sections: list[dict[str, Any]] = (
+                [
                     {
                         "id": f"mood_{cache_key}",
                         "title": title,
@@ -392,7 +394,14 @@ class BridgeController:
                         "layout": "cards",
                         "contents": dumped,
                     }
-                ],
+                ]
+                if dumped
+                else []
+            )
+            payload = {
+                "greeting": greeting,
+                "speed_dial": [],
+                "sections": mood_sections,
                 "personalized": False,
             }
             if dumped:
@@ -496,6 +505,11 @@ class BridgeController:
             _safe_search(f"{chosen_artist} songs" if chosen_artist else None, limit=12),
             _safe_search(trending_q, limit=12),
         )
+
+        if not trending_tracks:
+            fallback_trending_q = next((q for q in _TRENDING_QUERIES if q != trending_q), None)
+            if fallback_trending_q:
+                trending_tracks = await _safe_search(fallback_trending_q, limit=12)
 
         sections: list[dict[str, Any]] = []
         is_personalized = bool(seed_track or most_played or liked_tracks)
@@ -1504,6 +1518,8 @@ def create_app(
         try:
             eff_filter: str | None = None if filter.lower() == "all" else filter
             results = await ctrl.ytm.search(query=q, filter_type=eff_filter, limit=limit)
+            if not results and eff_filter == "songs":
+                results = await ctrl.ytm.search(query=q, filter_type=None, limit=limit)
             if results and not os.environ.get("PYTEST_CURRENT_TEST"):
                 top_ids = [t.video_id for t in results[:2] if t.video_id]
                 resolver = getattr(ctrl.player, "resolver", None)

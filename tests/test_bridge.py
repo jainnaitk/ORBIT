@@ -825,3 +825,28 @@ def test_player_preload_and_multi_step_next_prev_endpoints(
     assert res_prv.status_code == 200
     assert mock_controller.queue.current_index == 0
     assert res_prv.json()["current_track"]["video_id"] == "fast_0"
+
+
+def test_search_fallback_and_mood_empty_handling(
+    client: TestClient,
+    mock_controller: BridgeController,
+    test_token: str,
+) -> None:
+    """Verify /search falls back when songs filter returns empty and empty moods omit blank sections."""
+    headers = {"X-Bridge-Token": test_token}
+    fallback_track = Track(video_id="fb_1", title="Fallback Song", artist="Artist", duration_s=180)
+
+    mock_controller.ytm.search = AsyncMock(side_effect=[[], [fallback_track]])
+    res = client.get("/search?q=pal+pal&filter=songs&limit=10", headers=headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data) == 1
+    assert data[0]["video_id"] == "fb_1"
+    assert mock_controller.ytm.search.await_count == 2
+
+    # When mood queries fail, mood section should be omitted cleanly instead of returning contents=[]
+    mock_controller._home_cache.clear()
+    mock_controller.ytm.search = AsyncMock(side_effect=RuntimeError("ytm down"))
+    res_home = client.get("/home/personalized?mood=latenight", headers=headers)
+    assert res_home.status_code == 200
+    assert res_home.json()["sections"] == []

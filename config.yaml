@@ -48,6 +48,6 @@ ui:
 updates:
   enabled: true
   github_repo: "jainnaitk/ORBIT"
-  current_version: "1.2.4"
+  current_version: "1.2.5"
   check_on_startup: true
   mirror_base_url: "https://orbit-music.pages.dev"

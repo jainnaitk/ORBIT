@@ -1433,6 +1433,7 @@ export default function App() {
               {activeTab === 'home' && (
                 <HomeView
                   currentTrackId={activeVideoId}
+                  isConnected={isConnected}
                   likedIds={likedIds}
                   downloads={downloads}
                   downloadedIds={downloadedIds}
@@ -1459,6 +1460,7 @@ export default function App() {
               {activeTab === 'search' && (
                 <SearchView
                   initialQuery={submittedSearch}
+                  isConnected={isConnected}
                   currentTrackId={activeVideoId}
                   isPlaying={playback?.state === 'playing'}
                   downloads={downloads}

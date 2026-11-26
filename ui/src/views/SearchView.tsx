@@ -1,5 +1,5 @@
 import { memo, useEffect, useState, useCallback, useRef } from 'react';
-import { Search as SearchIcon, Loader2, X } from 'lucide-react';
+import { Search as SearchIcon, Loader2, X, RefreshCw } from 'lucide-react';
 import { TrackList } from '../components/TrackList';
 import { useTwoFingerClose } from '../utils/gestures';
 import type { Track, DownloadProgress } from '../api/types';
@@ -7,6 +7,7 @@ import { bridgeApi } from '../api/client';
 
 interface SearchViewProps {
   initialQuery?: string;
+  isConnected?: boolean;
   currentTrackId?: string | null;
   isPlaying?: boolean;
   downloads?: Record<string, DownloadProgress>;
@@ -32,6 +33,7 @@ const FILTER_TYPES = [
 
 export const SearchView = memo(({
   initialQuery = '',
+  isConnected = true,
   currentTrackId,
   isPlaying,
   downloads = {},
@@ -50,10 +52,12 @@ export const SearchView = memo(({
 }: SearchViewProps) => {
   const [filterType, setFilterType] = useState<string>('songs');
   const [results, setResults] = useState<Track[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [settledKey, setSettledKey] = useState<string>('');
   const debounceTimerRef = useRef<number | null>(null);
   const reqSeqRef = useRef<number>(0);
+  const prevConnectedRef = useRef<boolean>(isConnected);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleClose = useCallback(() => {
@@ -67,18 +71,22 @@ export const SearchView = memo(({
     const mySeq = ++reqSeqRef.current;
     if (!q) {
       setResults([]);
+      setSearchError(null);
       setIsLoading(false);
       setSettledKey(key);
       return;
     }
     setIsLoading(true);
+    setSearchError(null);
     try {
       const data = await bridgeApi.search(q, filter, 30);
       if (mySeq !== reqSeqRef.current) return;
       setResults(data);
-    } catch {
+      setSearchError(null);
+    } catch (err: any) {
       if (mySeq !== reqSeqRef.current) return;
       setResults([]);
+      setSearchError(err?.message || 'Unable to reach YouTube Music');
     } finally {
       if (mySeq === reqSeqRef.current) {
         setIsLoading(false);
@@ -92,11 +100,13 @@ export const SearchView = memo(({
     if (!trimmedQuery) {
       reqSeqRef.current += 1;
       setResults([]);
+      setSearchError(null);
       setIsLoading(false);
       setSettledKey(activeKey);
       return;
     }
     setIsLoading(true);
+    setSearchError(null);
     debounceTimerRef.current = window.setTimeout(() => {
       void executeSearch(trimmedQuery, filterType, activeKey);
     }, 240);
@@ -104,6 +114,14 @@ export const SearchView = memo(({
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     };
   }, [trimmedQuery, filterType, activeKey, executeSearch]);
+
+  useEffect(() => {
+    const wasConnected = prevConnectedRef.current;
+    prevConnectedRef.current = isConnected;
+    if (!wasConnected && isConnected && trimmedQuery && searchError && !isLoading) {
+      void executeSearch(trimmedQuery, filterType, activeKey);
+    }
+  }, [isConnected, trimmedQuery, filterType, activeKey, searchError, isLoading, executeSearch]);
 
   const showSkeleton = isLoading || (Boolean(trimmedQuery) && settledKey !== activeKey);
 
@@ -170,31 +188,55 @@ export const SearchView = memo(({
         </div>
       </div>
 
-      <TrackList
-        tracks={showSkeleton && results.length === 0 ? [] : results}
-        loading={showSkeleton}
-        scrollKey={activeKey}
-        currentTrackId={currentTrackId}
-        isPlaying={isPlaying}
-        downloads={downloads}
-        likedIds={likedIds}
-        downloadedIds={downloadedIds}
-        onPlay={(track, index) => onPlay(track, index, results)}
-        onToggleLike={onToggleLike}
-        onDownload={onDownload}
-        onDeleteDownload={onDeleteDownload}
-        onAddNext={onAddNext}
-        onAppendQueue={onAppendQueue}
-        onOpenAddToPlaylist={onOpenAddToPlaylist}
-        onOpenArtist={onOpenArtist}
-        onOpenAlbum={onOpenAlbum}
-        onEmptyAreaClick={handleClose}
-        emptyMessage={
-          trimmedQuery
-            ? 'No matches found. Try another search query.'
-            : 'Type in the top search bar (Ctrl+K) to find songs, albums, and artists.'
-        }
-      />
+      {!showSkeleton && searchError && results.length === 0 ? (
+        <div
+          onClick={() => handleClose()}
+          className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-3"
+        >
+          <SearchIcon size={28} className="text-[#6D7796]" />
+          <div onClick={(e) => e.stopPropagation()} className="max-w-sm">
+            <p className="text-sm font-semibold text-[#F1F4FA]">Search couldn&apos;t load results</p>
+            <p className="text-xs text-[#9AA5C4] mt-1">{searchError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void executeSearch(trimmedQuery, filterType, activeKey);
+            }}
+            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold bg-[#F1F4FA] text-[#06080F] hover:opacity-90 transition-opacity"
+          >
+            <RefreshCw size={12} />
+            Retry
+          </button>
+        </div>
+      ) : (
+        <TrackList
+          tracks={showSkeleton && results.length === 0 ? [] : results}
+          loading={showSkeleton}
+          scrollKey={activeKey}
+          currentTrackId={currentTrackId}
+          isPlaying={isPlaying}
+          downloads={downloads}
+          likedIds={likedIds}
+          downloadedIds={downloadedIds}
+          onPlay={(track, index) => onPlay(track, index, results)}
+          onToggleLike={onToggleLike}
+          onDownload={onDownload}
+          onDeleteDownload={onDeleteDownload}
+          onAddNext={onAddNext}
+          onAppendQueue={onAppendQueue}
+          onOpenAddToPlaylist={onOpenAddToPlaylist}
+          onOpenArtist={onOpenArtist}
+          onOpenAlbum={onOpenAlbum}
+          onEmptyAreaClick={handleClose}
+          emptyMessage={
+            trimmedQuery
+              ? 'No matches found. Try another search query.'
+              : 'Type in the top search bar (Ctrl+K) to find songs, albums, and artists.'
+          }
+        />
+      )}
     </div>
   );
 });

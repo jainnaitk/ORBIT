@@ -475,3 +475,38 @@ async def test_get_artist_profile_preserves_comma_artist_name() -> None:
     profile = await client.get_artist_profile(name="Tyler, The Creator")
     assert profile["name"] == "Tyler, The Creator"
     mock_yt.search.assert_any_call(query="Tyler, The Creator", filter="artists", limit=6)
+
+
+@pytest.mark.asyncio
+async def test_ytm_client_resets_session_and_retries_on_transient_error() -> None:
+    """Thread-local YTMusic resets its session and retries once on transient connection errors."""
+    main_yt = MagicMock()
+    main_yt.__dict__["base_headers"] = {"X-Goog-Visitor-Id": "main_visitor"}
+
+    broken_yt = MagicMock()
+    broken_yt.__dict__["base_headers"] = {"X-Goog-Visitor-Id": "old_visitor"}
+    broken_yt._session = MagicMock()
+    broken_yt.search.side_effect = requests.exceptions.ConnectionError("RemoteDisconnected")
+
+    fresh_yt = MagicMock()
+    fresh_yt.__dict__["base_headers"] = {"X-Goog-Visitor-Id": "new_visitor"}
+    fresh_yt.search.return_value = [
+        {
+            "videoId": "pal_1",
+            "title": "Pal Pal",
+            "artists": [{"name": "Afusic"}],
+            "duration": "3:15",
+        }
+    ]
+
+    with patch(
+        "metrolite.ytm.client.YTMusic",
+        side_effect=[main_yt, broken_yt, fresh_yt],
+    ) as mock_yt_cls:
+        client = YTMusicClient()
+        tracks = await client.search("pal pal", filter_type="songs", limit=10)
+
+    assert len(tracks) == 1
+    assert tracks[0].video_id == "pal_1"
+    broken_yt._session.close.assert_called_once()
+    assert mock_yt_cls.call_count == 3

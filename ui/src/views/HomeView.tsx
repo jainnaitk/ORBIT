@@ -32,6 +32,7 @@ import { bridgeApi, cancelTrackPreload, scheduleTrackPreload } from '../api/clie
 
 interface HomeViewProps {
   currentTrackId?: string | null;
+  isConnected?: boolean;
   likedIds?: Set<string>;
   downloads?: Record<string, DownloadProgress>;
   downloadedIds?: Set<string>;
@@ -45,6 +46,16 @@ interface HomeViewProps {
   onDeleteDownload?: (track: Track) => void;
   onOpenArtist?: (artistName: string, artistId?: string | null) => void;
   onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
+}
+
+function hasPlayableContent(data: PersonalizedHomeResponse | null | undefined): boolean {
+  if (!data) return false;
+  if (Array.isArray(data.speed_dial) && data.speed_dial.length > 0) return true;
+  return (data.sections || []).some(
+    (sec) =>
+      Array.isArray(sec.contents) &&
+      sec.contents.some((c) => Boolean(c && typeof c === 'object' && (c as Track).video_id))
+  );
 }
 
 const MOOD_PRESETS: { id: string; label: string }[] = [
@@ -257,6 +268,7 @@ const HorizontalShelf = ({
 
 export const HomeView = memo(({
   currentTrackId,
+  isConnected = true,
   likedIds,
   downloads,
   downloadedIds,
@@ -337,49 +349,80 @@ export const HomeView = memo(({
     });
   }, []);
 
+  const prevConnectedRef = useRef<boolean>(isConnected);
+
   const loadFeed = useCallback(async (mood: string, forceRefresh: boolean) => {
     const mySeq = ++reqSeqRef.current;
 
     if (!forceRefresh && cachedByMood.has(mood)) {
-      setHomeData(cachedByMood.get(mood) || null);
-      setIsLoading(false);
-      setIsRefreshing(false);
-      return;
+      const cached = cachedByMood.get(mood) || null;
+      if (hasPlayableContent(cached)) {
+        setHomeData(cached);
+        setIsLoading(false);
+        setIsRefreshing(false);
+        return;
+      }
+      cachedByMood.delete(mood);
     }
 
-    if (forceRefresh) setIsRefreshing(true);
-    else setIsLoading(true);
+    if (forceRefresh) {
+      setIsRefreshing(true);
+    } else {
+      setHomeData(null);
+      setIsLoading(true);
+    }
 
     try {
       const data = await bridgeApi.getPersonalizedHome(mood, forceRefresh);
-      const hasContent =
-        (data.speed_dial && data.speed_dial.length > 0) ||
-        (data.sections || []).some(
-          (sec) => Array.isArray(sec.contents) && sec.contents.length > 0
-        );
-      if (hasContent) {
+      if (hasPlayableContent(data)) {
         if (cachedByMood.size >= 3 && !cachedByMood.has(mood)) {
           const oldest = cachedByMood.keys().next().value;
           if (oldest) cachedByMood.delete(oldest);
         }
         cachedByMood.set(mood, data);
-      } else {
-        cachedByMood.delete(mood);
+        if (mySeq !== reqSeqRef.current) return;
+        setHomeData(data);
+        return;
       }
+      cachedByMood.delete(mood);
+      const basic = await bridgeApi.getHome();
+      const fallbackData: PersonalizedHomeResponse = {
+        greeting: data.greeting || getStableGreeting(),
+        speed_dial: [],
+        sections: basic,
+        personalized: false,
+      };
       if (mySeq !== reqSeqRef.current) return;
-      setHomeData(data);
+      setHomeData(
+        hasPlayableContent(fallbackData)
+          ? fallbackData
+          : { greeting: fallbackData.greeting, speed_dial: [], sections: [], personalized: false }
+      );
     } catch {
       try {
         const basic = await bridgeApi.getHome();
-        if (mySeq !== reqSeqRef.current) return;
-        setHomeData({
+        const fallbackData: PersonalizedHomeResponse = {
           greeting: getStableGreeting(),
           speed_dial: [],
           sections: basic,
           personalized: false,
-        });
+        };
+        if (mySeq !== reqSeqRef.current) return;
+        setHomeData(
+          hasPlayableContent(fallbackData)
+            ? fallbackData
+            : { greeting: fallbackData.greeting, speed_dial: [], sections: [], personalized: false }
+        );
       } catch {
-        // Offline
+        if (mySeq !== reqSeqRef.current) return;
+        if (!forceRefresh) {
+          setHomeData({
+            greeting: getStableGreeting(),
+            speed_dial: [],
+            sections: [],
+            personalized: false,
+          });
+        }
       }
     } finally {
       if (mySeq === reqSeqRef.current) {
@@ -392,6 +435,14 @@ export const HomeView = memo(({
   useEffect(() => {
     void loadFeed(activeMood, false);
   }, [activeMood, loadFeed]);
+
+  useEffect(() => {
+    const wasConnected = prevConnectedRef.current;
+    prevConnectedRef.current = isConnected;
+    if (!wasConnected && isConnected && !isLoading && !hasPlayableContent(homeData)) {
+      void loadFeed(activeMood, false);
+    }
+  }, [isConnected, isLoading, homeData, activeMood, loadFeed]);
 
   const getSectionIcon = (title: string) => {
     const lower = title.toLowerCase();
@@ -421,6 +472,7 @@ export const HomeView = memo(({
 
   const speedDial = homeData?.speed_dial || [];
   const sections: HomeSection[] = homeData?.sections || [];
+  const hasRenderableContent = hasPlayableContent(homeData);
 
   return (
     <div
@@ -479,7 +531,7 @@ export const HomeView = memo(({
           </div>
         </div>
 
-        {isLoading && sections.length === 0 ? (
+        {isLoading && !hasRenderableContent ? (
           <div className="space-y-7 eh-skeleton">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {Array.from({ length: 6 }).map((_, i) => (
@@ -492,7 +544,7 @@ export const HomeView = memo(({
               ))}
             </div>
           </div>
-        ) : sections.length === 0 && speedDial.length === 0 ? (
+        ) : !hasRenderableContent ? (
           <div className="ios-liquid-card rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-3 max-w-md">
             <Compass size={28} className="text-[#6D7796]" />
             <div>

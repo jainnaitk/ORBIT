@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import locale
 import logging
 import socket
+import threading
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -13,6 +17,7 @@ import requests
 from pydantic import BaseModel, Field
 from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicError, YTMusicServerError
+from ytmusicapi.helpers import initialize_headers
 
 from metrolite.config import get_config
 
@@ -283,8 +288,14 @@ class YTMusicClient:
         yt_instance: YTMusic | None = None,
     ) -> None:
         """Initialize YTMusicClient in unauthenticated mode or with optional cookies."""
+        self._language = language
+        self._auth_val: str | None = None
+        self._override_yt: Any = yt_instance
+        self._thread_local = threading.local()
+        self._init_lock = threading.Lock()
+        self._visitor_headers: dict[str, str] | None = None
+
         if yt_instance is not None:
-            self._yt = yt_instance
             return
 
         if cookies_file is None:
@@ -293,45 +304,109 @@ class YTMusicClient:
                 cfg.ytm, "cookies_file", None
             )
 
-        auth_val: str | None = None
         if cookies_file:
             c_path = Path(cookies_file)
             if c_path.is_file():
-                auth_val = str(c_path)
+                self._auth_val = str(c_path)
 
-        try:
-            self._yt = YTMusic(auth=auth_val, language=language)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "Failed to initialize YTMusic with auth: %s. Falling back to unauthenticated.", e
-            )
-            self._yt = YTMusic(auth=None, language=language)
-        finally:
-            import locale
+        primary = self._build_yt_instance()
+        self._thread_local.yt = primary
 
+    def _build_yt_instance(self) -> YTMusic:
+        """Construct an isolated YTMusic instance safely under the locale/init lock."""
+        with self._init_lock:
             try:
-                locale.setlocale(locale.LC_NUMERIC, "C")
-            except locale.Error:
-                pass
+                yt = YTMusic(auth=self._auth_val, language=self._language)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Failed to initialize YTMusic with auth: %s. Falling back to unauthenticated.", e
+                )
+                yt = YTMusic(auth=None, language=self._language)
+            finally:
+                try:
+                    locale.setlocale(locale.LC_NUMERIC, "C")
+                except locale.Error:
+                    pass
+
+            if self._auth_val is None and self._visitor_headers:
+                seeded = initialize_headers()
+                seeded.update(self._visitor_headers)
+                yt.__dict__["base_headers"] = seeded
+            return yt
+
+    @property
+    def _yt(self) -> Any:
+        """Return test override or a thread-isolated YTMusic instance."""
+        if self._override_yt is not None:
+            return self._override_yt
+        yt = getattr(self._thread_local, "yt", None)
+        if yt is None:
+            yt = self._build_yt_instance()
+            self._thread_local.yt = yt
+        elif self._auth_val is None and self._visitor_headers is None:
+            cached = yt.__dict__.get("base_headers")
+            if isinstance(cached, dict) and cached.get("X-Goog-Visitor-Id"):
+                self._visitor_headers = {"X-Goog-Visitor-Id": str(cached["X-Goog-Visitor-Id"])}
+        return yt
+
+    @_yt.setter
+    def _yt(self, value: Any) -> None:
+        self._override_yt = value
+
+    def _reset_thread_yt(self) -> None:
+        """Discard the current thread's YTMusic session after a transport/session failure."""
+        if self._override_yt is not None:
+            return
+        yt = getattr(self._thread_local, "yt", None)
+        self._thread_local.yt = None
+        self._visitor_headers = None
+        if yt is not None:
+            sess = getattr(yt, "_session", None)
+            if sess is not None and hasattr(sess, "close"):
+                with suppress(Exception):
+                    sess.close()
 
     def _run_sync(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        """Execute a synchronous ytmusicapi function with standardized error handling."""
-        try:
-            return func(*args, **kwargs)
-        except (
-            requests.exceptions.RequestException,
-            ConnectionError,
-            TimeoutError,
-            socket.gaierror,
-        ) as e:
-            logger.error("YTM network error during %s: %s", func.__name__, e)
-            raise YTMNetworkError(f"Network error during {func.__name__}: {e}") from e
-        except (YTMusicError, YTMusicServerError) as e:
-            logger.error("YTM API error during %s: %s", func.__name__, e)
-            raise YTMError(f"YouTube Music API error during {func.__name__}: {e}") from e
-        except Exception as e:
-            logger.error("Unexpected error during %s: %s", func.__name__, e)
-            raise YTMError(f"Unexpected error during {func.__name__}: {e}") from e
+        """Execute a synchronous ytmusicapi function with session recovery & error mapping."""
+        max_attempts = 2 if self._override_yt is None else 1
+        for attempt in range(max_attempts):
+            try:
+                return func(*args, **kwargs)
+            except (
+                requests.exceptions.RequestException,
+                ConnectionError,
+                TimeoutError,
+                socket.gaierror,
+                json.JSONDecodeError,
+            ) as e:
+                if attempt + 1 < max_attempts:
+                    logger.warning(
+                        "YTM session error during %s, resetting session and retrying: %s",
+                        func.__name__,
+                        e,
+                    )
+                    self._reset_thread_yt()
+                    continue
+                logger.error("YTM network error during %s: %s", func.__name__, e)
+                raise YTMNetworkError(f"Network error during {func.__name__}: {e}") from e
+            except YTMusicServerError as e:
+                if attempt + 1 < max_attempts:
+                    logger.warning(
+                        "YTM server error during %s, resetting session and retrying: %s",
+                        func.__name__,
+                        e,
+                    )
+                    self._reset_thread_yt()
+                    continue
+                logger.error("YTM API error during %s: %s", func.__name__, e)
+                raise YTMError(f"YouTube Music API error during {func.__name__}: {e}") from e
+            except YTMusicError as e:
+                logger.error("YTM API error during %s: %s", func.__name__, e)
+                raise YTMError(f"YouTube Music API error during {func.__name__}: {e}") from e
+            except Exception as e:
+                logger.error("Unexpected error during %s: %s", func.__name__, e)
+                raise YTMError(f"Unexpected error during {func.__name__}: {e}") from e
+        raise YTMError(f"Unexpected exit during {func.__name__}")
 
     def _search_sync(self, query: str, filter_type: str | None, limit: int) -> list[Track]:
         results = self._yt.search(query=query, filter=filter_type, limit=limit)
