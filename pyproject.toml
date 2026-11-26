@@ -1,6 +1,6 @@
 [project]
 name = "metrolite"
-version = "1.2.0"
+version = "1.2.1"
 description = "Lightweight Windows desktop YouTube Music player under 185 MB RAM"
 requires-python = ">=3.11,<3.13"
 dependencies = [

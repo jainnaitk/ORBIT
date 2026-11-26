@@ -1,5 +1,11 @@
 # ORBIT Changelog
 
+## v1.2.1
+- Added Cloudflare release mirror fallback for in-app updates
+- Added 4-pill changelog summary in update modal and popover
+- Fixed update timeout errors and failed-check status badge
+- Hardened installer SHA-256 verification and sidecar shutdown
+
 ## v1.2.0
 - Word & line-synced lyrics with romanization and stage view
 - Custom tray album popup with live playback controls
