@@ -25,6 +25,7 @@ interface SearchViewProps {
   onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
   onCloseSearch?: () => void;
   onSelectTerm: (term: string) => void;
+  onQueryRun: (term: string) => void;
 }
 
 const FILTER_TYPES = [
@@ -52,6 +53,7 @@ export const SearchView = memo(({
   onOpenAlbum,
   onCloseSearch,
   onSelectTerm,
+  onQueryRun,
 }: SearchViewProps) => {
   const [filterType, setFilterType] = useState<string>('songs');
   const [results, setResults] = useState<Track[]>([]);
@@ -96,6 +98,7 @@ export const SearchView = memo(({
     setIsLoading(true);
     setSearchError(null);
     try {
+      onQueryRun(q);
       const data = await bridgeApi.search(q, filter, 30);
       if (mySeq !== reqSeqRef.current) return;
       setResults(data);
@@ -110,7 +113,7 @@ export const SearchView = memo(({
         setSettledKey(key);
       }
     }
-  }, []);
+  }, [onQueryRun]);
 
   useEffect(() => {
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -228,7 +231,7 @@ export const SearchView = memo(({
                 {termList.getVirtualItems().map(item => {
                   const term = suggestions[item.index];
                   return (
-                    <button key={term} data-index={item.index} ref={termList.measureElement} type="button" title={term}
+                    <button key={term} data-search-term data-index={item.index} ref={termList.measureElement} type="button" title={term}
                       className="absolute left-0 top-0 w-max max-w-48 truncate ios-liquid-pill rounded-full px-3 py-1 text-[#E6ECF8]"
                       style={{ transform: `translateX(${item.start}px)` }} onClick={() => onSelectTerm(term)}>
                       {term}

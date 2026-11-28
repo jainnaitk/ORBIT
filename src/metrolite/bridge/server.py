@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 import uvicorn
 from fastapi import (
@@ -1801,6 +1802,7 @@ class PlayRequest(BaseModel):
 class SearchHistoryRequest(BaseModel):
     term: str | None = Field(default=None, min_length=1)
     track: Track | None = None
+    edit_id: UUID | None = None
 
 
 class SeekRequest(BaseModel):
@@ -2121,7 +2123,7 @@ def create_app(
             if body.track is not None:
                 await ctrl.library.remember_search_track(body.track)
             elif body.term:
-                await ctrl.library.remember_search_term(body.term)
+                await ctrl.library.remember_search_term(body.term, str(body.edit_id) if body.edit_id else None)
             await ctrl.ws_manager.broadcast("search_history_changed", {})
         return {"status": "ok"}
 
@@ -2130,8 +2132,9 @@ def create_app(
         q: str = Query(..., min_length=1),
         filter: str = Query(default="songs"),
         limit: int = Query(default=25, ge=1, le=50),
+        remember: bool = Query(default=True),
     ) -> list[dict[str, Any]]:
-        if q.strip() and not ctrl._pause_listening_history:
+        if remember and q.strip() and not ctrl._pause_listening_history:
             try:
                 await ctrl.library.remember_search_term(q)
                 ctrl.ws_manager.broadcast_sync("search_history_changed", {}, ctrl.loop)

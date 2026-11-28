@@ -521,7 +521,7 @@ export class BridgeApiClient {
   }
 
   public async search(query: string, filterType: string = 'songs', limit: number = 25): Promise<Track[]> {
-    const params = new URLSearchParams({ q: query, filter: filterType, limit: String(limit) });
+    const params = new URLSearchParams({ q: query, filter: filterType, limit: String(limit), remember: 'false' });
     const res = await this.request<any>(`/search?${params.toString()}`);
     return Array.isArray(res) ? res : res.results || [];
   }
@@ -530,7 +530,7 @@ export class BridgeApiClient {
     return this.request('/search/history');
   }
 
-  public rememberSearch(entry: { term: string } | { track: Track }): Promise<void> {
+  public rememberSearch(entry: { term: string; edit_id?: string } | { track: Track }): Promise<void> {
     return this.request('/search/history', { method: 'POST', body: JSON.stringify(entry) });
   }
 

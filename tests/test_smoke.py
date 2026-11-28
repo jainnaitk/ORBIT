@@ -149,6 +149,23 @@ async def test_search_history_upgrade_preserves_both_orders(tmp_path: Path) -> N
     assert history == {"terms": ["other", "JAZZ", "ambient"], "tracks": [{"video_id": "a"}, {"video_id": "b"}]}
 
 
+async def test_upgrade_hides_existing_typing_chain_without_erasing_terms(tmp_path: Path) -> None:
+    db = tmp_path / "search.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE recent_search_terms(id INTEGER PRIMARY KEY, term_key TEXT UNIQUE, term TEXT NOT NULL)")
+        terms = ["palpal", "s", "sh", "shi", "shiv", "shiva", "shivaa", "a", "ambient"]
+        conn.executemany("INSERT INTO recent_search_terms(term_key, term) VALUES (?, ?)", [(t, t) for t in terms])
+    conn.close()
+    init_db_sync(db)
+    lib = LibraryManager(db)
+    assert (await lib.search_history())["terms"] == ["ambient", "a", "shivaa", "palpal"]
+    with get_sync_connection(db) as conn:
+        assert conn.execute("SELECT count(*) FROM recent_search_terms").fetchone()[0] == len(terms)
+    await lib.remember_search_term("sh")
+    await init_db(db)
+    assert (await lib.search_history())["terms"][0] == "sh"
+
+
 def test_cli_help(capsys: pytest.CaptureFixture[str]) -> None:
     """Test CLI --help exit code and help message output."""
     with pytest.raises(SystemExit) as exc_info:

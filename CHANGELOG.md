@@ -2,7 +2,7 @@
 
 ## v1.4.0
 - Import playlists and albums from YouTube, YouTube Music, Spotify, and Apple Music.
-- Browse listening stats in History, clear listening activity, and revisit searches and queued songs.
+- View and clear listening stats. Recent Searches keeps complete names instead of typing fragments.
 - Keep the full playlist in Play All and Shuffle, and honor Play Next during radio lookups.
 - Count repeat listens separately, preserve refreshed lyrics offline, and verify installer checksums.
 

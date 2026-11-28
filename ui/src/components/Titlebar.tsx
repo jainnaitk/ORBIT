@@ -23,8 +23,9 @@ import type { DownloadProgress, Track, UpdateState } from '../api/types';
 
 interface TitlebarProps {
   searchQuery: string;
-  onSearchChange: (query: string) => void;
+  onSearchChange: (query: string, replaceAll?: boolean) => void;
   onSearchSubmit: (query: string) => void;
+  onSearchBlur: () => void;
   canGoBack: boolean;
   canGoForward: boolean;
   onGoBack: () => void;
@@ -50,6 +51,7 @@ export const Titlebar = memo(({
   searchQuery,
   onSearchChange,
   onSearchSubmit,
+  onSearchBlur,
   canGoBack,
   canGoForward,
   onGoBack,
@@ -71,6 +73,7 @@ export const Titlebar = memo(({
   onClearFinishedDownloads,
 }: TitlebarProps) => {
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const wholeQuerySelected = useRef(false);
   const downloadsPopoverRef = useRef<HTMLDivElement>(null);
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
   const downloadScrollRef = useRef<HTMLDivElement>(null);
@@ -203,10 +206,21 @@ export const Titlebar = memo(({
           type="text"
           placeholder="Search..."
           onFocus={onFocusSearchTab}
+          onBlur={(e) => {
+            wholeQuerySelected.current = false;
+            if (!(e.relatedTarget instanceof Element && e.relatedTarget.closest('[data-search-term]'))) onSearchBlur();
+          }}
+          onSelect={(e) => {
+            const input = e.currentTarget;
+            wholeQuerySelected.current = !!input.value && input.selectionStart === 0 && input.selectionEnd === input.value.length;
+          }}
           value={searchQuery}
-          onChange={(e) => onSearchChange(e.target.value)}
+          onChange={(e) => {
+            onSearchChange(e.target.value, wholeQuerySelected.current);
+            wholeQuerySelected.current = false;
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') onSearchSubmit(searchQuery);
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) onSearchSubmit(searchQuery);
           }}
           className="bg-transparent text-[#F1F4FA] placeholder-[#7A84A6] text-xs focus:outline-none w-full min-w-0"
         />

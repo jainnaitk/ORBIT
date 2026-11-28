@@ -73,7 +73,9 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS recent_search_terms (
     id INTEGER PRIMARY KEY,
     term_key TEXT NOT NULL UNIQUE,
-    term TEXT NOT NULL
+    term TEXT NOT NULL,
+    edit_id TEXT,
+    hidden_fragment INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS recent_search_tracks (
@@ -141,6 +143,29 @@ def get_default_db_path() -> Path:
     return db_path
 
 
+def _upgrade_search_terms(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(recent_search_terms)")}
+    if "edit_id" in columns:
+        return
+    conn.execute("ALTER TABLE recent_search_terms ADD COLUMN edit_id TEXT")
+    conn.execute("ALTER TABLE recent_search_terms ADD COLUMN hidden_fragment INTEGER NOT NULL DEFAULT 0")
+
+    # Old live lookups had no edit ID. Hide only consecutive one-letter growth runs
+    # starting at a single character (s, sh, shi, ...); keep their final name visible.
+    run: list[int] = []
+    previous = ""
+    for row_id, key in conn.execute("SELECT id, term_key FROM recent_search_terms ORDER BY id").fetchall():
+        if run and key.startswith(previous) and len(key) == len(previous) + 1:
+            run.append(row_id)
+            if len(run) == 3:
+                conn.executemany("UPDATE recent_search_terms SET hidden_fragment = 1 WHERE id = ?", [(i,) for i in run[:2]])
+            elif len(run) > 3:
+                conn.execute("UPDATE recent_search_terms SET hidden_fragment = 1 WHERE id = ?", (run[-2],))
+        else:
+            run = [row_id] if len(key) == 1 else []
+        previous = key
+
+
 def init_db_sync(db_path: Path | str | None = None) -> Path:
     """Initialize database tables synchronously with crash-safe WAL recovery."""
     path = Path(db_path) if db_path is not None else get_default_db_path()
@@ -153,6 +178,7 @@ def init_db_sync(db_path: Path | str | None = None) -> Path:
         with conn:
             conn.executescript(SCHEMA_SQL)
             conn.execute("BEGIN IMMEDIATE")
+            _upgrade_search_terms(conn)
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_history'").fetchone():
                 # Replay oldest first so the last spelling/selection wins independently in each list.
                 for term, video_id, track_json in conn.execute(

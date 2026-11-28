@@ -811,17 +811,29 @@ class LibraryManager:
             await conn.execute("UPDATE tracks SET play_count = 0, last_played_at = NULL WHERE play_count != 0 OR last_played_at IS NOT NULL;")
             await conn.commit()
 
-    async def remember_search_term(self, term: str) -> None:
+    async def remember_search_term(self, term: str, edit_id: str | None = None) -> None:
         term = term.strip()
         if not term:
             return
+        key = term.casefold()
         async with get_connection(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            owner = edit_id
+            if edit_id is not None:
+                await conn.execute("DELETE FROM recent_search_terms WHERE edit_id = ? AND term_key != ?", (edit_id, key))
+                existing = await conn.execute_fetchall(
+                    "SELECT edit_id FROM recent_search_terms WHERE term_key = ? AND hidden_fragment = 0", (key,)
+                )
+                if existing and existing[0][0] != edit_id:
+                    # A previously searched name must survive if this input keeps growing.
+                    owner = None
             await conn.execute(
-                "INSERT OR REPLACE INTO recent_search_terms(term_key, term) VALUES (?, ?)",
-                (term.casefold(), term),
+                "INSERT OR REPLACE INTO recent_search_terms(term_key, term, edit_id) VALUES (?, ?, ?)",
+                (key, term, owner),
             )
             await conn.execute(
-                "DELETE FROM recent_search_terms WHERE id NOT IN (SELECT id FROM recent_search_terms ORDER BY id DESC LIMIT ?)",
+                "DELETE FROM recent_search_terms WHERE hidden_fragment = 0 AND id NOT IN "
+                "(SELECT id FROM recent_search_terms WHERE hidden_fragment = 0 ORDER BY id DESC LIMIT ?)",
                 (self.history_limit,),
             )
             await conn.commit()
@@ -840,7 +852,7 @@ class LibraryManager:
 
     async def search_history(self) -> dict[str, Any]:
         async with get_connection(self.db_path) as conn:
-            terms = await conn.execute_fetchall("SELECT term FROM recent_search_terms ORDER BY id DESC")
+            terms = await conn.execute_fetchall("SELECT term FROM recent_search_terms WHERE hidden_fragment = 0 ORDER BY id DESC")
             tracks = await conn.execute_fetchall("SELECT track_json FROM recent_search_tracks ORDER BY id DESC")
         return {"terms": [r[0] for r in terms], "tracks": [json.loads(r[0]) for r in tracks]}
 

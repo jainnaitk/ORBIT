@@ -756,6 +756,33 @@ def test_search_terms_do_not_require_results_or_share_retention_with_tracks(clie
     assert [t["video_id"] for t in data["tracks"]] == ["c", "b"]
 
 
+def test_live_search_edits_leave_only_the_final_name(client, mock_controller, test_token):
+    headers = {"X-Bridge-Token": test_token}
+    mock_controller.ytm.search = AsyncMock(return_value=[])
+    edit = "51f84143-d18f-4d6e-8a77-30815ae52ce2"
+
+    def save(term, **fields):
+        client.post("/search/history", json={"term": term, **fields}, headers=headers).raise_for_status()
+
+    def terms():
+        return client.get("/search/history", headers=headers).json()["terms"]
+
+    save("palpal")
+    for prefix in ("s", "sh", "shi", "shiv", "shiva", "shivaa"):
+        client.get("/search", params={"q": prefix, "remember": "false"}, headers=headers).raise_for_status()
+        save(prefix, edit_id=edit)
+        assert terms() == [prefix, "palpal"]
+
+    # A separate completed name that happens to be a prefix remains independently searchable.
+    save("shiv")
+    other = "cc32f8c9-845f-49f0-b686-a77ce1407ad4"
+    for term in ("shi", "shiv", "shivam"):
+        save(term, edit_id=other)
+    assert terms() == ["shivam", "shiv", "shivaa", "palpal"]
+    client.get("/search", params={"q": "preview only", "remember": "false"}, headers=headers).raise_for_status()
+    assert "preview only" not in terms()
+
+
 async def test_history_write_cannot_cross_track_boundary(mock_controller, monkeypatch):
     c = mock_controller
     a, b = Track(video_id="a"), Track(video_id="b")

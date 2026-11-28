@@ -165,6 +165,46 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [submittedSearch, setSubmittedSearch] = useState<string>('');
+  const searchEdit = useRef<{
+    id: string; term: string; queued: string; beforeErase?: string;
+  } | null>(null);
+  const searchWrites = useRef(Promise.resolve());
+
+  const saveSearchTerm = useCallback((raw: string) => {
+    const term = raw.trim();
+    const edit = searchEdit.current;
+    if (!edit || edit.term !== term || edit.queued === term) return;
+    edit.queued = term;
+    // Keep writes in typing order, independently of how long result lookups take.
+    searchWrites.current = searchWrites.current
+      .then(() => api.rememberSearch({ term, edit_id: edit.id }))
+      .catch(() => { if (edit.queued === term) edit.queued = ''; });
+  }, [api]);
+
+  const finishSearchEdit = useCallback(() => {
+    if (searchEdit.current) saveSearchTerm(searchEdit.current.term);
+    searchEdit.current = null;
+  }, [saveSearchTerm]);
+
+  const updateSearchEdit = useCallback((raw: string, replaceAll = false, previous = '') => {
+    const term = raw.trim();
+    if (replaceAll) finishSearchEdit();
+    const edit = searchEdit.current;
+    if (!term) {
+      // Backspacing all the way out clears the field; the last single letter isn't a new search.
+      if (edit?.beforeErase) edit.term = edit.beforeErase;
+      finishSearchEdit();
+      return;
+    }
+    const erasing = !replaceAll && previous.length > term.length && previous.startsWith(term);
+    const beforeErase = erasing ? (edit?.beforeErase || previous) : undefined;
+    if (edit) {
+      edit.term = term;
+      edit.beforeErase = beforeErase;
+    } else {
+      searchEdit.current = { id: crypto.randomUUID(), term, queued: '', beforeErase };
+    }
+  }, [finishSearchEdit]);
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(true);
   // Queue and Docked Lyrics share the right-hand slot (mutually exclusive)
@@ -492,6 +532,7 @@ export default function App() {
   );
 
   const handleCloseSearch = useCallback(() => {
+    finishSearchEdit();
     setSearchQuery('');
     setSubmittedSearch('');
     if (document.activeElement instanceof HTMLElement) {
@@ -500,7 +541,7 @@ export default function App() {
     if (activeTab === 'search') {
       navigateTo('home');
     }
-  }, [activeTab, navigateTo]);
+  }, [activeTab, navigateTo, finishSearchEdit]);
 
   const applySettingsPayload = useCallback(
     (settingsObj: Record<string, unknown> | null | undefined) => {
@@ -1559,14 +1600,15 @@ export default function App() {
   }, []);
 
   const handleTitlebarSearchChange = useCallback(
-    (q: string) => {
+    (q: string, replaceAll = false) => {
+      updateSearchEdit(q, replaceAll, searchQuery.trim());
       setSearchQuery(q);
       setSubmittedSearch(q);
       if (q.trim().length > 0) {
         if (activeTab !== 'search') navigateTo('search');
       }
     },
-    [activeTab, navigateTo]
+    [activeTab, navigateTo, searchQuery, updateSearchEdit]
   );
 
   const handleTitlebarSearchSubmit = useCallback(
@@ -1574,11 +1616,12 @@ export default function App() {
       setSearchQuery(q);
       setSubmittedSearch(q);
       if (q.trim().length > 0) {
-        void api.rememberSearch({ term: q }).catch(() => {});
+        updateSearchEdit(q);
+        finishSearchEdit();
         if (activeTab !== 'search') navigateTo('search');
       }
     },
-    [activeTab, api, navigateTo]
+    [activeTab, finishSearchEdit, navigateTo, updateSearchEdit]
   );
 
   const handleFocusSearchTab = useCallback(() => {
@@ -1789,6 +1832,7 @@ export default function App() {
           searchQuery={searchQuery}
           onSearchChange={handleTitlebarSearchChange}
           onSearchSubmit={handleTitlebarSearchSubmit}
+          onSearchBlur={finishSearchEdit}
           canGoBack={historyIndex > 0}
           canGoForward={historyIndex < historyStack.length - 1}
           onGoBack={handleGoBack}
@@ -1868,6 +1912,7 @@ export default function App() {
                 <SearchView
                   initialQuery={submittedSearch}
                   onSelectTerm={handleTitlebarSearchSubmit}
+                  onQueryRun={saveSearchTerm}
                   isConnected={isConnected}
                   currentTrackId={activeVideoId}
                   isPlaying={playback?.state === 'playing'}
