@@ -827,19 +827,22 @@ class YTMusicClient:
             if isinstance(data, dict) and data:
                 return dict(data)
         except Exception as e:  # noqa: BLE001
-            fallback = self._parse_artist_browse_fallback(channel_id)
-            if fallback and (
-                fallback.get("name")
-                or (fallback.get("songs") or {}).get("results")
-                or (fallback.get("albums") or {}).get("results")
-                or (fallback.get("singles") or {}).get("results")
-            ):
-                logger.info(
-                    "Recovered artist %s via resilient browse parser after get_artist error: %s",
-                    channel_id,
-                    e,
-                )
-                return fallback
+            try:
+                fallback = self._parse_artist_browse_fallback(channel_id)
+                if fallback and (
+                    fallback.get("name")
+                    or (fallback.get("songs") or {}).get("results")
+                    or (fallback.get("albums") or {}).get("results")
+                    or (fallback.get("singles") or {}).get("results")
+                ):
+                    logger.info(
+                        "Recovered artist %s via resilient browse parser after get_artist error: %s",
+                        channel_id,
+                        e,
+                    )
+                    return fallback
+            except Exception as fb_err:  # noqa: BLE001
+                logger.warning("get_artist fallback failed for %s: %s", channel_id, fb_err)
             logger.warning("get_artist failed for %s: %s", channel_id, e)
         return {}
 
@@ -891,7 +894,9 @@ class YTMusicClient:
         name: str | None = None,
         channel_id: str | None = None,
     ) -> dict[str, Any]:
-        resolved_id = (channel_id or "").strip() or None
+        raw_cid = (channel_id or "").strip()
+        # Synthetic library keys ("name:...") are SQLite-only identifiers, never YTM browseIds.
+        resolved_id = None if (not raw_cid or raw_cid.startswith("name:")) else raw_cid
         raw_name = (name or "").strip()
         search_name = raw_name
 

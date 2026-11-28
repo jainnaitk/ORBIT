@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1151,3 +1153,55 @@ async def test_resolve_lyrics_inflight_dedup_and_prefetch_cache() -> None:
         assert "preVid2" in _LYRICS_CACHE
         assert cascade_calls.count("dedupVid1") == 1
         assert cascade_calls.count("preVid2") == 1
+
+
+@pytest.mark.parametrize("delay_writer", [False, True], ids=["late-provider", "active-sidecar-write"])
+async def test_refresh_wins_in_memory_and_offline(tmp_path, monkeypatch, delay_writer):
+    from metrolite.ytm import lyrics
+
+    audio = tmp_path / "song.opus"
+    audio.touch()
+    monkeypatch.setattr(lyrics, "_lookup_track_local_info", lambda *args: {"local_path": str(audio)})
+    first_ready, refreshed = asyncio.Event(), asyncio.Event()
+    release_provider = asyncio.Event()
+    release_writer = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_save = lyrics.save_local_lrc
+
+    async def cascade(*args, duration, **kwargs):
+        old = duration == 190
+        if old and not delay_writer:
+            first_ready.set()
+            await release_provider.wait()
+        if not old:
+            refreshed.set()
+        return {
+            "lyrics": "original" if old else "refreshed",
+            "synced": [{"type": "line", "text": "line", "time": 5.0 if old else 1.0}],
+        }
+
+    def save(path, synced, plain, payload):
+        if delay_writer and plain == "original":
+            loop.call_soon_threadsafe(first_ready.set)
+            assert release_writer.wait(5)
+        return original_save(path, synced, plain, payload)
+
+    monkeypatch.setattr(lyrics, "_run_provider_cascade", cascade)
+    monkeypatch.setattr(lyrics, "save_local_lrc", save)
+    first = asyncio.create_task(lyrics.resolve_lyrics(None, "song", duration=190))
+    await asyncio.wait_for(first_ready.wait(), 2)
+    second = asyncio.create_task(lyrics.resolve_lyrics(None, "song", duration=198, force=True))
+    try:
+        await asyncio.wait_for(refreshed.wait(), 2)
+        if not delay_writer:
+            await asyncio.wait_for(second, 2)
+    finally:
+        release_provider.set()
+        release_writer.set()
+        first_result, refreshed_result = await asyncio.gather(first, second)
+
+    assert first_result["synced"] == refreshed_result["synced"]
+    assert (await lyrics.resolve_lyrics(None, "song"))["synced"][0]["time"] == 1.0
+    assert lyrics.read_local_lrc(audio)["synced"][0]["time"] == 1.0
+    assert parse_lrc_lines(lyrics.get_local_lrc_path(audio).read_text())[0]["time"] == 1.0
+    assert "song" not in lyrics._INFLIGHT_LYRICS

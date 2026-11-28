@@ -37,6 +37,106 @@ _TRUSTED_THUMBNAIL_DOMAINS = (
 _MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024  # 5 MB hard cap
 CLIENT_FALLBACK_ORDER = ["android", "mweb", "web_embedded", "ios", "tv_embedded"]
 _AUDIO_EXTENSIONS = {".opus", ".m4a", ".mp4", ".ogg", ".webm", ".flac", ".mp3", ".wav", ".aac"}
+_ARTWORK_MIME_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_ARTWORK_EXT_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+
+def _artwork_cache_dir(downloads_dir: Path) -> Path:
+    """Return directory storing locally cached album artwork for offline playback."""
+    return downloads_dir / ".artwork"
+
+
+def _save_artwork_cache(
+    artwork_dir: Path, video_id: str, cover_bytes: bytes, mime_type: str
+) -> None:
+    """Persist fetched/extracted cover image bytes so offline views render without network."""
+    if not cover_bytes:
+        return
+    ext = _ARTWORK_MIME_EXT.get(mime_type.lower(), ".jpg")
+    with suppress(OSError):
+        artwork_dir.mkdir(parents=True, exist_ok=True)
+        for existing in artwork_dir.glob(f"{video_id}.*"):
+            if existing.suffix.lower() != ext:
+                with suppress(OSError):
+                    existing.unlink()
+        target = artwork_dir / f"{video_id}{ext}"
+        tmp = artwork_dir / f".{video_id}.tmp"
+        tmp.write_bytes(cover_bytes)
+        tmp.replace(target)
+
+
+def _read_cached_artwork(artwork_dir: Path, video_id: str) -> tuple[bytes, str] | None:
+    """Read cached artwork bytes from disk for a video_id if present."""
+    if not artwork_dir.is_dir():
+        return None
+    for ext, mime in _ARTWORK_EXT_MIME.items():
+        candidate = artwork_dir / f"{video_id}{ext}"
+        if candidate.is_file():
+            with suppress(OSError):
+                data = candidate.read_bytes()
+                if data:
+                    return data, mime
+    return None
+
+
+def _extract_embedded_artwork_sync(file_path: Path) -> tuple[bytes, str] | None:
+    """Extract embedded cover art bytes from a downloaded audio file using mutagen."""
+    if not file_path.is_file():
+        return None
+    ext = file_path.suffix.lower()
+    try:
+        if ext in (".opus", ".ogg"):
+            from mutagen.flac import Picture
+            from mutagen.oggopus import OggOpus
+            from mutagen.oggvorbis import OggVorbis
+
+            audio = OggOpus(file_path) if ext == ".opus" else OggVorbis(file_path)
+            raw_pics = audio.get("metadata_block_picture") or []
+            if raw_pics:
+                pic = Picture(base64.b64decode(raw_pics[0]))
+                if pic.data:
+                    return bytes(pic.data), (pic.mime or "image/jpeg")
+
+        elif ext in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4, MP4Cover
+
+            audio = MP4(file_path)
+            covers = audio.get("covr") or []
+            if covers:
+                cov = covers[0]
+                img_fmt = getattr(cov, "imageformat", MP4Cover.FORMAT_JPEG)
+                mime = "image/png" if img_fmt == MP4Cover.FORMAT_PNG else "image/jpeg"
+                return bytes(cov), mime
+
+        elif ext == ".mp3":
+            from mutagen.id3 import ID3
+
+            tags = ID3(file_path)
+            for frame in tags.getall("APIC"):
+                if getattr(frame, "data", None):
+                    return bytes(frame.data), (getattr(frame, "mime", None) or "image/jpeg")
+
+        elif ext == ".flac":
+            from mutagen.flac import FLAC
+
+            audio = FLAC(file_path)
+            if audio.pictures:
+                pic = audio.pictures[0]
+                if pic.data:
+                    return bytes(pic.data), (pic.mime or "image/jpeg")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Embedded artwork extraction failed for %s: %s", file_path, e)
+    return None
 
 
 class _DownloadCancelledError(Exception):
@@ -91,6 +191,8 @@ def _embed_metadata(
     album: str | None = None,
     thumbnail_url: str | None = None,
     embed_thumbnail: bool = True,
+    artwork_out_dir: Path | None = None,
+    video_id: str | None = None,
 ) -> None:
     """Embed title, artist, album, and thumbnail cover into audio file using mutagen."""
     if not file_path.is_file():
@@ -130,8 +232,14 @@ def _embed_metadata(
                                 ctype = resp.headers.get("content-type", "").lower()
                                 if "png" in ctype or thumbnail_url.lower().endswith(".png"):
                                     cover_mime = "image/png"
+                                elif "webp" in ctype or thumbnail_url.lower().endswith(".webp"):
+                                    cover_mime = "image/webp"
                                 else:
                                     cover_mime = "image/jpeg"
+                                if artwork_out_dir is not None and video_id:
+                                    _save_artwork_cache(
+                                        artwork_out_dir, video_id, cover_bytes, cover_mime
+                                    )
         except (httpx.HTTPError, OSError) as e:
             logger.debug("Failed to fetch thumbnail for embedding from %s: %s", thumbnail_url, e)
     elif embed_thumbnail and thumbnail_url:
@@ -390,6 +498,8 @@ def _download_worker(
             album=album,
             thumbnail_url=thumbnail_url,
             embed_thumbnail=embed_thumbnail,
+            artwork_out_dir=_artwork_cache_dir(downloads_dir),
+            video_id=video_id,
         )
 
     return target_file, extracted_meta
@@ -537,6 +647,9 @@ class DownloadManager:
         """Get the current download status of a track."""
         return self._statuses.get(video_id)
 
+    def list_statuses(self) -> dict[str, DownloadProgress]:
+        return {vid: state for vid, state in self._statuses.items() if state.status != "deleted"}
+
     async def is_downloaded(self, video_id: str) -> bool:
         """Check if a track is downloaded and exists locally on disk."""
         async with get_connection(self.db_path) as conn:
@@ -574,7 +687,9 @@ class DownloadManager:
         track_meta: Track | dict[str, Any] | None = None,
     ) -> str:
         """Check local cache then execute download under semaphore."""
-        async with get_connection(self.db_path) as conn:
+        self._emit_progress(video_id, 0.0, "queued")
+        # SQLite connections each own a worker thread. Bound cache probes as well as downloads.
+        async with self._semaphore, get_connection(self.db_path) as conn:
             cursor = await conn.execute(
                 "SELECT local_path, file_size_bytes FROM tracks WHERE video_id = ?;",
                 (video_id,),
@@ -604,7 +719,6 @@ class DownloadManager:
 
         cancel_event = threading.Event()
         self._cancel_events[video_id] = cancel_event
-        self._emit_progress(video_id, 0.0, "queued")
 
         loop = asyncio.get_running_loop()
 
@@ -793,9 +907,49 @@ class DownloadManager:
             await conn.commit()
             db_updated = upd_cursor.rowcount > 0
 
+        artwork_dir = _artwork_cache_dir(self.downloads_dir)
+        if artwork_dir.is_dir():
+            for art_file in artwork_dir.glob(f"{video_id}.*"):
+                if art_file.is_file():
+                    await _try_unlink(art_file)
+
         self._emit_progress(video_id, 0.0, "deleted")
         logger.info("Deleted download for track %s", video_id)
         return file_deleted or db_updated
+
+    async def get_local_artwork(self, video_id: str) -> tuple[bytes, str] | None:
+        """Return cached or embedded artwork bytes (data, mime_type) for a downloaded track."""
+        validate_video_id(video_id)
+        artwork_dir = _artwork_cache_dir(self.downloads_dir)
+        cached = await asyncio.to_thread(_read_cached_artwork, artwork_dir, video_id)
+        if cached is not None:
+            return cached
+
+        local_path: Path | None = None
+        async with get_connection(self.db_path) as conn:
+            cursor = await conn.execute(
+                "SELECT local_path FROM tracks WHERE video_id = ? LIMIT 1;",
+                (video_id,),
+            )
+            row = await cursor.fetchone()
+            if row and row["local_path"]:
+                local_path = Path(row["local_path"])
+
+        if local_path is None or not local_path.is_file():
+            for candidate in self.downloads_dir.glob(f"{video_id}.*"):
+                if candidate.is_file() and candidate.suffix.lower() in _AUDIO_EXTENSIONS:
+                    local_path = candidate
+                    break
+
+        if local_path is None or not local_path.is_file():
+            return None
+
+        extracted = await asyncio.to_thread(_extract_embedded_artwork_sync, local_path)
+        if extracted is not None:
+            data, mime = extracted
+            await asyncio.to_thread(_save_artwork_cache, artwork_dir, video_id, data, mime)
+            return extracted
+        return None
 
     async def list_downloads(self) -> list[dict[str, Any]]:
         """List all downloaded tracks whose files actually exist on disk."""

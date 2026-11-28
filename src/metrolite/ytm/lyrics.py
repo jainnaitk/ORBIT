@@ -49,7 +49,28 @@ _FEAT_IN_TITLE_RE = re.compile(
 _MAX_LYRICS_CACHE = 64
 _LYRICS_CACHE_SCHEMA_VERSION = 5
 _LYRICS_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
-_INFLIGHT_LYRICS: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
+
+
+class _TrackLyricsRequests:
+    """Share the publication lock across overlapping lookups, including forced refreshes."""
+
+    def __init__(self) -> None:
+        self.write_lock = asyncio.Lock()
+        self.latest: asyncio.Task[dict[str, Any]] | None = None
+        self.query = ""
+        self.pending: set[asyncio.Task[dict[str, Any]]] = set()
+
+    async def result_for(self, task: asyncio.Task[dict[str, Any]], query: str) -> dict[str, Any]:
+        # A REST caller can have its own cache. Do not hand it a superseded result for
+        # the same query, even when the newer request came from a different view.
+        while True:
+            result = await asyncio.shield(task)
+            if self.latest is None or self.latest is task or self.query != query:
+                return dict(result)
+            task = self.latest
+
+
+_INFLIGHT_LYRICS: dict[str, _TrackLyricsRequests] = {}
 _LYRICS_CLIENT_POOL: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
     weakref.WeakKeyDictionary()
 )
@@ -3290,6 +3311,7 @@ async def _run_provider_cascade(
 async def _resolve_lyrics_impl(
     ytm_client: Any,
     video_id: str,
+    requests: _TrackLyricsRequests,
     title: str | None = None,
     artist: str | None = None,
     duration: int | None = None,
@@ -3302,8 +3324,21 @@ async def _resolve_lyrics_impl(
     track_row = await asyncio.to_thread(_lookup_track_local_info, db_path, video_id)
     local_audio = track_row.get("local_path") if track_row else None
 
-    if force:
-        _LYRICS_CACHE.pop(video_id, None)
+    async def publish(payload: dict[str, Any], *, save_offline: bool = False) -> dict[str, Any]:
+        # Task identity is the revision. Serialize writes because a superseded worker thread
+        # may already be inside save_local_lrc when a fresh response arrives.
+        async with requests.write_lock:
+            if requests.latest is not asyncio.current_task():
+                return payload
+            if save_offline and local_audio and Path(local_audio).is_file():
+                saved = await asyncio.to_thread(
+                    save_local_lrc, local_audio, payload.get("synced"), payload.get("lyrics"), payload
+                )
+                if saved:
+                    payload["offline"] = True
+            if requests.latest is asyncio.current_task():
+                _cache_put(video_id, payload)
+        return payload
 
     eff_title = title or (track_row.get("title") if track_row else None)
     eff_artist = artist or (track_row.get("artist") if track_row else None)
@@ -3320,22 +3355,13 @@ async def _resolve_lyrics_impl(
             custom_query=effective_query,
         )
         if result_custom.get("synced") or result_custom.get("lyrics"):
-            if local_audio and Path(local_audio).is_file():
-                saved = await asyncio.to_thread(
-                    save_local_lrc,
-                    local_audio,
-                    result_custom.get("synced"),
-                    result_custom.get("lyrics"),
-                    result_custom,
-                )
-                if saved:
-                    result_custom["offline"] = True
-            _cache_put(video_id, result_custom)
+            return await publish(result_custom, save_offline=True)
         return result_custom
 
     # 1. Offline-first check: sidecar .lyrics.json or .lrc next to local audio file
     if not force and local_audio and Path(local_audio).is_file():
-        offline_lrc = await asyncio.to_thread(read_local_lrc, local_audio)
+        async with requests.write_lock:
+            offline_lrc = await asyncio.to_thread(read_local_lrc, local_audio)
         if offline_lrc:
             # Auto-upgrade any legacy .lrc or pre-v5 .lyrics.json cache once when online
             cache_ver = int(offline_lrc.get("schema_v") or 0)
@@ -3361,24 +3387,18 @@ async def _resolve_lyrics_impl(
                             if _candidate_quality(upgraded) >= _candidate_quality(offline_lrc)
                             else offline_lrc
                         )
-                        saved = await asyncio.to_thread(
-                            save_local_lrc,
-                            local_audio,
-                            chosen.get("synced"),
-                            chosen.get("lyrics"),
-                            chosen,
-                        )
-                        if saved:
-                            chosen["offline"] = True
-                        _cache_put(video_id, chosen)
-                        return chosen
+                        return await publish(chosen, save_offline=True)
                 except Exception as e:  # noqa: BLE001
                     logger.debug("Offline cache upgrade skipped for %s: %s", video_id, e)
-            _cache_put(video_id, offline_lrc)
-            return offline_lrc
+            missing_sidecar = not (
+                get_local_lrc_path(local_audio).is_file() and get_local_lyrics_json_path(local_audio).is_file()
+            )
+            if missing_sidecar and video_id in _LYRICS_CACHE:
+                return await publish(dict(_LYRICS_CACHE[video_id]), save_offline=True)
+            return await publish(offline_lrc, save_offline=missing_sidecar)
 
     # 2. Memory LRU cache hit
-    if video_id in _LYRICS_CACHE:
+    if not force and video_id in _LYRICS_CACHE:
         _LYRICS_CACHE.move_to_end(video_id)
         cached = dict(_LYRICS_CACHE[video_id])
         local_audio_path = Path(local_audio) if local_audio else None
@@ -3386,22 +3406,16 @@ async def _resolve_lyrics_impl(
         if (
             has_local_audio
             and local_audio_path is not None
-            and not get_local_lrc_path(local_audio_path).is_file()
+            and (
+                not get_local_lrc_path(local_audio_path).is_file()
+                or not get_local_lyrics_json_path(local_audio_path).is_file()
+            )
             and (cached.get("synced") or cached.get("lyrics"))
         ):
-            saved = await asyncio.to_thread(
-                save_local_lrc,
-                local_audio_path,
-                cached.get("synced"),
-                cached.get("lyrics"),
-                cached,
-            )
-            if saved:
-                cached["offline"] = True
-                _cache_put(video_id, cached)
+            return await publish(cached, save_offline=True)
         elif not has_local_audio and cached.get("offline"):
             cached["offline"] = False
-            _cache_put(video_id, cached)
+            return await publish(cached)
         return cached
 
     # 3. 5-provider ranked cascade
@@ -3414,13 +3428,7 @@ async def _resolve_lyrics_impl(
     )
 
     if result.get("synced") or result.get("lyrics"):
-        if local_audio and Path(local_audio).is_file():
-            saved = await asyncio.to_thread(
-                save_local_lrc, local_audio, result.get("synced"), result.get("lyrics"), result
-            )
-            if saved:
-                result["offline"] = True
-        _cache_put(video_id, result)
+        return await publish(result, save_offline=True)
 
     return result
 
@@ -3438,23 +3446,30 @@ async def resolve_lyrics(
 ) -> dict[str, Any]:
     """Resolve lyrics with in-flight task deduplication so concurrent fetches share one cascade."""
     eff_query = (query or custom_query or "").strip()
-    if not force and not eff_query and video_id in _LYRICS_CACHE:
+    requests = _INFLIGHT_LYRICS.get(video_id)
+    if requests is not None:
+        latest = requests.latest
+        if latest is not None and latest.get_loop() is not asyncio.get_running_loop():
+            requests = None
+        elif not force and latest is not None and not latest.done() and requests.query == eff_query:
+            return await requests.result_for(latest, eff_query)
+    if not force and not eff_query and db_path is None and video_id in _LYRICS_CACHE:
         _LYRICS_CACHE.move_to_end(video_id)
         cached = dict(_LYRICS_CACHE[video_id])
         if cached.get("synced") or cached.get("lyrics"):
             return cached
 
-    inflight_key = (video_id, eff_query)
-    loop = asyncio.get_running_loop()
-    if not force:
-        existing = _INFLIGHT_LYRICS.get(inflight_key)
-        if existing is not None and not existing.done() and existing.get_loop() is loop:
-            return dict(await asyncio.shield(existing))
+    if requests is None:
+        requests = _TrackLyricsRequests()
+        _INFLIGHT_LYRICS[video_id] = requests
+    if force:
+        _LYRICS_CACHE.pop(video_id, None)
 
     task = asyncio.create_task(
         _resolve_lyrics_impl(
             ytm_client,
             video_id=video_id,
+            requests=requests,
             title=title,
             artist=artist,
             duration=duration,
@@ -3464,18 +3479,20 @@ async def resolve_lyrics(
             db_path=db_path,
         )
     )
-    if not force:
-        _INFLIGHT_LYRICS[inflight_key] = task
+    requests.latest = task
+    requests.query = eff_query
+    requests.pending.add(task)
 
-        def _cleanup(done_task: asyncio.Task[dict[str, Any]], key: tuple[str, str] = inflight_key) -> None:
-            if _INFLIGHT_LYRICS.get(key) is done_task:
-                _INFLIGHT_LYRICS.pop(key, None)
-            if not done_task.cancelled():
-                done_task.exception()
+    def _cleanup(done_task: asyncio.Task[dict[str, Any]]) -> None:
+        requests.pending.discard(done_task)
+        if not requests.pending and _INFLIGHT_LYRICS.get(video_id) is requests:
+            del _INFLIGHT_LYRICS[video_id]
+        if not done_task.cancelled():
+            done_task.exception()
 
-        task.add_done_callback(_cleanup)
+    task.add_done_callback(_cleanup)
 
-    return dict(await asyncio.shield(task))
+    return await requests.result_for(task, eff_query)
 
 
 def _get_lyrics_prefetch_semaphore() -> asyncio.Semaphore:
@@ -3556,7 +3573,7 @@ async def cache_lyrics_for_download(
     audio_path = Path(track_row["local_path"])
     if not audio_path.is_file():
         return False
-    if get_local_lrc_path(audio_path).is_file():
+    if get_local_lrc_path(audio_path).is_file() and get_local_lyrics_json_path(audio_path).is_file():
         return True
 
     res = await resolve_lyrics(
@@ -3567,7 +3584,10 @@ async def cache_lyrics_for_download(
         duration=track_row.get("duration_s"),
         db_path=db_path,
     )
-    return bool(res.get("synced") or res.get("lyrics"))
+    if (res.get("synced") or res.get("lyrics")) and not res.get("offline"):
+        # A shared prefetch may have started before the audio download committed.
+        res = await resolve_lyrics(ytm_client, video_id, db_path=db_path)
+    return bool(res.get("offline"))
 
 
 async def backfill_downloaded_lyrics(ytm_client: Any, db_path: Path | str | None) -> int:

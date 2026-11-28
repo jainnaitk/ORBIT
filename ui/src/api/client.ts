@@ -15,6 +15,8 @@ import type {
   EqPreset,
   FollowedArtist,
   HomeSection,
+  ImportDestination,
+  ImportJobState,
   ListeningStats,
   LyricsResponse,
   PersonalizedHomeResponse,
@@ -324,9 +326,13 @@ export class BridgeApiClient {
   private config: BridgeConfig | null = null;
   private preloadedIds: Set<string> = new Set();
   private lyricsCache: Map<string, LyricsResponse> = new Map();
-  private lyricsInflight: Map<string, Promise<LyricsResponse>> = new Map();
+  private lyricsInflight = new Map<string, { query?: string; result: Promise<LyricsResponse> }>();
   private lyricsPrefetchedIds: Set<string> = new Set();
+  private localArtworkUrls: Map<string, string> = new Map();
+  private localArtworkInflight: Map<string, Promise<string | null>> = new Map();
+  private localArtworkMissUntil: Map<string, number> = new Map();
   private static readonly MAX_LYRICS_CACHE = 32;
+  private static readonly MAX_LOCAL_ARTWORK_CACHE = 120;
 
   constructor(config?: BridgeConfig) {
     if (config) this.config = config;
@@ -358,7 +364,10 @@ export class BridgeApiClient {
       return this.request<T>(path, options, true);
     }
     if (!res.ok) throw new Error(`Bridge API HTTP ${res.status}: ${res.statusText}`);
-    return (await res.json()) as T;
+    const data = await res.json();
+    if (path === '/queue' && data.playback_error) throw new Error(data.playback_error);
+    if (path.startsWith('/player/') && data?.status === 'error') throw new Error(data.error || 'Playback failed');
+    return data as T;
   }
 
   public getCachedLyrics(videoId: string): LyricsResponse | null {
@@ -393,10 +402,10 @@ export class BridgeApiClient {
   ): Promise<LyricsResponse> {
     const customQuery = options?.query?.trim();
     if (!options?.force && !customQuery) {
+      const pending = this.lyricsInflight.get(videoId);
+      if (pending && !pending.query) return pending.result;
       const cached = this.getCachedLyrics(videoId);
       if (cached) return cached;
-      const pending = this.lyricsInflight.get(videoId);
-      if (pending) return pending;
     }
 
     const params = new URLSearchParams();
@@ -412,22 +421,23 @@ export class BridgeApiClient {
     const qs = params.toString();
     const reqPromise = this.request<LyricsResponse>(
       `/lyrics/${encodeURIComponent(videoId)}${qs ? '?' + qs : ''}`
-    ).then((res) => {
-      if (!customQuery) {
-        this.setCachedLyrics(videoId, res);
+    );
+    // A refresh replaces the pending request for this song, including a hover prefetch.
+    const request = { query: customQuery, result: reqPromise };
+    this.lyricsInflight.set(videoId, request);
+    try {
+      const res = await reqPromise;
+      const latest = this.lyricsInflight.get(videoId);
+      if (latest !== request) {
+        if (latest && latest.query === customQuery) return latest.result;
+        return (!customQuery && this.getCachedLyrics(videoId)) || res;
       }
+      if (!customQuery) this.setCachedLyrics(videoId, res);
+      else if (res.synced?.length || res.lyrics) this.lyricsCache.delete(videoId);
       return res;
-    });
-
-    if (!options?.force && !customQuery) {
-      this.lyricsInflight.set(videoId, reqPromise);
-      reqPromise.finally(() => {
-        if (this.lyricsInflight.get(videoId) === reqPromise) {
-          this.lyricsInflight.delete(videoId);
-        }
-      });
+    } finally {
+      if (this.lyricsInflight.get(videoId) === request) this.lyricsInflight.delete(videoId);
     }
-    return reqPromise;
   }
 
   public prefetchLyrics(
@@ -516,6 +526,26 @@ export class BridgeApiClient {
     return Array.isArray(res) ? res : res.results || [];
   }
 
+  public getSearchHistory(): Promise<{ terms: string[]; tracks: Track[] }> {
+    return this.request('/search/history');
+  }
+
+  public rememberSearch(entry: { term: string } | { track: Track }): Promise<void> {
+    return this.request('/search/history', { method: 'POST', body: JSON.stringify(entry) });
+  }
+
+  public clearHistory(): Promise<void> {
+    return this.request('/history', { method: 'DELETE' });
+  }
+
+  public getPlaybackState(): Promise<PlaybackTick> {
+    return this.request('/player/state');
+  }
+
+  public getDownloadStatuses(): Promise<Record<string, DownloadProgress>> {
+    return this.request('/downloads/status');
+  }
+
   public async getArtistProfile(name?: string, channelId?: string): Promise<ArtistProfile> {
     const params = new URLSearchParams();
     if (name && name.trim()) params.set('name', name.trim());
@@ -591,6 +621,7 @@ export class BridgeApiClient {
     index?: number;
     from_idx?: number;
     to_idx?: number;
+    target_source?: 'user' | 'radio';
     shuffle?: boolean;
     repeat_mode?: string;
     autoplay_radio?: boolean;
@@ -603,8 +634,8 @@ export class BridgeApiClient {
     });
   }
 
-  public async setQueue(items: Track[], startIndex: number = 0, autoPlay: boolean = true): Promise<QueueData> {
-    return this.updateQueue({ action: 'set', items, start_index: startIndex, auto_play: autoPlay });
+  public async setQueue(items: Track[], startIndex: number = 0, autoPlay: boolean = true, shuffle?: boolean): Promise<QueueData> {
+    return this.updateQueue({ action: 'set', items, start_index: startIndex, auto_play: autoPlay, shuffle });
   }
 
   public async jumpQueue(index: number, autoPlay: boolean = true): Promise<QueueData> {
@@ -627,8 +658,12 @@ export class BridgeApiClient {
     return this.updateQueue({ action: 'remove', index });
   }
 
-  public async moveQueue(from_idx: number, to_idx: number): Promise<QueueData> {
-    return this.updateQueue({ action: 'move', from_idx, to_idx });
+  public async moveQueue(
+    from_idx: number,
+    to_idx: number,
+    target_source?: 'user' | 'radio'
+  ): Promise<QueueData> {
+    return this.updateQueue({ action: 'move', from_idx, to_idx, target_source });
   }
 
   public async promoteQueue(index: number): Promise<QueueData> {
@@ -882,6 +917,114 @@ export class BridgeApiClient {
   public async getArtistsNewReleases(refresh: boolean = false): Promise<ArtistNewRelease[]> {
     return this.request(`/artists/new-releases?refresh=${refresh ? 'true' : 'false'}`);
   }
+
+  public async importFromUrl(params: {
+    url: string;
+    destination: ImportDestination;
+    playlist_name?: string | null;
+    target_playlist_id?: string | null;
+  }): Promise<ImportJobState> {
+    return this.request('/import/url', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  public async getImportJob(jobId: string): Promise<ImportJobState> {
+    return this.request(`/import/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  public async cancelImportJob(jobId: string): Promise<ImportJobState> {
+    return this.request(`/import/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  public getCachedLocalArtworkUrl(videoId?: string | null): string | null {
+    if (!videoId) return null;
+    const hit = this.localArtworkUrls.get(videoId);
+    if (!hit) return null;
+    this.localArtworkUrls.delete(videoId);
+    this.localArtworkUrls.set(videoId, hit);
+    return hit;
+  }
+
+  public invalidateLocalArtwork(videoId?: string | null): void {
+    if (!videoId) return;
+    this.localArtworkMissUntil.delete(videoId);
+    const existing = this.localArtworkUrls.get(videoId);
+    if (existing) {
+      this.localArtworkUrls.delete(videoId);
+      try {
+        URL.revokeObjectURL(existing);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  public async getLocalArtworkUrl(videoId: string): Promise<string | null> {
+    if (!videoId) return null;
+    const cached = this.getCachedLocalArtworkUrl(videoId);
+    if (cached) return cached;
+
+    const missUntil = this.localArtworkMissUntil.get(videoId);
+    if (missUntil && Date.now() < missUntil) return null;
+
+    const inflight = this.localArtworkInflight.get(videoId);
+    if (inflight) return inflight;
+
+    const task = (async (): Promise<string | null> => {
+      try {
+        let { base, token } = await this.getBaseUrl(false);
+        const path = `/downloads/${encodeURIComponent(videoId)}/artwork`;
+        let res = await fetch(`${base}${path}`, {
+          headers: token ? { 'X-Bridge-Token': token } : {},
+        });
+        if (res.status === 401) {
+          this.config = null;
+          ({ base, token } = await this.getBaseUrl(true));
+          res = await fetch(`${base}${path}`, {
+            headers: token ? { 'X-Bridge-Token': token } : {},
+          });
+        }
+        if (!res.ok) {
+          this.localArtworkMissUntil.set(videoId, Date.now() + 20_000);
+          return null;
+        }
+        const blob = await res.blob();
+        if (!blob || blob.size === 0) {
+          this.localArtworkMissUntil.set(videoId, Date.now() + 20_000);
+          return null;
+        }
+        const objectUrl = URL.createObjectURL(blob);
+        this.localArtworkMissUntil.delete(videoId);
+        if (this.localArtworkUrls.size >= BridgeApiClient.MAX_LOCAL_ARTWORK_CACHE) {
+          const oldestKey = this.localArtworkUrls.keys().next().value;
+          if (oldestKey) {
+            const oldestUrl = this.localArtworkUrls.get(oldestKey);
+            this.localArtworkUrls.delete(oldestKey);
+            if (oldestUrl) {
+              try {
+                URL.revokeObjectURL(oldestUrl);
+              } catch {
+                // Ignore
+              }
+            }
+          }
+        }
+        this.localArtworkUrls.set(videoId, objectUrl);
+        return objectUrl;
+      } catch {
+        return null;
+      } finally {
+        this.localArtworkInflight.delete(videoId);
+      }
+    })();
+
+    this.localArtworkInflight.set(videoId, task);
+    return task;
+  }
 }
 
 export const bridgeApi = new BridgeApiClient();
@@ -1124,6 +1267,11 @@ export function useBridge() {
   const [lastError, setLastError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
+  const switchSequence = useRef(0);
+  const confirmedPlayback = useRef<PlaybackTick | null>(null);
+  const confirmedQueue = useRef<QueueData | null>(null);
+  const downloadRevision = useRef(0);
+  const downloadUpdates = useRef(new Map<string, number>());
 
   const syncInitialState = useCallback(async () => {
     try {
@@ -1132,13 +1280,30 @@ export function useBridge() {
       setConfig(cfg);
       bridgeApi.setConfig(cfg);
 
-      const [qData, healthData, updData] = await Promise.allSettled([
+      const revision = downloadRevision.current;
+      const priorQueue = confirmedQueue.current;
+      const [qData, healthData, updData, jobs] = await Promise.allSettled([
         bridgeApi.getQueue(),
         bridgeApi.getHealth(),
         bridgeApi.getUpdateStatus(),
+        bridgeApi.getDownloadStatuses(),
       ]);
 
-      if (qData.status === 'fulfilled' && mountedRef.current) setQueue(qData.value);
+      if (!mountedRef.current) return;
+      if (qData.status === 'fulfilled' && priorQueue === confirmedQueue.current) {
+        confirmedQueue.current = qData.value;
+        setQueue(qData.value);
+      }
+      if (jobs.status === 'fulfilled') {
+        setDownloads(prev => {
+          const next = { ...jobs.value };
+          for (const [id, state] of Object.entries(prev)) {
+            if ((downloadUpdates.current.get(id) ?? 0) > revision) next[id] = state;
+            else if (!next[id] && state.status === 'queued') next[id] = { ...state, status: 'error', error: 'Download not queued. Retry.' };
+          }
+          return next;
+        });
+      }
       if (healthData.status === 'fulfilled' && mountedRef.current) setLastError(null);
       if (updData.status === 'fulfilled' && mountedRef.current) setUpdateState(updData.value);
     } catch (err: any) {
@@ -1159,6 +1324,7 @@ export function useBridge() {
     });
 
     const unsubPlayback = bridgeSocket.on('playback_tick', (tick) => {
+      confirmedPlayback.current = tick;
       if (mountedRef.current) {
         if (tick.state === 'playing') setLastError(null);
         setPlayback((prev) => {
@@ -1180,21 +1346,28 @@ export function useBridge() {
     const unsubTrackChanged = bridgeSocket.on('track_changed', (evt) => {
       if (mountedRef.current) {
         const nextTrack = evt.current_track !== undefined ? evt.current_track : evt.track ?? null;
-        setPlayback((prev) => ({
+        const confirmed: PlaybackTick = {
           time_pos: evt.time_pos ?? 0,
           duration: evt.duration ?? nextTrack?.duration_s ?? 0,
           state: evt.state ?? (nextTrack ? 'playing' : 'stopped'),
-          volume: prev ? prev.volume : 80,
+          volume: confirmedPlayback.current?.volume ?? 80,
           current_track: nextTrack,
-        }));
+        };
+        confirmedPlayback.current = confirmed;
+        setPlayback(confirmed);
       }
     });
 
     const unsubQueue = bridgeSocket.on('queue_changed', (qData) => {
+      confirmedQueue.current = qData;
       if (mountedRef.current) setQueue(qData);
     });
 
     const unsubDownload = bridgeSocket.on('download_progress', (p) => {
+      downloadUpdates.current.set(p.video_id, ++downloadRevision.current);
+      if (p.status === 'completed' || p.status === 'deleted') {
+        bridgeApi.invalidateLocalArtwork(p.video_id);
+      }
       if (mountedRef.current) {
         setDownloads((prev) => ({ ...prev, [p.video_id]: p }));
       }
@@ -1231,10 +1404,33 @@ export function useBridge() {
 
   const beginOptimisticSwitch = useCallback((track: Track | null) => {
     bridgeSocket.beginOptimisticSwitch(track);
+    return ++switchSequence.current;
   }, []);
 
-  const clearOptimisticSwitch = useCallback((expectedVideoId?: string) => {
-    bridgeSocket.clearOptimisticSwitch(expectedVideoId);
+  const recoverPlayback = useCallback(async (sequence: number) => {
+    if (sequence !== switchSequence.current) return;
+    bridgeSocket.clearOptimisticSwitch();
+    const priorTick = confirmedPlayback.current;
+    const priorQueue = confirmedQueue.current;
+    const applyTick = (tick: PlaybackTick | null) => {
+      bridgeSocket.latestTimePos = tick?.time_pos ?? 0;
+      bridgeSocket.latestDuration = tick?.duration ?? 0;
+      bridgeSocket.latestTrackId = tick?.current_track?.video_id ?? null;
+      bridgeSocket.latestTickAt = performance.now();
+      setPlayback(tick);
+    };
+    applyTick(priorTick);
+    setQueue(priorQueue);
+    const [tick, q] = await Promise.allSettled([bridgeApi.getPlaybackState(), bridgeApi.getQueue()]);
+    if (!mountedRef.current || sequence !== switchSequence.current) return;
+    if (tick.status === 'fulfilled' && confirmedPlayback.current === priorTick) {
+      confirmedPlayback.current = tick.value;
+      applyTick(tick.value);
+    }
+    if (q.status === 'fulfilled' && confirmedQueue.current === priorQueue) {
+      confirmedQueue.current = q.value;
+      setQueue(q.value);
+    }
   }, []);
 
   return {
@@ -1252,6 +1448,6 @@ export function useBridge() {
     lastError,
     reconnect,
     beginOptimisticSwitch,
-    clearOptimisticSwitch,
+    recoverPlayback,
   };
 }

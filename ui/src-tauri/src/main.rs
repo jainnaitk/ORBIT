@@ -97,7 +97,7 @@ fn read_backend_log_tail(max_lines: usize) -> String {
 
 #[cfg(windows)]
 mod win_mem {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::ffi::c_void;
     use std::mem::size_of;
 
@@ -289,11 +289,16 @@ mod win_mem {
             }
 
             let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+            let mut webviews = HashSet::new();
             let mut entry: ProcessEntry32W = std::mem::zeroed();
             entry.dw_size = size_of::<ProcessEntry32W>() as u32;
 
             if Process32FirstW(snap, &mut entry) != 0 {
                 loop {
+                    let end = entry.sz_exe_file.iter().position(|&c| c == 0).unwrap_or(entry.sz_exe_file.len());
+                    if String::from_utf16_lossy(&entry.sz_exe_file[..end]).eq_ignore_ascii_case("msedgewebview2.exe") {
+                        webviews.insert(entry.th32_process_id);
+                    }
                     children_map
                         .entry(entry.th32_parent_process_id)
                         .or_default()
@@ -313,6 +318,7 @@ mod win_mem {
                 if let Some(kids) = children_map.get(&pid) {
                     for &child_pid in kids {
                         queue.push_back(child_pid);
+                        if !webviews.contains(&child_pid) { continue; }
                         let h = OpenProcess(
                             PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION,
                             0,
@@ -1259,6 +1265,18 @@ fn terminate_sidecar() {
     }
 }
 
+fn wait_for_sidecar_exit() {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let running = SIDECAR_CHILD.lock().ok().and_then(|mut slot| {
+            slot.as_mut().map(|child| matches!(child.try_wait(), Ok(None)))
+        }).unwrap_or(false);
+        if !running { return; }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    terminate_sidecar();
+}
+
 fn quit_application(app: &AppHandle) {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
     TRAY_MOVE_REQUESTED.store(false, Ordering::SeqCst);
@@ -1281,13 +1299,12 @@ fn quit_application(app: &AppHandle) {
                 let _ = client
                     .post(&url)
                     .header("X-Bridge-Token", cfg.token)
-                    .timeout(Duration::from_millis(600))
+                    .timeout(Duration::from_secs(8))
                     .send()
                     .await;
             });
         }
-        std::thread::sleep(Duration::from_millis(120));
-        terminate_sidecar();
+        wait_for_sidecar_exit();
         app_handle.exit(0);
     });
 }
@@ -1320,6 +1337,18 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
         return Err(format!("Unsupported installer format: .{ext}"));
     }
 
+    let cfg = get_bridge_config()?;
+    let verified_path = reqwest::Client::new()
+        .get(format!("http://{}:{}/updates/verified-path", cfg.host, cfg.port))
+        .header("X-Bridge-Token", &cfg.token)
+        .timeout(Duration::from_secs(15))
+        .send().await.map_err(|e| e.to_string())?
+        .error_for_status().map_err(|_| "Installer verification failed".to_string())?
+        .json::<String>().await.map_err(|e| e.to_string())?;
+    if fs::canonicalize(verified_path).map_err(|e| e.to_string())? != canon_target {
+        return Err("The selected installer no longer matches the current release".to_string());
+    }
+
     // Strip Win32 extended-length prefix (\\?\) so NSIS / msiexec accept the path cleanly
     let launch_path = canon_target
         .to_string_lossy()
@@ -1329,7 +1358,6 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
 
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
 
-    let bridge_cfg = get_bridge_config().ok();
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
@@ -1341,27 +1369,21 @@ async fn launch_update_installer(app: AppHandle, installer_path: String) -> Resu
             let _ = win.hide();
         }
         // 1. Gracefully stop backend & sidecar BEFORE launching NSIS so zero files are locked
-        if let Some(cfg) = bridge_cfg {
-            let client = reqwest::Client::new();
-            let url = format!("http://{}:{}/shutdown", cfg.host, cfg.port);
-            tauri::async_runtime::block_on(async {
-                let _ = client
-                    .post(&url)
-                    .header("X-Bridge-Token", cfg.token)
-                    .timeout(Duration::from_millis(500))
-                    .send()
-                    .await;
-            });
-            for _ in 0..15 {
-                if !is_bridge_healthy() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(80));
+        let client = reqwest::Client::new();
+        let url = format!("http://{}:{}/shutdown", cfg.host, cfg.port);
+        tauri::async_runtime::block_on(async {
+            let _ = client.post(&url)
+                .header("X-Bridge-Token", cfg.token)
+                .timeout(Duration::from_secs(8))
+                .send().await;
+        });
+        for _ in 0..15 {
+            if !is_bridge_healthy() {
+                break;
             }
-        } else {
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_millis(80));
         }
-        terminate_sidecar();
+        wait_for_sidecar_exit();
 
         // 2. Spawn installer completely detached from orbit.exe (outside WINDOWS_JOB)
         #[cfg(windows)]

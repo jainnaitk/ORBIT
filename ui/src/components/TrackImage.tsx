@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Music } from 'lucide-react';
+import { bridgeApi } from '../api/client';
 
 interface TrackImageProps {
   src?: string | null;
@@ -72,13 +73,66 @@ export const TrackImage = ({
   eager = false,
 }: TrackImageProps) => {
   const candidates = buildCandidates(src, videoId, size);
+  const [isOffline, setIsOffline] = useState<boolean>(
+    () => typeof navigator !== 'undefined' && navigator.onLine === false
+  );
   const key = `${src || ''}|${videoId || ''}|${size}`;
   const [stageState, setStageState] = useState<{ key: string; stage: number }>({ key, stage: 0 });
-  const stage = stageState.key === key ? stageState.stage : 0;
-  const activeUrl = candidates[stage];
+  const [localArt, setLocalArt] = useState<{ videoId: string; url: string | null }>({
+    videoId: videoId || '',
+    url: videoId ? bridgeApi.getCachedLocalArtworkUrl(videoId) : null,
+  });
 
-  const isCached = Boolean(activeUrl && __LOADED_IMAGE_URLS__.has(activeUrl));
-  const [loadedUrl, setLoadedUrl] = useState<string | null>(isCached ? activeUrl : null);
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOffline(false);
+      setStageState((prev) => ({ key: prev.key, stage: 0 }));
+    };
+    const onOffline = () => setIsOffline(true);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  const stage = stageState.key === key ? stageState.stage : 0;
+  const remoteUrl = isOffline ? undefined : candidates[stage];
+  const needsLocalFallback = Boolean(videoId) && (isOffline || !remoteUrl);
+
+  useEffect(() => {
+    if (!needsLocalFallback || !videoId) return;
+    const cached = bridgeApi.getCachedLocalArtworkUrl(videoId);
+    if (cached) {
+      setLocalArt({ videoId, url: cached });
+      return;
+    }
+    let cancelled = false;
+    void bridgeApi.getLocalArtworkUrl(videoId).then((resolved) => {
+      if (!cancelled) {
+        setLocalArt({ videoId, url: resolved });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsLocalFallback, videoId]);
+
+  const localUrl =
+    videoId && localArt.videoId === videoId
+      ? localArt.url
+      : videoId
+      ? bridgeApi.getCachedLocalArtworkUrl(videoId)
+      : null;
+
+  const activeUrl = remoteUrl || localUrl || undefined;
+  const usingLocalBlob = Boolean(!remoteUrl && localUrl);
+
+  const isCached = Boolean(
+    activeUrl && (usingLocalBlob || __LOADED_IMAGE_URLS__.has(activeUrl))
+  );
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(isCached ? activeUrl || null : null);
   const imgRef = useRef<HTMLImageElement>(null);
 
   const isLoaded = isCached || (Boolean(activeUrl) && loadedUrl === activeUrl);
@@ -119,11 +173,18 @@ export const TrackImage = ({
         draggable={false}
         referrerPolicy="no-referrer"
         onLoad={() => {
-          markUrlLoaded(activeUrl);
+          if (!usingLocalBlob) {
+            markUrlLoaded(activeUrl);
+          }
           setLoadedUrl(activeUrl);
         }}
         onError={() => {
-          setStageState({ key, stage: stage + 1 });
+          if (remoteUrl) {
+            setStageState({ key, stage: stage + 1 });
+          } else if (videoId) {
+            bridgeApi.invalidateLocalArtwork(videoId);
+            setLocalArt({ videoId, url: null });
+          }
         }}
         className={`${className} ${isCached ? '' : 'transition-opacity duration-150'} ${
           isLoaded ? 'opacity-100' : 'opacity-0'

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Self
 
 import yt_dlp
-from yt_dlp.utils import DownloadError as YtDlpDownloadError
 
 from metrolite.config import get_config
 from metrolite.library.downloader import validate_video_id
@@ -261,29 +260,18 @@ class StreamResolver:
             attempts.append(("bestaudio*/best", fallback_c))
 
         last_err: Exception | None = None
-        try:
-            for idx, (fmt, client_name) in enumerate(attempts):
-                try:
-                    res = _extract(_build_opts(fmt, client_name))
-                    with self._meta_lock:
-                        self._working_client = client_name
-                    return res
-                except (YtDlpDownloadError, Exception) as e:  # noqa: BLE001
-                    last_err = e
-                    msg = str(e).lower()
-                    retryable = (
-                        "requested format is not available" in msg
-                        or "not a bot" in msg
-                        or "sign in" in msg
-                        or "403" in msg
-                    )
-                    if not retryable or idx == len(attempts) - 1:
-                        break
-        finally:
-            with suppress(Exception):
-                from metrolite.audio.player import trim_memory
-
-                trim_memory()
+        for idx, (fmt, client_name) in enumerate(attempts):
+            try:
+                res = _extract(_build_opts(fmt, client_name))
+                with self._meta_lock:
+                    self._working_client = client_name
+                return res
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                msg = str(e).lower()
+                retryable = any(reason in msg for reason in ("requested format is not available", "not a bot", "sign in", "403"))
+                if not retryable or idx == len(attempts) - 1:
+                    break
 
         if isinstance(last_err, StreamResolutionError):
             raise last_err

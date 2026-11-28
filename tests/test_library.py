@@ -475,6 +475,51 @@ async def test_downloader_restart_persistence(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_download_manager_local_artwork_cache_and_cleanup(tmp_path: Path) -> None:
+    """Verify local offline artwork cache read, bridge endpoint serving, and cleanup."""
+    from fastapi.testclient import TestClient
+
+    from metrolite.audio.player import AudioPlayer
+    from metrolite.bridge.server import BridgeController, create_app
+    from metrolite.library.downloader import _artwork_cache_dir, _save_artwork_cache
+    from metrolite.ytm.client import YTMusicClient
+
+    db_file = tmp_path / "dl_art.db"
+    dls_dir = tmp_path / "downloads"
+    await init_db(db_file)
+    dls_dir.mkdir(parents=True, exist_ok=True)
+    audio_file = dls_dir / "offline_art_1.opus"
+    audio_file.write_bytes(b"opus")
+
+    fake_jpg = b"\xff\xd8\xff\xe0MOCKJPEG"
+    _save_artwork_cache(_artwork_cache_dir(dls_dir), "offline_art_1", fake_jpg, "image/jpeg")
+
+    mgr = DownloadManager(db_path=db_file, downloads_dir=dls_dir)
+    art = await mgr.get_local_artwork("offline_art_1")
+    assert art == (fake_jpg, "image/jpeg")
+    assert await mgr.get_local_artwork("missing_art_1") is None
+
+    ctrl = BridgeController(
+        player=MagicMock(spec=AudioPlayer, state="stopped", current_track=None, next_track=None),
+        downloader=mgr,
+        ytm=MagicMock(spec=YTMusicClient),
+        db_path=db_file,
+    )
+    app = create_app(controller=ctrl, token="art-tok")
+    with TestClient(app) as client:
+        ok = client.get("/downloads/offline_art_1/artwork", headers={"X-Bridge-Token": "art-tok"})
+        assert ok.status_code == 200
+        assert ok.content == fake_jpg
+        assert ok.headers["content-type"].startswith("image/jpeg")
+
+        missing = client.get("/downloads/missing_art_1/artwork", headers={"X-Bridge-Token": "art-tok"})
+        assert missing.status_code == 404
+
+    assert await mgr.delete_download("offline_art_1") is True
+    assert await mgr.get_local_artwork("offline_art_1") is None
+
+
+@pytest.mark.asyncio
 async def test_download_track_without_ffmpeg_saves_actual_container(
     download_mgr: DownloadManager,
 ) -> None:

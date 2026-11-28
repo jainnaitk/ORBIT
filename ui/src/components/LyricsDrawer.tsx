@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { ArtistLinks } from './ArtistLinks';
+import { isTrackDownloaded } from './TrackContextMenu';
 import {
   LyricsOverflowMenu,
   LyricsStageBody,
@@ -95,12 +96,7 @@ export const LyricsDrawer = ({
     dlState?.status === 'downloading' ||
     dlState?.status === 'queued' ||
     dlState?.status === 'tagging';
-  const isDownloaded =
-    !!currentTrack &&
-    (downloadedIds?.has(currentTrack.video_id) ||
-      currentTrack.download_status === 'completed' ||
-      dlState?.status === 'completed' ||
-      !!currentTrack.local_path);
+  const isDownloaded = !!currentTrack && isTrackDownloaded(currentTrack, downloadedIds, downloads);
 
   return (
     <aside
@@ -111,7 +107,7 @@ export const LyricsDrawer = ({
         opacity: visible ? 1 : 0,
         transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease',
       }}
-      className="absolute inset-2 z-30 md:static md:inset-auto md:w-[360px] md:flex-none ios-liquid-drawer rounded-[24px] md:my-1 flex flex-col select-none overflow-hidden"
+      className="orbit-drawer z-30 ios-liquid-drawer rounded-[24px] flex flex-col select-none overflow-hidden"
     >
       {/* Header */}
       <div className="h-12 flex-none px-4 flex items-center justify-between gap-2 border-b border-white/[0.10] bg-white/[0.025]">

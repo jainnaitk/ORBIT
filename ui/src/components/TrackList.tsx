@@ -33,7 +33,7 @@ interface TrackListProps {
   isDownloadsTab?: boolean;
   onPlay: (track: Track, index: number) => void;
   onToggleLike: (track: Track) => void;
-  onDownload: (track: Track) => void;
+  onDownload?: (track: Track) => void;
   onDeleteDownload?: (track: Track) => void;
   onAddNext: (track: Track) => void;
   onAppendQueue: (track: Track) => void;
@@ -124,18 +124,13 @@ export const TrackList = memo(({
   }
 
   return (
-    <>
+    <div className="track-table flex flex-col flex-1 min-w-0 min-h-0" data-downloads={Boolean(onDownload)}>
       <div
-        className="flex-none flex items-center px-3 sm:px-5 py-2 gap-2.5 sm:gap-3.5 border-b border-white/[0.08] bg-white/[0.02] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#7A84A6] select-none"
-        style={{ paddingRight: 'calc(1.25rem + 5px)' }}
+        className="track-columns track-heading flex-none py-2 border-b border-white/[0.08] bg-white/[0.02] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#7A84A6] select-none"
       >
-        <div className="hidden sm:block w-6 flex-none text-center">#</div>
-        <div className="flex-1 min-w-0">Title</div>
-        {showPlayCount && <div className="hidden sm:block flex-none w-16 text-right">Plays</div>}
-        <div className="hidden md:block w-40 flex-none pr-2">Album</div>
-        <div className="w-[34px] sm:w-[62px] flex-none" />
-        <div className="hidden sm:block w-12 text-right flex-none">Time</div>
-        <div className="w-7 flex-none" />
+        <div className="track-number text-center">#</div><div>Title</div>
+        <div className="track-album">Album</div><div />{onDownload && <div className="track-download" />}
+        <div className="track-time text-right">Time</div><div />
       </div>
 
       <div
@@ -183,7 +178,7 @@ export const TrackList = memo(({
                   transform: `translate3d(0, ${virtualRow.start}px, 0)`,
                   contain: 'layout style paint',
                 }}
-                className={`flex items-center px-3 sm:px-5 gap-2.5 sm:gap-3.5 border-b border-white/[0.045] hover:bg-white/[0.06] group cursor-pointer ${
+                className={`track-columns border-b border-white/[0.045] hover:bg-white/[0.06] group cursor-pointer ${
                   isCurrent ? 'bg-white/[0.08]' : ''
                 }`}
                 onClick={() => onPlay(track, virtualRow.index)}
@@ -201,7 +196,7 @@ export const TrackList = memo(({
                     style={{ background: 'var(--dynamic-accent)' }}
                   />
                 )}
-                <div className="hidden sm:flex w-6 flex-none items-center justify-center text-xs text-[#646E8F]">
+                <div className="track-number flex items-center justify-center text-xs text-[#646E8F]">
                   {isCurrent && isPlaying ? (
                     <div className="flex items-end gap-0.5 h-3.5">
                       <span
@@ -233,7 +228,7 @@ export const TrackList = memo(({
                   )}
                 </div>
 
-                <div className="w-9 h-9 sm:w-10 sm:h-10 flex-none rounded-xl bg-black/70 border border-white/15 overflow-hidden">
+                <div className="flex items-center min-w-0 gap-2"><div className="w-9 h-9 flex-none rounded-xl bg-black/70 border border-white/15 overflow-hidden">
                   <TrackImage
                     src={track.thumbnail_url}
                     videoId={track.video_id}
@@ -263,12 +258,13 @@ export const TrackList = memo(({
                 </div>
 
                 {showPlayCount && (track.play_count ?? 0) > 0 && (
-                  <div className="hidden sm:block flex-none text-[10px] font-mono tabular-nums text-[#A6B0CF] bg-white/[0.08] border border-white/12 px-2 py-0.5 rounded-full">
+                  <div className="track-plays flex-none text-[10px] font-mono tabular-nums text-[#A6B0CF] px-1">
                     {track.play_count} {track.play_count === 1 ? 'play' : 'plays'}
                   </div>
                 )}
 
-                <div className="hidden md:block w-40 text-xs text-[#A6B0CF] truncate pr-2">
+                </div>
+                <div className="track-album min-w-0 text-xs text-[#A6B0CF] truncate">
                   {track.album && onOpenAlbum ? (
                     <button
                       type="button"
@@ -303,14 +299,14 @@ export const TrackList = memo(({
                   />
                 </button>
 
-                {isDownloadsTab && isDownloaded && onDeleteDownload ? (
+                {onDownload && (isDownloadsTab && isDownloaded && onDeleteDownload ? (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       onDeleteDownload(track);
                     }}
                     title="Delete offline download"
-                    className="hidden sm:inline-flex p-1.5 text-[#A6B0CF] hover:text-[#FF4D8D] hover:bg-[#FF4D8D]/10 rounded-full transition-colors flex-none"
+                     className="track-download p-1.5 text-[#A6B0CF] hover:text-[#FF4D8D] rounded-full"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -327,7 +323,7 @@ export const TrackList = memo(({
                         ? `Downloading ${dlPct}%`
                         : 'Download track & synced lyrics'
                     }
-                    className="hidden sm:inline-flex p-1.5 text-[#A6B0CF] hover:text-[#34D399] transition-colors flex-none"
+                    className="track-download p-1.5 text-[#A6B0CF] hover:text-[#34D399]"
                   >
                     {isDownloaded ? (
                       <CheckCircle2 size={15} className="text-[#34D399]" />
@@ -340,9 +336,9 @@ export const TrackList = memo(({
                       />
                     )}
                   </button>
-                )}
+                ))}
 
-                <div className="hidden sm:block w-12 text-right font-mono tabular-nums text-xs text-[#A6B0CF] flex-none">
+                <div className="track-time text-right font-mono tabular-nums text-xs text-[#A6B0CF]">
                   {formatDuration(track.duration_s)}
                 </div>
 
@@ -380,6 +376,6 @@ export const TrackList = memo(({
         onDownload={onDownload}
         onDeleteDownload={onDeleteDownload}
       />
-    </>
+    </div>
   );
 });

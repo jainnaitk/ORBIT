@@ -58,6 +58,8 @@ class AudioConfig(BaseModel):
     default_volume: int = 80
     mpv_demuxer_max_mb: int = 6
     mpv_demuxer_back_mb: int = 2
+    readahead_s: float = Field(default=20, gt=0)
+    output_buffer_s: float = Field(default=0.5, gt=0)
     stream_url_ttl_s: int = 18000
     cookies_from_browser: str | None = None
     cookies_file: Path | None = None
@@ -118,7 +120,7 @@ class YTMConfig(BaseModel):
 class UpdatesConfig(BaseModel):
     enabled: bool = True
     github_repo: str = "jainnaitk/ORBIT"
-    current_version: str = "1.3.0"
+    current_version: str = "1.4.0"
     check_on_startup: bool = True
     mirror_base_url: str | None = "https://orbit-music.pages.dev"
 

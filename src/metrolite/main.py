@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from metrolite.config import get_config
+from metrolite.config import UpdatesConfig, get_config
 from metrolite.store.db import init_db_sync
 
 
@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         "--version",
         action="version",
-        version="%(prog)s 0.1.0",
+        version=f"%(prog)s {UpdatesConfig().current_version}",
         help="Show program version and exit.",
     )
     parser.add_argument(

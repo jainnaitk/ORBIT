@@ -1,4 +1,5 @@
 import { memo, useRef, useEffect, useState, useMemo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ChevronLeft,
   ChevronRight,
@@ -72,6 +73,7 @@ export const Titlebar = memo(({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const downloadsPopoverRef = useRef<HTMLDivElement>(null);
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
+  const downloadScrollRef = useRef<HTMLDivElement>(null);
 
   const downloadList = useMemo(
     () => Object.values(downloads).filter((d) => d.status !== 'deleted'),
@@ -84,6 +86,12 @@ export const Titlebar = memo(({
       ),
     [downloadList]
   );
+  const progressRows = useVirtualizer({
+    count: isDownloadsOpen ? downloadList.length : 0,
+    getScrollElement: () => downloadScrollRef.current,
+    estimateSize: () => 82,
+    overscan: 4,
+  });
   const failedDownloads = useMemo(
     () => downloadList.filter((d) => d.status === 'failed' || d.status === 'error'),
     [downloadList]
@@ -136,7 +144,6 @@ export const Titlebar = memo(({
           document.activeElement?.tagName !== 'TEXTAREA')
       ) {
         e.preventDefault();
-        onFocusSearchTab();
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
       }
@@ -195,6 +202,7 @@ export const Titlebar = memo(({
           ref={searchInputRef}
           type="text"
           placeholder="Search..."
+          onFocus={onFocusSearchTab}
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
           onKeyDown={(e) => {
@@ -281,13 +289,15 @@ export const Titlebar = memo(({
                   )}
                 </div>
 
-                <div className="max-h-64 overflow-y-auto no-scrollbar space-y-2">
+                <div ref={downloadScrollRef} className="max-h-64 overflow-y-auto no-scrollbar">
                   {downloadList.length === 0 ? (
                     <div className="py-5 text-center text-[11px] text-[#8E99BA]">
                       No active downloads
                     </div>
                   ) : (
-                    downloadList.map((dl) => {
+                    <div className="relative" style={{ height: progressRows.getTotalSize() }}>
+                    {progressRows.getVirtualItems().map((row) => {
+                      const dl = downloadList[row.index];
                       const meta = downloadTracks[dl.video_id];
                       const pct = Math.max(0, Math.min(100, Math.round(dl.percent ?? dl.progress_pct ?? 0)));
                       const isActive =
@@ -296,7 +306,8 @@ export const Titlebar = memo(({
                       return (
                         <div
                           key={dl.video_id}
-                          className="rounded-xl bg-white/[0.04] border border-white/[0.07] p-2.5"
+                          style={{ transform: `translateY(${row.start}px)`, height: row.size - 5 }}
+                          className="absolute top-0 inset-x-0 rounded-xl bg-white/[0.04] border border-white/[0.07] p-2.5"
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1">
@@ -350,7 +361,7 @@ export const Titlebar = memo(({
                           )}
                         </div>
                       );
-                    })
+                    })}</div>
                   )}
                 </div>
               </div>

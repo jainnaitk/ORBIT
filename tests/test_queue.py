@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -299,6 +300,35 @@ def test_queue_neighbor_tracks_and_repeat_wrap() -> None:
     qm.set_repeat_mode("all")
     wrapped = qm.neighbor_tracks((1, -1, 2, -2))
     assert [t.video_id for t in wrapped] == ["n1", "n3", "n2"]
+
+
+async def test_shutdown_drains_latest_shuffled_edit(temp_db, sample_tracks, monkeypatch):
+    queue = QueueManager(db_path=temp_db, auto_persist=True)
+    started, release = asyncio.Event(), asyncio.Event()
+    save = queue.save_to_db
+
+    async def wait_then_save():
+        started.set()
+        await release.wait()
+        await save()
+
+    monkeypatch.setattr(queue, "save_to_db", wait_then_save)
+    queue.set_queue(sample_tracks, start_index=1)
+    queue.set_shuffle(True)
+    await started.wait()
+    removed = queue.items[2]
+    queue.move(2, 1, target_source="radio")
+    queue.remove(1)
+    drain = asyncio.create_task(queue.flush())
+    await asyncio.sleep(0)
+    assert not drain.done()
+    release.set()
+    await drain
+    restored = QueueManager(db_path=temp_db)
+    assert await restored.load_from_db()
+    restored.set_shuffle(False)
+    assert [t.video_id for t in restored.items] == [t.video_id for t in sample_tracks if t.video_id != removed.video_id]
+    assert restored.current_track.video_id == sample_tracks[1].video_id
 
 
 @pytest.mark.asyncio

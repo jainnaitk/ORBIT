@@ -4,12 +4,12 @@ import {
   Radio,
   Search,
   UserCheck,
-  UserPlus,
   UserRound,
   UsersRound,
   X,
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
+import { useTrackActions } from '../components/TrackContextMenu';
 import { bridgeApi } from '../api/client';
 import type { ArtistsLibraryResponse, LibraryArtistSummary } from '../api/types';
 
@@ -28,6 +28,7 @@ export const ArtistsLibraryView = memo(({
   const [loading, setLoading] = useState<boolean>(true);
   const [filterText, setFilterText] = useState<string>('');
   const [playingArtistKey, setPlayingArtistKey] = useState<string | null>(null);
+  const { onToggleFollowArtist } = useTrackActions();
 
   const loadLibrary = () => {
     bridgeApi
@@ -50,25 +51,28 @@ export const ArtistsLibraryView = memo(({
     return items.filter((a) => a.name.toLowerCase().includes(query));
   }, [data?.followed, query]);
 
-  const inLibrary = useMemo(() => {
-    const items = data?.in_library || [];
-    if (!query) return items;
-    return items.filter((a) => a.name.toLowerCase().includes(query));
-  }, [data?.in_library, query]);
-
-  const handleToggleFollow = async (e: React.MouseEvent, artist: LibraryArtistSummary) => {
+  const handleUnfollow = async (e: React.MouseEvent, artist: LibraryArtistSummary) => {
     e.stopPropagation();
     try {
-      if (artist.is_followed) {
-        await bridgeApi.unfollowArtist(artist.channel_id || artist.name);
-      } else {
-        await bridgeApi.followArtist({
-          channel_id: artist.channel_id,
+      if (onToggleFollowArtist) {
+        await onToggleFollowArtist({
           name: artist.name,
-          thumbnail_url: artist.thumbnail_url,
+          channelId: artist.channel_id,
+          thumbnailUrl: artist.thumbnail_url,
         });
+      } else {
+        await bridgeApi.unfollowArtist(artist.channel_id || artist.name);
       }
-      loadLibrary();
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              followed: prev.followed.filter(
+                (a) => a.artist_norm !== artist.artist_norm && a.channel_id !== artist.channel_id
+              ),
+            }
+          : prev
+      );
       onArtistChanged?.();
     } catch {
       // Ignore
@@ -88,68 +92,10 @@ export const ArtistsLibraryView = memo(({
     }
   };
 
-  const renderArtistCard = (artist: LibraryArtistSummary) => (
-    <div
-      key={`${artist.channel_id}-${artist.artist_norm}`}
-      onClick={() => onOpenArtist(artist.name, artist.channel_id)}
-      className="group ios-liquid-card rounded-2xl p-3.5 flex flex-col items-center text-center cursor-pointer relative"
-    >
-      <div className="relative w-24 h-24 rounded-full overflow-hidden bg-[#06080F] border border-white/15 flex items-center justify-center shadow-lg">
-        {artist.thumbnail_url ? (
-          <TrackImage
-            src={artist.thumbnail_url}
-            size="md"
-            iconSize={28}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-          />
-        ) : (
-          <UserRound size={30} className="text-[#8E99BA]" />
-        )}
-        <button
-          type="button"
-          title={`Play ${artist.name} Radio`}
-          onClick={(e) => void handleStartRadio(e, artist)}
-          className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
-        >
-          {playingArtistKey === artist.artist_norm ? (
-            <Radio size={20} className="animate-pulse text-white" />
-          ) : (
-            <Play size={20} className="fill-white text-white ml-0.5" />
-          )}
-        </button>
-      </div>
-
-      <div className="mt-3 w-full">
-        <div className="text-xs font-semibold text-[#F4F6FF] truncate">{artist.name}</div>
-        <div className="text-[10.5px] text-[#8E99BA] truncate mt-0.5">
-          {artist.track_count > 0
-            ? `${artist.track_count} track${artist.track_count === 1 ? '' : 's'}${
-                artist.offline_count ? ` • ${artist.offline_count} offline` : ''
-              }`
-            : 'Followed Artist'}
-        </div>
-      </div>
-
-      <button
-        type="button"
-        title={artist.is_followed ? 'Unfollow artist' : 'Follow artist'}
-        onClick={(e) => void handleToggleFollow(e, artist)}
-        className={`mt-2.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10.5px] font-medium border transition-colors ${
-          artist.is_followed
-            ? 'bg-white/[0.12] border-white/20 text-[#34D399]'
-            : 'bg-white/[0.05] border-white/[0.10] text-[#B4BEDB] hover:text-white hover:bg-white/[0.12]'
-        }`}
-      >
-        {artist.is_followed ? <UserCheck size={11} /> : <UserPlus size={11} />}
-        <span>{artist.is_followed ? 'Following' : 'Follow'}</span>
-      </button>
-    </div>
-  );
-
   return (
     <div
       style={{ contain: 'layout style' }}
-      className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
+      className="flex-1 min-w-0 flex flex-col h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
     >
       <div className="flex-none p-5 sm:p-6 border-b border-white/[0.08] bg-white/[0.02] flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3.5 min-w-0">
@@ -163,9 +109,11 @@ export const ArtistsLibraryView = memo(({
             >
               Personal Hub
             </span>
-            <h1 className="text-xl sm:text-2xl font-bold text-[#F1F4FA] truncate">Artists</h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-[#F1F4FA] truncate">
+              Followed Artists
+            </h1>
             <p className="text-xs text-[#9AA5C4] mt-0.5">
-              {followed.length} followed • {inLibrary.length} in library
+              {followed.length} followed artist{followed.length === 1 ? '' : 's'}
             </p>
           </div>
         </div>
@@ -176,7 +124,7 @@ export const ArtistsLibraryView = memo(({
             type="text"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
-            placeholder="Filter artists..."
+            placeholder="Filter followed artists..."
             className="bg-transparent text-xs text-[#F4F6FF] placeholder-[#6D7796] focus:outline-none flex-1 min-w-0"
           />
           {filterText && (
@@ -191,45 +139,83 @@ export const ArtistsLibraryView = memo(({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-7">
+      <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 sm:p-6 space-y-6">
         {loading && !data ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5 eh-skeleton">
+          <div
+            className="grid gap-3.5 eh-skeleton"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(156px, 1fr))' }}
+          >
             {Array.from({ length: 10 }).map((_, i) => (
               <div key={i} className="h-44 rounded-2xl ios-liquid-card" />
             ))}
           </div>
-        ) : followed.length === 0 && inLibrary.length === 0 ? (
+        ) : followed.length === 0 ? (
           <div className="py-16 text-center space-y-2 text-[#8E99BA]">
             <UsersRound size={32} className="mx-auto opacity-35" />
-            <p className="text-sm font-semibold text-[#F4F6FF]">No artists yet</p>
+            <p className="text-sm font-semibold text-[#F4F6FF]">
+              {filterText ? 'No matching followed artists' : 'No followed artists yet'}
+            </p>
             <p className="text-xs max-w-sm mx-auto">
-              Follow artists from any Artist page or like/download tracks to build your personal Artists hub automatically.
+              Open any artist page and tap Follow to build your personal Followed Artists hub.
             </p>
           </div>
         ) : (
-          <>
-            {followed.length > 0 && (
-              <section className="space-y-3">
-                <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-[#A6B0CF]">
-                  Followed Artists ({followed.length})
-                </h2>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3.5">
-                  {followed.map(renderArtistCard)}
+          <div
+            className="grid gap-3.5"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(156px, 1fr))' }}
+          >
+            {followed.map((artist) => (
+              <div
+                key={`${artist.channel_id}-${artist.artist_norm}`}
+                onClick={() => onOpenArtist(artist.name, artist.channel_id)}
+                className="group ios-liquid-card min-w-0 rounded-2xl p-3.5 flex flex-col items-center text-center cursor-pointer relative"
+              >
+                <div className="relative w-24 h-24 aspect-square shrink-0 rounded-full overflow-hidden bg-[#06080F] border border-white/15 flex items-center justify-center shadow-lg">
+                  {artist.thumbnail_url ? (
+                    <TrackImage
+                      src={artist.thumbnail_url}
+                      size="md"
+                      iconSize={28}
+                      className="w-full h-full object-cover aspect-square group-hover:scale-105 transition-transform duration-300"
+                    />
+                  ) : (
+                    <UserRound size={30} className="text-[#8E99BA]" />
+                  )}
+                  <button
+                    type="button"
+                    title={`Play ${artist.name} Radio`}
+                    onClick={(e) => void handleStartRadio(e, artist)}
+                    className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
+                  >
+                    {playingArtistKey === artist.artist_norm ? (
+                      <Radio size={20} className="animate-pulse text-white" />
+                    ) : (
+                      <Play size={20} className="fill-white text-white ml-0.5" />
+                    )}
+                  </button>
                 </div>
-              </section>
-            )}
 
-            {inLibrary.length > 0 && (
-              <section className="space-y-3">
-                <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-[#A6B0CF]">
-                  In Your Library ({inLibrary.length})
-                </h2>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3.5">
-                  {inLibrary.map(renderArtistCard)}
+                <div className="mt-3 w-full">
+                  <div className="text-xs font-semibold text-[#F4F6FF] truncate">{artist.name}</div>
+                  <div className="text-[10.5px] text-[#8E99BA] truncate mt-0.5">
+                    {artist.track_count > 0
+                      ? `${artist.track_count} saved track${artist.track_count === 1 ? '' : 's'}`
+                      : 'Followed Artist'}
+                  </div>
                 </div>
-              </section>
-            )}
-          </>
+
+                <button
+                  type="button"
+                  title="Unfollow artist"
+                  onClick={(e) => void handleUnfollow(e, artist)}
+                  className="mt-2.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10.5px] font-medium border bg-white/[0.12] border-white/20 text-[#34D399] hover:text-white transition-colors"
+                >
+                  <UserCheck size={11} />
+                  <span>Following</span>
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>

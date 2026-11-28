@@ -30,7 +30,7 @@ interface QueueDrawerProps {
   onClose: () => void;
   onPlayQueueItem: (track: Track, index: number) => void;
   onRemoveQueueItem: (index: number) => void;
-  onMoveQueueItem: (fromIdx: number, toIdx: number) => void;
+  onMoveQueueItem: (fromIdx: number, toIdx: number, targetSource?: 'user' | 'radio') => void;
   onPromoteQueueItem?: (index: number) => void;
   onClearQueue: () => void;
   onToggleAutoplayRadio: () => void;
@@ -59,20 +59,18 @@ type QueueFlatRow =
 const HEADER_HEIGHT = 30;
 const ROW_HEIGHT = 54;
 
-function findSectionDropRowIndex(
-  rows: QueueFlatRow[],
-  contentY: number,
-  isRadioSection: boolean
-): number | null {
+function getQueueRowHeight(row: QueueFlatRow): number {
+  return row.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT;
+}
+
+function findGlobalDropRowIndex(rows: QueueFlatRow[], contentY: number): number | null {
   let accY = 0;
   let bestIdx: number | null = null;
   let bestDist = Infinity;
   for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const h = r.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT;
-    if (r.type === 'item' && r.isRadio === isRadioSection) {
-      const center = accY + h / 2;
-      const dist = Math.abs(contentY - center);
+    const h = getQueueRowHeight(rows[i]);
+    if (rows[i].type === 'item') {
+      const dist = Math.abs(contentY - (accY + h / 2));
       if (dist < bestDist) {
         bestDist = dist;
         bestIdx = i;
@@ -81,6 +79,33 @@ function findSectionDropRowIndex(
     accY += h;
   }
   return bestIdx;
+}
+
+function computePreviewOffsetMap(
+  rows: QueueFlatRow[],
+  dragVisIdx: number | null,
+  overVisIdx: number | null
+): Map<number, number> | null {
+  if (dragVisIdx === null || overVisIdx === null || dragVisIdx === overVisIdx) {
+    return null;
+  }
+  const indexed = rows.map((row, idx) => ({ row, idx }));
+  const origY = new Map<number, number>();
+  let y0 = 0;
+  for (const entry of indexed) {
+    origY.set(entry.idx, y0);
+    y0 += getQueueRowHeight(entry.row);
+  }
+  const moved = indexed.splice(dragVisIdx, 1)[0];
+  if (!moved) return null;
+  indexed.splice(overVisIdx, 0, moved);
+  const shiftMap = new Map<number, number>();
+  let y1 = 0;
+  for (const entry of indexed) {
+    shiftMap.set(entry.idx, y1 - (origY.get(entry.idx) ?? 0));
+    y1 += getQueueRowHeight(entry.row);
+  }
+  return shiftMap;
 }
 
 export const QueueDrawer = memo(({
@@ -178,9 +203,16 @@ export const QueueDrawer = memo(({
   // Split upcoming items cleanly into Up Next (User Queue) & Suggested (Radio)
   const { upNextEntries, flatRows } = useMemo(() => {
     if (!items.length) return { upNextEntries: [] as { track: Track; origIndex: number }[], flatRows: [] as QueueFlatRow[] };
-    const filtered = items
-      .map((track, origIndex) => ({ track, origIndex }))
-      .filter(({ origIndex }) => !(currentTrack && origIndex === currentIndex));
+    const filtered = !currentTrack
+      ? items.map((track, origIndex) => ({ track, origIndex }))
+      : [
+          ...items
+            .slice(currentIndex + 1)
+            .map((track, offset) => ({ track, origIndex: currentIndex + 1 + offset })),
+          ...(repeatMode === 'all'
+            ? items.slice(0, currentIndex).map((track, origIndex) => ({ track, origIndex }))
+            : []),
+        ];
     const userItems = filtered.filter(({ track }) => track.source !== 'radio');
     const radioItems = filtered.filter(({ track }) => track.source === 'radio');
     const rows: QueueFlatRow[] = [];
@@ -200,7 +232,7 @@ export const QueueDrawer = memo(({
       rows.push({
         type: 'header',
         id: 'hdr-radio',
-        label: 'Suggested (Radio)',
+        label: 'Suggested After Queue',
         count: radioItems.length,
         isRadio: true,
       });
@@ -209,7 +241,7 @@ export const QueueDrawer = memo(({
       }
     }
     return { upNextEntries: filtered, flatRows: rows };
-  }, [items, currentIndex, currentTrack]);
+  }, [items, currentIndex, currentTrack, repeatMode]);
 
   const rowVirtualizer = useVirtualizer({
     count: rendered ? flatRows.length : 0,
@@ -217,6 +249,17 @@ export const QueueDrawer = memo(({
     estimateSize: (i) => (flatRows[i]?.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT),
     overscan: 6,
   });
+
+  useEffect(() => {
+    if (rendered) {
+      rowVirtualizer.measure();
+    }
+  }, [rendered, rowVirtualizer, flatRows]);
+
+  const previewShiftMap = useMemo(
+    () => computePreviewOffsetMap(flatRows, dragVisIdx, overVisIdx),
+    [flatRows, dragVisIdx, overVisIdx]
+  );
 
   if (!rendered) return null;
 
@@ -227,16 +270,12 @@ export const QueueDrawer = memo(({
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const recalcOverIndex = (
-    clientY: number,
-    rowsSnapshot: QueueFlatRow[],
-    isRadioSection: boolean
-  ) => {
+  const recalcOverIndex = (clientY: number, rowsSnapshot: QueueFlatRow[]) => {
     const listEl = listRef.current;
     if (!listEl || rowsSnapshot.length <= 0) return;
     const rect = listEl.getBoundingClientRect();
     const contentY = clientY - rect.top + listEl.scrollTop;
-    const idx = findSectionDropRowIndex(rowsSnapshot, contentY, isRadioSection);
+    const idx = findGlobalDropRowIndex(rowsSnapshot, contentY);
     if (idx !== null && idx !== overVisRef.current) {
       overVisRef.current = idx;
       setOverVisIdx(idx);
@@ -246,8 +285,7 @@ export const QueueDrawer = memo(({
   const handleRowPointerDown = (
     e: React.PointerEvent,
     visIdx: number,
-    track: Track,
-    isRadioSection: boolean
+    track: Track
   ) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
@@ -302,7 +340,7 @@ export const QueueDrawer = memo(({
         const prevTop = el.scrollTop;
         el.scrollTop += delta;
         if (el.scrollTop !== prevTop) {
-          recalcOverIndex(py, rowsSnapshot, isRadioSection);
+          recalcOverIndex(py, rowsSnapshot);
         }
       }
       autoScrollRafRef.current = requestAnimationFrame(runAutoScroll);
@@ -330,7 +368,7 @@ export const QueueDrawer = memo(({
         y: moveEvent.clientY - ROW_HEIGHT * 0.5,
       });
 
-      recalcOverIndex(moveEvent.clientY, rowsSnapshot, isRadioSection);
+      recalcOverIndex(moveEvent.clientY, rowsSnapshot);
     };
 
     const onPointerUp = () => {
@@ -355,9 +393,9 @@ export const QueueDrawer = memo(({
         wasDrag &&
         fromRow?.type === 'item' &&
         toRow?.type === 'item' &&
-        fromRow.origIndex !== toRow.origIndex
+        (fromRow.origIndex !== toRow.origIndex || fromRow.isRadio !== toRow.isRadio)
       ) {
-        onMoveQueueItem(fromRow.origIndex, toRow.origIndex);
+        onMoveQueueItem(fromRow.origIndex, toRow.origIndex, toRow.isRadio ? 'radio' : 'user');
       }
       if (wasDrag) {
         if (resetDragTimerRef.current !== null) clearTimeout(resetDragTimerRef.current);
@@ -375,15 +413,8 @@ export const QueueDrawer = memo(({
   };
 
   const getRowShiftY = (visIdx: number): number => {
-    if (dragVisIdx === null || overVisIdx === null || visIdx === dragVisIdx) return 0;
-    const row = flatRows[visIdx];
-    const dragRow = flatRows[dragVisIdx];
-    if (!row || row.type !== 'item' || !dragRow || dragRow.type !== 'item' || row.isRadio !== dragRow.isRadio) {
-      return 0;
-    }
-    if (dragVisIdx < overVisIdx && visIdx > dragVisIdx && visIdx <= overVisIdx) return -ROW_HEIGHT;
-    if (dragVisIdx > overVisIdx && visIdx >= overVisIdx && visIdx < dragVisIdx) return ROW_HEIGHT;
-    return 0;
+    if (!previewShiftMap || visIdx === dragVisIdx) return 0;
+    return previewShiftMap.get(visIdx) ?? 0;
   };
 
   return (
@@ -396,7 +427,7 @@ export const QueueDrawer = memo(({
           opacity: visible ? 1 : 0,
           transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease',
         }}
-        className="absolute inset-2 z-30 md:static md:inset-auto md:w-[360px] md:flex-none ios-liquid-drawer rounded-[24px] md:my-1 flex flex-col select-none overflow-hidden"
+        className="orbit-drawer z-30 ios-liquid-drawer rounded-[24px] flex flex-col select-none overflow-hidden"
       >
         <div className="h-12 flex-none px-4 flex items-center justify-between border-b border-white/[0.10]">
           <div className="flex items-center gap-2">
@@ -479,15 +510,6 @@ export const QueueDrawer = memo(({
           </div>
         )}
 
-        <div className="flex-none px-4 py-2 text-[10px] font-semibold text-[#A6B0CF] uppercase tracking-[0.16em] bg-white/[0.03] border-b border-white/[0.08] flex items-center justify-between">
-          <span>Up Next</span>
-          {upNextEntries.length > 1 && (
-            <span className="text-[9px] font-normal normal-case text-[#7A84A6]">
-              Drag anywhere to reorder
-            </span>
-          )}
-        </div>
-
         <div ref={listRef} className="flex-1 overflow-y-auto relative" style={{ contain: 'strict' }}>
           {flatRows.length === 0 ? (
             <div className="p-6 text-center text-xs text-[#7A84A6] italic">
@@ -511,6 +533,7 @@ export const QueueDrawer = memo(({
                 if (!row) return null;
 
                 if (row.type === 'header') {
+                  const hdrShift = getRowShiftY(visIdx);
                   return (
                     <div
                       key={row.id}
@@ -520,13 +543,19 @@ export const QueueDrawer = memo(({
                         left: 0,
                         width: '100%',
                         height: `${HEADER_HEIGHT}px`,
-                        transform: `translate3d(0, ${virtualRow.start}px, 0)`,
+                        transform: `translate3d(0, ${virtualRow.start + hdrShift}px, 0)`,
+                        transition:
+                          dragVisIdx !== null
+                            ? 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)'
+                            : undefined,
                       }}
-                      className="flex items-center justify-between px-4 bg-white/[0.03] border-b border-white/[0.07] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#8E99BA]"
+                      className="z-10 flex items-center justify-between px-4 bg-[#0B0F1A]/95 border-y border-white/[0.08] text-[10px] font-semibold uppercase tracking-[0.16em] text-[#9AA5C4]"
                     >
                       <span>{row.label}</span>
                       <span className="font-mono tabular-nums text-[9.5px] text-[#7A84A6]">
-                        {row.count}
+                        {!row.isRadio && upNextEntries.length > 1
+                          ? `Drag to reorder · ${row.count}`
+                          : row.count}
                       </span>
                     </div>
                   );
@@ -539,7 +568,7 @@ export const QueueDrawer = memo(({
                 return (
                   <div
                     key={`${item.video_id}-${origIndex}`}
-                    onPointerDown={(e) => handleRowPointerDown(e, visIdx, item, isRadio)}
+                    onPointerDown={(e) => handleRowPointerDown(e, visIdx, item)}
                     onMouseEnter={() => scheduleTrackPreload(item)}
                     onMouseLeave={() => cancelTrackPreload(item.video_id)}
                     onContextMenu={(e) => {
@@ -601,10 +630,11 @@ export const QueueDrawer = memo(({
                           e.stopPropagation();
                           onPromoteQueueItem(origIndex);
                         }}
-                        title="Add to Up Next Queue"
-                        className="p-1 text-[#A6B0CF] hover:text-white hover:bg-white/[0.12] rounded-full flex-none transition-colors"
+                        title="Move into Active Queue"
+                        className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-white/[0.06] hover:bg-white/[0.16] text-[10px] font-medium text-[#D4DCFA] hover:text-white flex-none transition-colors"
                       >
-                        <Plus size={13} />
+                        <Plus size={11} />
+                        <span>Queue</span>
                       </button>
                     )}
 

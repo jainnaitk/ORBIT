@@ -26,6 +26,7 @@ import { TrackList } from '../components/TrackList';
 import {
   TrackContextMenu,
   isTrackDownloaded,
+  useTrackActions,
   useTrackContextMenu,
 } from '../components/TrackContextMenu';
 import { bridgeApi } from '../api/client';
@@ -123,6 +124,15 @@ export const ArtistView = memo(({
   const [activeSection, setActiveSection] = useState<'overview' | 'catalog'>('overview');
   const reqSeqRef = useRef<number>(0);
   const { menuState, menuRef, openMenuAt, closeMenu } = useTrackContextMenu();
+  const trackActions = useTrackActions();
+
+  const syncedFollowed = trackActions.isArtistFollowed
+    ? trackActions.isArtistFollowed(
+        profile?.name || target.name,
+        profile?.channel_id || target.channelId
+      )
+    : null;
+  const effectiveFollowed = syncedFollowed ?? isFollowed;
 
   const handleRowContextMenu = useCallback(
     (e: React.MouseEvent, track: Track) => {
@@ -174,11 +184,21 @@ export const ArtistView = memo(({
       .getArtistProfile(target.name, target.channelId || undefined)
       .then((data) => {
         if (mySeq !== reqSeqRef.current) return;
-        if (artistCache.size >= MAX_ARTIST_CACHE && !artistCache.has(cacheKey)) {
-          const oldest = artistCache.keys().next().value;
-          if (oldest) artistCache.delete(oldest);
+        const hasContent = Boolean(
+          data.all_tracks?.length ||
+            data.popular_tracks?.length ||
+            data.albums?.length ||
+            data.singles?.length ||
+            data.description ||
+            data.thumbnail_url
+        );
+        if (hasContent) {
+          if (artistCache.size >= MAX_ARTIST_CACHE && !artistCache.has(cacheKey)) {
+            const oldest = artistCache.keys().next().value;
+            if (oldest) artistCache.delete(oldest);
+          }
+          artistCache.set(cacheKey, data);
         }
-        artistCache.set(cacheKey, data);
         setProfile(data);
         setIsFollowed(Boolean(data.is_followed));
         setIsPinned(Boolean(data.is_pinned));
@@ -239,7 +259,23 @@ export const ArtistView = memo(({
   const handleToggleFollow = async () => {
     const artistName = profile?.name || target.name;
     const channelId = profile?.channel_id || target.channelId;
-    const next = !isFollowed;
+    if (trackActions.onToggleFollowArtist) {
+      const next = await trackActions.onToggleFollowArtist({
+        name: artistName,
+        channelId,
+        thumbnailUrl: profile?.thumbnail_url,
+      });
+      setIsFollowed(next);
+      if (profile) {
+        const updated = { ...profile, is_followed: next };
+        artistCache.set(cacheKey, updated);
+        setProfile(updated);
+      }
+      onArtistFollowChanged?.();
+      return;
+    }
+
+    const next = !effectiveFollowed;
     setIsFollowed(next);
     try {
       if (next) {
@@ -292,11 +328,11 @@ export const ArtistView = memo(({
     if (startingRadio) return;
     setStartingRadio(true);
     try {
-      await bridgeApi.startArtistRadio({
+      const result = await bridgeApi.startArtistRadio({
         channel_id: profile?.channel_id || target.channelId,
         name: profile?.name || target.name,
       });
-      onArtistRadioStarted?.();
+      if (result.status === 'ok') onArtistRadioStarted?.();
     } finally {
       setStartingRadio(false);
     }
@@ -338,109 +374,112 @@ export const ArtistView = memo(({
     <div
       ref={containerRef}
       style={{ contain: 'layout style' }}
-      className="flex-1 flex flex-col h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
+      className="flex-1 min-w-0 flex flex-col h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
     >
       {/* Hero Banner */}
-      <div className="flex-none p-5 sm:p-6 border-b border-white/[0.08] bg-gradient-to-br from-[rgba(var(--dynamic-accent-rgb),0.12)] via-white/[0.02] to-transparent">
-        <div className="flex items-end justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-4 sm:gap-5 min-w-0 flex-1">
-            <div
-              className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-[#06080F] border border-white/20 flex items-center justify-center shadow-xl overflow-hidden flex-none"
-              style={{ boxShadow: '0 10px 30px rgba(0,0,0,0.65), 0 0 24px rgba(var(--dynamic-accent-rgb),0.18)' }}
-            >
-              {profile?.thumbnail_url ? (
-                <TrackImage
-                  src={profile.thumbnail_url}
-                  size="md"
-                  iconSize={32}
-                  eager
-                />
-              ) : (
-                <UserRound size={34} className="text-[#8E99BA]" />
+      <div className="flex-none p-5 sm:p-6 border-b border-white/[0.08] bg-gradient-to-br from-[rgba(var(--dynamic-accent-rgb),0.12)] via-white/[0.02] to-transparent space-y-4">
+        <div className="flex items-center gap-4 sm:gap-5 min-w-0">
+          <div
+            className="w-20 h-20 sm:w-24 sm:h-24 aspect-square shrink-0 rounded-full bg-[#06080F] border border-white/20 flex items-center justify-center shadow-xl overflow-hidden"
+            style={{ boxShadow: '0 10px 30px rgba(0,0,0,0.65), 0 0 24px rgba(var(--dynamic-accent-rgb),0.18)' }}
+          >
+            {profile?.thumbnail_url ? (
+              <TrackImage
+                src={profile.thumbnail_url}
+                size="md"
+                iconSize={32}
+                className="w-full h-full object-cover aspect-square"
+                eager
+              />
+            ) : (
+              <UserRound size={34} className="text-[#8E99BA]" />
+            )}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 whitespace-nowrap">
+              <Sparkles size={11} style={{ color: 'var(--dynamic-accent)' }} className="flex-none" />
+              <span
+                className="text-[10px] uppercase tracking-[0.22em] font-bold"
+                style={{ color: 'var(--dynamic-accent)' }}
+              >
+                Artist Library
+              </span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-bold text-[#F4F6FF] tracking-tight truncate mt-0.5 leading-tight">
+              {profile?.name || target.name}
+            </h1>
+            <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs text-[#9AA5C4] mt-1.5">
+              {profile?.subscribers && (
+                <span className="whitespace-nowrap">{profile.subscribers} subscribers</span>
+              )}
+              {profile?.views && (
+                <span className="whitespace-nowrap">• {profile.views}</span>
+              )}
+              {!loading && allTracks.length > 0 && (
+                <span className="whitespace-nowrap">• {allTracks.length} songs</span>
+              )}
+              {!loading && releases.length > 0 && (
+                <span className="whitespace-nowrap">• {releases.length} releases</span>
               )}
             </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={11} style={{ color: 'var(--dynamic-accent)' }} />
-                <span
-                  className="text-[10px] uppercase tracking-[0.22em] font-bold"
-                  style={{ color: 'var(--dynamic-accent)' }}
-                >
-                  Artist Library
-                </span>
-              </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-[#F4F6FF] tracking-tight truncate mt-0.5">
-                {profile?.name || target.name}
-              </h1>
-              <div className="flex items-center gap-2.5 flex-wrap text-xs text-[#9AA5C4] mt-1">
-                {profile?.subscribers && <span>{profile.subscribers} subscribers</span>}
-                {profile?.views && <span>• {profile.views}</span>}
-                {!loading && allTracks.length > 0 && (
-                  <span>• {allTracks.length} songs</span>
-                )}
-                {!loading && releases.length > 0 && (
-                  <span>• {releases.length} releases</span>
-                )}
-              </div>
-            </div>
           </div>
+        </div>
 
-          <div className="flex items-center gap-2 flex-wrap flex-none">
-            {allTracks.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onPlayAll(popularTracks.length > 0 ? popularTracks : allTracks, false)}
-                  className="px-4 py-2 bg-[#F4F6FF] text-[#020308] font-semibold text-xs rounded-full flex items-center gap-2 hover:scale-[1.02] active:scale-95 transition-transform shadow-md"
-                >
-                  <Play size={14} className="fill-current" />
-                  Play Popular
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onPlayAll(allTracks, true)}
-                  className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5"
-                >
-                  <Shuffle size={14} />
-                  Shuffle
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              disabled={startingRadio}
-              onClick={() => void handleStartArtistRadio()}
-              className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5 disabled:opacity-50"
-            >
-              <Radio size={14} style={{ color: 'var(--dynamic-accent)' }} />
-              {startingRadio ? 'Starting...' : 'Radio'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleToggleFollow()}
-              className={`px-3.5 py-2 text-xs font-medium rounded-full flex items-center gap-1.5 border transition-colors ${
-                isFollowed
-                  ? 'bg-white/[0.16] border-white/25 text-white'
-                  : 'ios-liquid-pill text-[#D4DCFA] border-white/10'
-              }`}
-            >
-              {isFollowed ? <UserCheck size={14} className="text-[#34D399]" /> : <UserPlus size={14} />}
-              {isFollowed ? 'Following' : 'Follow'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleTogglePinArtist()}
-              title={isPinned ? 'Unpin Artist from Speed Dial' : 'Pin Artist to Speed Dial'}
-              className={`p-2 rounded-full border transition-colors ${
-                isPinned
-                  ? 'bg-white/[0.16] border-white/25 text-[#F59E0B]'
-                  : 'ios-liquid-pill text-[#A6B0CF] hover:text-white border-white/10'
-              }`}
-            >
-              {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
-            </button>
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {allTracks.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => onPlayAll(popularTracks.length > 0 ? popularTracks : allTracks, false)}
+                className="px-4 py-2 bg-[#F4F6FF] text-[#020308] font-semibold text-xs rounded-full flex items-center gap-2 hover:scale-[1.02] active:scale-95 transition-transform shadow-md"
+              >
+                <Play size={14} className="fill-current" />
+                Play Popular
+              </button>
+              <button
+                type="button"
+                onClick={() => onPlayAll(allTracks, true)}
+                className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5"
+              >
+                <Shuffle size={14} />
+                Shuffle
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            disabled={startingRadio}
+            onClick={() => void handleStartArtistRadio()}
+            className="px-3.5 py-2 ios-liquid-pill text-[#F4F6FF] font-medium text-xs rounded-full flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <Radio size={14} style={{ color: 'var(--dynamic-accent)' }} />
+            {startingRadio ? 'Starting...' : 'Radio'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleToggleFollow()}
+            className={`px-3.5 py-2 text-xs font-medium rounded-full flex items-center gap-1.5 border transition-colors ${
+              effectiveFollowed
+                ? 'bg-white/[0.16] border-white/25 text-white'
+                : 'ios-liquid-pill text-[#D4DCFA] border-white/10'
+            }`}
+          >
+            {effectiveFollowed ? <UserCheck size={14} className="text-[#34D399]" /> : <UserPlus size={14} />}
+            {effectiveFollowed ? 'Following' : 'Follow'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleTogglePinArtist()}
+            title={isPinned ? 'Unpin Artist from Speed Dial' : 'Pin Artist to Speed Dial'}
+            className={`p-2 rounded-full border transition-colors ${
+              isPinned
+                ? 'bg-white/[0.16] border-white/25 text-[#F59E0B]'
+                : 'ios-liquid-pill text-[#A6B0CF] hover:text-white border-white/10'
+            }`}
+          >
+            {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+          </button>
         </div>
 
         {/* Section Tabs */}
@@ -569,7 +608,7 @@ export const ArtistView = memo(({
       ) : (
         <div
           style={{ contain: 'strict', willChange: 'scroll-position' }}
-          className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-7"
+          className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden px-5 sm:px-6 py-5 space-y-7"
         >
           {/* Local-first Your Songs Shelf */}
           {localTracks.length > 0 && (
@@ -661,11 +700,7 @@ export const ArtistView = memo(({
                   const isCurrent = currentTrackId === track.video_id;
                   const isLiked = likedIds ? likedIds.has(track.video_id) : !!track.is_liked;
                   const dl = downloads[track.video_id];
-                  const isDownloaded =
-                    downloadedIds?.has(track.video_id) ||
-                    track.download_status === 'completed' ||
-                    dl?.status === 'completed' ||
-                    !!track.local_path;
+                  const isDownloaded = isTrackDownloaded(track, downloadedIds, downloads);
                   const isDownloading =
                     dl?.status === 'downloading' ||
                     dl?.status === 'queued' ||
@@ -875,13 +910,13 @@ export const ArtistView = memo(({
                     }
                     className="group ios-liquid-card w-[136px] rounded-2xl p-3 flex-none flex flex-col items-center text-center cursor-pointer"
                   >
-                    <div className="w-20 h-20 rounded-full overflow-hidden bg-[#06080F] border border-white/15 flex items-center justify-center">
+                    <div className="w-20 h-20 aspect-square shrink-0 rounded-full overflow-hidden bg-[#06080F] border border-white/15 flex items-center justify-center">
                       {rel.thumbnail_url ? (
                         <TrackImage
                           src={rel.thumbnail_url}
                           size="md"
                           iconSize={24}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          className="w-full h-full object-cover aspect-square group-hover:scale-105 transition-transform duration-300"
                         />
                       ) : (
                         <UserRound size={24} className="text-[#8E99BA]" />

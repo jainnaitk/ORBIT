@@ -109,7 +109,7 @@ class _FakePlayer:
     def get_live_time_pos(self) -> float:
         return self.time_pos
 
-    async def load_and_play(self, track: Track) -> None:
+    async def load_and_play(self, track: Track, *, is_current=None) -> None:
         self.current_track = track
         self.loaded_video_id = track.video_id
         self.duration = float(track.duration_s or 200)
@@ -356,7 +356,11 @@ def test_schema_migrations_and_library_phase_c(tmp_path: Path) -> None:
         assert stats_all["total_plays"] == 2
         assert stats_all["total_seconds"] == 150
         assert len(stats_all["top_tracks"]) == 2
+        assert stats_all["top_tracks"][0]["listened_s"] == stats_all["top_tracks"][0]["seconds"]
         assert len(stats_all["top_artists"]) >= 2
+        assert stats_all["top_artists"][0]["name"] == stats_all["top_artists"][0]["artist"]
+        assert stats_all["top_artists"][0]["listened_s"] > 0
+        assert stats_all["top_artists"][0]["artist_norm"]
 
         # Artist library & local tracks
         await lib.follow_artist("UC_ARTIST_01", "Arijit Singh", "https://img.example/a.jpg")
@@ -529,3 +533,79 @@ def test_bridge_endpoints_phase_c(tmp_path: Path) -> None:
             it for it in prom.json()["items"] if it["video_id"] == "sim_radio_1"
         )
         assert promoted_item["source"] == "user"
+
+        # Verify global drag-and-drop move with explicit target_source
+        mv = client.post(
+            "/queue",
+            headers=headers,
+            json={
+                "action": "move",
+                "from_idx": len(ctrl.queue.items) - 1,
+                "to_idx": 1,
+                "target_source": "user",
+            },
+        )
+        assert mv.status_code == 200
+
+
+def test_queue_22_active_before_suggestions_and_surprise_excludes_home(tmp_path: Path) -> None:
+    """Verify queue builds 20-25 active songs first before radio suggestions & Surprise excludes home tracks."""
+    async def _run() -> None:
+        many_radio = [
+            Track(video_id=f"r_trk_{i:02d}", title=f"Radio Song {i}", artist=f"Artist {i % 7}", duration_s=195)
+            for i in range(28)
+        ]
+        ytm = _make_ytm_mock()
+        ytm.get_watch_radio = AsyncMock(return_value=many_radio)
+
+        q = QueueManager(ytm_client=ytm, auto_persist=False)
+        q.set_queue([Track(video_id="seed_00", title="Start Song", artist="Artist 0", duration_s=190)])
+
+        added = await q.refill_radio(limit=28, auto_promote_until=22)
+        assert added >= 22
+        upcoming = q.items[1:]
+        assert all(t.source == "user" for t in upcoming[:22])
+        if len(upcoming) > 22:
+            assert all(t.source == "radio" for t in upcoming[22:])
+
+        # Dragging a radio suggestion up into user range promotes it automatically
+        radio_idx = next(i for i, t in enumerate(q.items) if t.source == "radio")
+        moved_vid = q.items[radio_idx].video_id
+        q.move(radio_idx, 1, target_source="user")
+        assert q.items[1].video_id == moved_vid
+        assert q.items[1].source == "user"
+
+        # Surprise Me endpoint excludes cached Home + previously played tracks
+        db_path = tmp_path / "surprise_test.db"
+        ctrl = BridgeController(
+            player=_FakePlayer(),  # type: ignore[arg-type]
+            downloader=_DummyDownloader(db_path),  # type: ignore[arg-type]
+            ytm=ytm,
+            db_path=db_path,
+        )
+        ytm.search = AsyncMock(
+            return_value=[
+                Track(video_id="home_dup_1", title="Home Track", artist="Artist H", duration_s=200),
+                Track(video_id="fresh_s_01", title="Fresh Discovery 1", artist="Artist D1", duration_s=210),
+                Track(video_id="fresh_s_02", title="Fresh Discovery 2", artist="Artist D2", duration_s=215),
+            ]
+        )
+        app = create_app(controller=ctrl, token="surp-tok")
+        with TestClient(app) as client:
+            # Home is loaded after startup refreshes the blocked-artist cache.
+            ctrl._home_cache["for_you"] = (
+                9e12,
+                {
+                    "greeting": "Hi",
+                    "speed_dial": [{"video_id": "home_dup_1", "title": "Home Track"}],
+                    "sections": [],
+                },
+            )
+            res = client.post("/radio/surprise", headers={"X-Bridge-Token": "surp-tok"})
+            assert res.status_code == 200
+            q_vids = [it["video_id"] for it in res.json()["queue"]["items"]]
+            assert "fresh_s_01" in q_vids
+            assert "fresh_s_02" in q_vids
+            assert q_vids[0] != "home_dup_1"
+
+    asyncio.run(_run())

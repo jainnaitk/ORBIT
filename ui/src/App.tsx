@@ -13,19 +13,21 @@ import { QueueDrawer } from './components/QueueDrawer';
 import { LyricsDrawer } from './components/LyricsDrawer';
 import { FullscreenStage, type FullscreenTab } from './components/FullscreenStage';
 import { ToastHost, toast } from './components/ToastHost';
-import { HomeView } from './views/HomeView';
+import { forgetHomeHistory, HomeView } from './views/HomeView';
 import { SearchView } from './views/SearchView';
 import { LibraryView } from './views/LibraryView';
 import { ArtistView, type ArtistNavTarget, type AlbumNavTarget } from './views/ArtistView';
 import { AlbumView } from './views/AlbumView';
 import { ArtistsLibraryView } from './views/ArtistsLibraryView';
-import { StatsView } from './views/StatsView';
+import { PlaylistsView } from './views/PlaylistsView';
 import { TrackActionsProvider } from './components/TrackContextMenu';
 import {
   CreatePlaylistModal,
   AddToPlaylistModal,
   SettingsModal,
+  ImportPromoModal,
 } from './components/Modals';
+import { ImportPlaylistModal } from './components/ImportPlaylistModal';
 import { UpdateAvailableModal } from './components/UpdateCenter';
 import {
   useBridge,
@@ -44,7 +46,7 @@ import {
 } from './api/client';
 import { extractTrackAccent, DEFAULT_COSMIC_ACCENT } from './utils/colorExtract';
 import { getTrackArtists } from './utils/artists';
-import type { Track, Playlist, EqPreset, PinsResponse } from './api/types';
+import type { Track, Playlist, EqPreset, PinsResponse, ImportJobState } from './api/types';
 
 type RightDrawerTab = 'none' | 'queue' | 'lyrics';
 
@@ -62,7 +64,7 @@ export default function App() {
     api,
     lastError,
     beginOptimisticSwitch,
-    clearOptimisticSwitch,
+    recoverPlayback,
   } = useBridge();
 
   const [isUpdateTabOpen, setIsUpdateTabOpen] = useState<boolean>(false);
@@ -172,6 +174,11 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [backendDiag, setBackendDiag] = useState<BackendDiagnostics | null>(null);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState<boolean>(false);
+  const [isImportPlaylistOpen, setIsImportPlaylistOpen] = useState<boolean>(false);
+  const [isV14PromoOpen, setIsV14PromoOpen] = useState<boolean>(false);
+  const [settingsLoadedOnce, setSettingsLoadedOnce] = useState<boolean>(false);
+  const [v14PromoSeen, setV14PromoSeen] = useState<boolean>(false);
+  const v14PromoHandledRef = useRef<boolean>(false);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
   const [isIslandMode, setIsIslandMode] = useState<boolean>(false);
@@ -205,6 +212,10 @@ export default function App() {
   const [downloadTracks, setDownloadTracks] = useState<Track[]>([]);
   const [downloadTrackMeta, setDownloadTrackMeta] = useState<Record<string, Track>>({});
   const [pins, setPins] = useState<PinsResponse>({ tracks: [], artists: [] });
+  const [followedArtistKeys, setFollowedArtistKeys] = useState<Set<string>>(new Set());
+  const [isSurpriseBusy, setIsSurpriseBusy] = useState<boolean>(false);
+  const surpriseLockRef = useRef<boolean>(false);
+  const surpriseCooldownUntilRef = useRef<number>(0);
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const [libraryVersion, setLibraryVersion] = useState<number>(0);
 
@@ -434,7 +445,7 @@ export default function App() {
 
   const handleOpenArtist = useCallback(
     (target: ArtistNavTarget) => {
-      const cleaned = target.name.trim();
+      const cleaned = (target.name || '').trim();
       if (!cleaned) return;
       setIsFullscreenStageOpen(false);
       navigateTo('artist', null, { name: cleaned, channelId: target.channelId || null }, null);
@@ -494,6 +505,11 @@ export default function App() {
   const applySettingsPayload = useCallback(
     (settingsObj: Record<string, unknown> | null | undefined) => {
       if (!settingsObj) return;
+      if (settingsObj.import_promo_v1_4_seen === true) {
+        v14PromoHandledRef.current = true;
+        setV14PromoSeen(true);
+      }
+      setSettingsLoadedOnce(true);
       if (typeof settingsObj.auto_download_liked === 'boolean') {
         setAutoDownloadLiked(settingsObj.auto_download_liked);
       }
@@ -533,6 +549,20 @@ export default function App() {
     }
   }, [api]);
 
+  const refreshFollowedArtistsOnly = useCallback(async () => {
+    try {
+      const res = await api.getArtistsLibrary();
+      const nextKeys = new Set<string>();
+      for (const a of res.followed || []) {
+        if (a.channel_id) nextKeys.add(a.channel_id);
+        if (a.artist_norm) nextKeys.add(`norm:${a.artist_norm}`);
+      }
+      setFollowedArtistKeys(nextKeys);
+    } catch {
+      // Ignore
+    }
+  }, [api]);
+
   const refreshLibraryStats = useCallback(async () => {
     if (refreshInFlightRef.current) {
       refreshPendingRef.current = true;
@@ -541,12 +571,13 @@ export default function App() {
 
     const run = (async () => {
       try {
-        const [pls, lk, dl, settings, pinsRes] = await Promise.allSettled([
+        const [pls, lk, dl, settings, pinsRes, artistsRes] = await Promise.allSettled([
           api.getPlaylists(),
           api.getLiked(),
           api.getDownloads(),
           api.getSettings(),
           api.getPins(),
+          api.getArtistsLibrary(),
         ]);
         if (pls.status === 'fulfilled') setPlaylists(pls.value);
         if (lk.status === 'fulfilled') {
@@ -559,6 +590,14 @@ export default function App() {
         }
         if (pinsRes.status === 'fulfilled') {
           setPins(pinsRes.value);
+        }
+        if (artistsRes.status === 'fulfilled') {
+          const nextKeys = new Set<string>();
+          for (const a of artistsRes.value.followed || []) {
+            if (a.channel_id) nextKeys.add(a.channel_id);
+            if (a.artist_norm) nextKeys.add(`norm:${a.artist_norm}`);
+          }
+          setFollowedArtistKeys(nextKeys);
         }
         setLibraryVersion((v) => v + 1);
       } catch {
@@ -594,6 +633,11 @@ export default function App() {
           await refreshPinsOnly();
           return;
         }
+        if (evtType === 'artist_followed' || evtType === 'artist_unfollowed') {
+          await refreshFollowedArtistsOnly();
+          setLibraryVersion((v) => v + 1);
+          return;
+        }
         if (
           evtType === 'playlist_created' ||
           evtType === 'playlist_deleted' ||
@@ -615,7 +659,7 @@ export default function App() {
       }
       await refreshLibraryStats();
     },
-    [api, applySettingsPayload, refreshLibraryStats, refreshPinsOnly]
+    [api, applySettingsPayload, refreshLibraryStats, refreshPinsOnly, refreshFollowedArtistsOnly]
   );
 
   useEffect(() => {
@@ -624,12 +668,46 @@ export default function App() {
 
   useEffect(() => {
     const unsubLibrary = bridgeSocket.on('library_changed', (evt) => {
+      if (evt?.type === 'history_cleared') forgetHomeHistory();
       void refreshLibraryByEvent(evt?.type);
     });
     return () => {
       unsubLibrary();
     };
   }, [refreshLibraryByEvent]);
+
+  // One-time v1.4.x playlist importer prompt for fresh website installs and in-app upgrades.
+  // Intentionally gated strictly to 1.4.x so future versions (1.5+) never show this popup.
+  useEffect(() => {
+    if (!isConnected || !settingsLoadedOnce || v14PromoHandledRef.current || v14PromoSeen) {
+      return;
+    }
+    if (isUpdateModalOpen) {
+      return;
+    }
+    const currentVer = (updateState?.current_version ?? '').trim();
+    const isV14Release = /^v?1\.4(\.|$)/i.test(currentVer);
+    const devPreview =
+      import.meta.env.DEV &&
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('test_v14_promo') === '1';
+
+    if (!isV14Release && !devPreview) {
+      return;
+    }
+
+    v14PromoHandledRef.current = true;
+    setV14PromoSeen(true);
+    setIsV14PromoOpen(true);
+    void api.setSettings({ import_promo_v1_4_seen: true }).catch(() => {});
+  }, [
+    isConnected,
+    settingsLoadedOnce,
+    v14PromoSeen,
+    updateState?.current_version,
+    isUpdateModalOpen,
+    api,
+  ]);
 
   const handleChangeCosmicMode = useCallback(
     (mode: CosmicEffectsMode) => {
@@ -724,11 +802,9 @@ export default function App() {
     }
   }, [waitForViewportCondition]);
 
-  const MAX_QUEUE_BATCH = 25;
-
   const handlePlayTrack = useCallback(
     async (track: Track, index: number = 0, trackList?: Track[]) => {
-      beginOptimisticSwitch(track);
+      const sequence = beginOptimisticSwitch(track);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: track.duration_s,
@@ -739,47 +815,25 @@ export default function App() {
 
       try {
         if (trackList && trackList.length > 0) {
-          // Keep queue compact (<= 25 tracks) so clicking a song in a large catalog/history never dumps 150 items
-          let batch = trackList;
-          let startIdx = Math.max(0, Math.min(index, trackList.length - 1));
-          if (trackList.length > MAX_QUEUE_BATCH) {
-            const after = trackList.slice(startIdx, startIdx + MAX_QUEUE_BATCH);
-            const needed = MAX_QUEUE_BATCH - after.length;
-            batch = needed > 0 ? [...after, ...trackList.slice(0, needed)] : after;
-            startIdx = 0;
-          }
-          await api.setQueue(batch, startIdx, true);
+          await api.setQueue(trackList, index, true);
         } else {
           await api.play(track);
         }
+        return true;
       } catch {
-        clearOptimisticSwitch(track.video_id);
+        await recoverPlayback(sequence);
+        return false;
       }
     },
-    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback]
+    [api, beginOptimisticSwitch, recoverPlayback, setPlayback]
   );
 
   const handlePlayAll = useCallback(
     async (tracks: Track[], shuffle: boolean = false) => {
       if (tracks.length === 0) return;
-      let batch = tracks;
-      if (tracks.length > MAX_QUEUE_BATCH) {
-        if (shuffle) {
-          const pool = [...tracks];
-          for (let i = pool.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [pool[i], pool[j]] = [pool[j], pool[i]];
-          }
-          batch = pool.slice(0, MAX_QUEUE_BATCH);
-        } else {
-          batch = tracks.slice(0, MAX_QUEUE_BATCH);
-        }
-      }
-      const startIndex = shuffle && batch.length === tracks.length
-        ? Math.floor(Math.random() * batch.length)
-        : 0;
-      const firstTrack = batch[startIndex];
-      beginOptimisticSwitch(firstTrack);
+      const startIndex = shuffle ? Math.floor(Math.random() * tracks.length) : 0;
+      const firstTrack = tracks[startIndex];
+      const sequence = beginOptimisticSwitch(firstTrack);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: firstTrack.duration_s,
@@ -789,13 +843,12 @@ export default function App() {
       }));
       setQueue((prev) => (prev ? { ...prev, shuffle } : prev));
       try {
-        await api.setShuffle(shuffle);
-        await api.setQueue(batch, startIndex, true);
+        await api.setQueue(tracks, startIndex, true, shuffle);
       } catch {
-        clearOptimisticSwitch(firstTrack.video_id);
+        await recoverPlayback(sequence);
       }
     },
-    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback, setQueue]
+    [api, beginOptimisticSwitch, recoverPlayback, setPlayback, setQueue]
   );
 
   const handleTogglePlay = useCallback(async () => {
@@ -827,7 +880,7 @@ export default function App() {
   }, [api, playback?.state, playback?.current_track, queue?.current_track, setPlayback]);
 
   const handleNext = useCallback(async () => {
-    let targetVid: string | undefined;
+    let sequence = beginOptimisticSwitch(null);
     if (queue && queue.items.length > 0) {
       const nextIdx =
         queue.repeat_mode === 'one'
@@ -839,8 +892,7 @@ export default function App() {
           : -1;
       if (nextIdx >= 0) {
         const nextTrack = queue.items[nextIdx];
-        targetVid = nextTrack.video_id;
-        beginOptimisticSwitch(nextTrack);
+        sequence = beginOptimisticSwitch(nextTrack);
         setPlayback((prev) => ({
           time_pos: 0,
           duration: nextTrack.duration_s,
@@ -856,12 +908,12 @@ export default function App() {
     try {
       await api.next();
     } catch {
-      clearOptimisticSwitch(targetVid);
+      await recoverPlayback(sequence);
     }
-  }, [api, beginOptimisticSwitch, clearOptimisticSwitch, queue, setPlayback, setQueue]);
+  }, [api, beginOptimisticSwitch, recoverPlayback, queue, setPlayback, setQueue]);
 
   const handlePrev = useCallback(async () => {
-    let targetVid: string | undefined;
+    let sequence = beginOptimisticSwitch(null);
     if (queue && queue.items.length > 0) {
       const prevIdx =
         queue.repeat_mode === 'one'
@@ -873,8 +925,7 @@ export default function App() {
           : 0;
       const prevTrack = queue.items[prevIdx];
       if (prevTrack) {
-        targetVid = prevTrack.video_id;
-        beginOptimisticSwitch(prevTrack);
+        sequence = beginOptimisticSwitch(prevTrack);
         setPlayback((prev) => ({
           time_pos: 0,
           duration: prevTrack.duration_s,
@@ -890,9 +941,9 @@ export default function App() {
     try {
       await api.prev();
     } catch {
-      clearOptimisticSwitch(targetVid);
+      await recoverPlayback(sequence);
     }
-  }, [api, beginOptimisticSwitch, clearOptimisticSwitch, queue, setPlayback, setQueue]);
+  }, [api, beginOptimisticSwitch, recoverPlayback, queue, setPlayback, setQueue]);
 
   const handleSeek = useCallback(
     async (seconds: number) => {
@@ -965,6 +1016,14 @@ export default function App() {
           nextLiked ? 'success' : 'info'
         );
       } catch {
+        if (nextLiked && autoDownloadLiked && !downloadedIds.has(track.video_id)) {
+          setDownloads(prev => {
+            if (prev[track.video_id]?.status !== 'queued') return prev;
+            const next = { ...prev };
+            delete next[track.video_id];
+            return next;
+          });
+        }
         setLikedIds((prev) => {
           const next = new Set(prev);
           if (currentlyLiked) next.add(track.video_id);
@@ -975,6 +1034,16 @@ export default function App() {
     },
     [api, likedIds, autoDownloadLiked, downloadedIds, setDownloads]
   );
+
+  const submitDownload = useCallback(async (videoId: string, track?: Track) => {
+    try {
+      await api.startDownload(videoId, track);
+    } catch {
+      setDownloads(prev => prev[videoId]?.status === 'queued' ? {
+        ...prev, [videoId]: { ...prev[videoId], status: 'error', error: 'Could not queue download. Retry.' },
+      } : prev);
+    }
+  }, [api, setDownloads]);
 
   const handleDownload = useCallback(
     async (track: Track) => {
@@ -991,9 +1060,9 @@ export default function App() {
         },
       }));
       toast.show(`Download queued: ${track.title}`, 'info');
-      try { await api.startDownload(track.video_id, track); } catch { /* Ignore */ }
+      await submitDownload(track.video_id, track);
     },
-    [api, setDownloads]
+    [submitDownload, setDownloads]
   );
 
   const handleRetryDownload = useCallback(
@@ -1010,9 +1079,9 @@ export default function App() {
           total_bytes: 0,
         },
       }));
-      try { await api.startDownload(videoId, meta); } catch { /* Ignore */ }
+      await submitDownload(videoId, meta);
     },
-    [api, downloadTrackMeta, setDownloads]
+    [submitDownload, downloadTrackMeta, setDownloads]
   );
 
   const handleCancelDownload = useCallback(
@@ -1095,38 +1164,45 @@ export default function App() {
         'info'
       );
       for (const t of pending) {
-        void api.startDownload(t.video_id, t).catch(() => {});
+        void submitDownload(t.video_id, t);
       }
     },
-    [api, downloadedIds, setDownloads]
+    [submitDownload, downloadedIds, setDownloads]
   );
 
   const handleAddNext = useCallback(async (track: Track) => {
     try {
       await api.addNextQueue(track);
       toast.show(`Playing next: ${track.title}`, 'accent');
-    } catch { /* Ignore */ }
+      return true;
+    } catch { return false; }
   }, [api]);
 
   const handleAppendQueue = useCallback(async (track: Track) => {
     try {
       await api.appendQueue(track);
       toast.show('Added to queue', 'accent');
-    } catch { /* Ignore */ }
+      return true;
+    } catch { return false; }
   }, [api]);
 
   const handleRemoveQueueItem = useCallback(async (index: number) => {
     try { await api.removeQueue(index); } catch { /* Ignore */ }
   }, [api]);
 
-  const handleMoveQueueItem = useCallback(async (fromIdx: number, toIdx: number) => {
-    try { await api.moveQueue(fromIdx, toIdx); } catch { /* Ignore */ }
-  }, [api]);
+  const handleMoveQueueItem = useCallback(
+    async (fromIdx: number, toIdx: number, targetSource?: 'user' | 'radio') => {
+      try {
+        await api.moveQueue(fromIdx, toIdx, targetSource);
+      } catch { /* Ignore */ }
+    },
+    [api]
+  );
 
   const handlePromoteQueueItem = useCallback(async (index: number) => {
     try {
       await api.promoteQueue(index);
-      toast.show('Added to Up Next queue', 'accent');
+      toast.show('Moved into active queue', 'accent');
     } catch { /* Ignore */ }
   }, [api]);
 
@@ -1136,6 +1212,67 @@ export default function App() {
       toast.show('Queue cleared', 'info');
     } catch { /* Ignore */ }
   }, [api]);
+
+  const normalizeArtistKey = (name?: string | null) =>
+    (name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+  const isArtistFollowedGlobal = useCallback(
+    (name?: string | null, channelId?: string | null): boolean => {
+      if (channelId && followedArtistKeys.has(channelId.trim())) return true;
+      const norm = normalizeArtistKey(name);
+      if (norm && followedArtistKeys.has(`norm:${norm}`)) return true;
+      return false;
+    },
+    [followedArtistKeys]
+  );
+
+  const handleToggleFollowArtist = useCallback(
+    async (artist: { name: string; channelId?: string | null; thumbnailUrl?: string | null }) => {
+      const cleanName = artist.name.trim();
+      const norm = normalizeArtistKey(cleanName);
+      const cid = artist.channelId?.trim() || null;
+      const currentlyFollowed = isArtistFollowedGlobal(cleanName, cid);
+      const next = !currentlyFollowed;
+
+      setFollowedArtistKeys((prev) => {
+        const updated = new Set(prev);
+        if (next) {
+          if (cid) updated.add(cid);
+          if (norm) updated.add(`norm:${norm}`);
+        } else {
+          if (cid) updated.delete(cid);
+          if (norm) updated.delete(`norm:${norm}`);
+        }
+        return updated;
+      });
+
+      try {
+        if (next) {
+          const entry = await api.followArtist({
+            channel_id: cid,
+            name: cleanName,
+            thumbnail_url: artist.thumbnailUrl ?? null,
+          });
+          setFollowedArtistKeys((prev) => {
+            const updated = new Set(prev);
+            if (entry.channel_id) updated.add(entry.channel_id);
+            if (entry.artist_norm) updated.add(`norm:${entry.artist_norm}`);
+            return updated;
+          });
+          toast.show(`Following ${cleanName}`, 'success');
+        } else {
+          await api.unfollowArtist(cid || cleanName);
+          toast.show(`Unfollowed ${cleanName}`, 'info');
+        }
+        setLibraryVersion((v) => v + 1);
+        return next;
+      } catch {
+        await refreshFollowedArtistsOnly();
+        return currentlyFollowed;
+      }
+    },
+    [api, isArtistFollowedGlobal, refreshFollowedArtistsOnly]
+  );
 
   const handlePinToggle = useCallback(
     async (track: Track) => {
@@ -1200,11 +1337,21 @@ export default function App() {
   );
 
   const handleSurpriseRadio = useCallback(async () => {
-    toast.show('Spinning up Surprise Mix...', 'accent');
+    const now = performance.now();
+    if (surpriseLockRef.current || now < surpriseCooldownUntilRef.current) {
+      return;
+    }
+    surpriseLockRef.current = true;
+    setIsSurpriseBusy(true);
+    toast.show('Discovering fresh Surprise Mix...', 'accent');
     try {
       await api.startSurpriseRadio();
     } catch {
       toast.show('Unable to launch Surprise Mix', 'info');
+    } finally {
+      surpriseCooldownUntilRef.current = performance.now() + 900;
+      surpriseLockRef.current = false;
+      setIsSurpriseBusy(false);
     }
   }, [api]);
 
@@ -1213,32 +1360,6 @@ export default function App() {
     void navigator.clipboard?.writeText(url);
     toast.show('Copied track link to clipboard', 'success');
   }, []);
-
-  const handleBlockArtist = useCallback(
-    async (artistName: string) => {
-      try {
-        await api.blockArtist(artistName);
-        setLibraryVersion((v) => v + 1);
-        toast.show(`Blocked "${artistName}" from Home & Radio`, 'info');
-      } catch { /* Ignore */ }
-    },
-    [api]
-  );
-
-  const handleSaveTrackMetadata = useCallback(
-    async (track: Track, patch: { title: string; artist: string; album: string | null }) => {
-      await api.updateTrackMetadata(track.video_id, patch);
-      setLikedTracks((prev) =>
-        prev.map((t) => (t.video_id === track.video_id ? { ...t, ...patch } : t))
-      );
-      setDownloadTracks((prev) =>
-        prev.map((t) => (t.video_id === track.video_id ? { ...t, ...patch } : t))
-      );
-      setLibraryVersion((v) => v + 1);
-      toast.show('Track metadata updated', 'success');
-    },
-    [api]
-  );
 
   const handleCreatePlaylist = useCallback(
     async (name: string, description: string) => {
@@ -1266,9 +1387,38 @@ export default function App() {
   const handlePlaylistDeleted = useCallback(
     (id: string) => {
       setPlaylists((prev) => prev.filter((p) => p.id !== id));
-      navigateTo('home');
+      if (activeTab === 'playlist' && activePlaylistId === id) {
+        navigateTo('playlists');
+      }
     },
-    [navigateTo]
+    [activePlaylistId, activeTab, navigateTo]
+  );
+
+  const handleOpenImportPlaylist = useCallback(() => {
+    setIsImportPlaylistOpen(true);
+  }, []);
+
+  const handleDismissV14Promo = useCallback(() => {
+    v14PromoHandledRef.current = true;
+    setV14PromoSeen(true);
+    setIsV14PromoOpen(false);
+    void api.setSettings({ import_promo_v1_4_seen: true }).catch(() => {});
+  }, [api]);
+
+  const handleAcceptV14Promo = useCallback(() => {
+    v14PromoHandledRef.current = true;
+    setV14PromoSeen(true);
+    setIsV14PromoOpen(false);
+    void api.setSettings({ import_promo_v1_4_seen: true }).catch(() => {});
+    setIsImportPlaylistOpen(true);
+  }, [api]);
+
+  const handleImportComplete = useCallback(
+    (job: ImportJobState) => {
+      toast.show(`Imported ${job.matched} / ${job.total} tracks into "${job.playlist_name}"`, 'success');
+      void refreshLibraryStats();
+    },
+    [refreshLibraryStats]
   );
 
   const currentTrackRef = useRef(playback?.current_track);
@@ -1276,6 +1426,7 @@ export default function App() {
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (document.querySelector('dialog[open]')) return;
       const activeEl = document.activeElement;
       const isInput =
         activeEl?.tagName === 'INPUT' ||
@@ -1305,6 +1456,8 @@ export default function App() {
       if (e.key === 'Escape') {
         if (isUpdateModalOpen) return setIsUpdateModalOpen(false);
         if (isUpdateTabOpen) return setIsUpdateTabOpen(false);
+        if (isV14PromoOpen) return handleDismissV14Promo();
+        if (isImportPlaylistOpen) return setIsImportPlaylistOpen(false);
         if (isCreatePlaylistOpen) return setIsCreatePlaylistOpen(false);
         if (addToPlaylistTrack) return setAddToPlaylistTrack(null);
         if (isSettingsOpen) return setIsSettingsOpen(false);
@@ -1320,8 +1473,11 @@ export default function App() {
     handleNext,
     handlePrev,
     handleToggleLike,
+    handleDismissV14Promo,
     isUpdateModalOpen,
     isUpdateTabOpen,
+    isV14PromoOpen,
+    isImportPlaylistOpen,
     isCreatePlaylistOpen,
     addToPlaylistTrack,
     isSettingsOpen,
@@ -1415,12 +1571,14 @@ export default function App() {
 
   const handleTitlebarSearchSubmit = useCallback(
     (q: string) => {
+      setSearchQuery(q);
       setSubmittedSearch(q);
       if (q.trim().length > 0) {
+        void api.rememberSearch({ term: q }).catch(() => {});
         if (activeTab !== 'search') navigateTo('search');
       }
     },
-    [activeTab, navigateTo]
+    [activeTab, api, navigateTo]
   );
 
   const handleFocusSearchTab = useCallback(() => {
@@ -1454,7 +1612,7 @@ export default function App() {
 
   const handlePlayQueueItem = useCallback(
     async (track: Track, idx: number) => {
-      beginOptimisticSwitch(track);
+      const sequence = beginOptimisticSwitch(track);
       setPlayback((prev) => ({
         time_pos: 0,
         duration: track.duration_s,
@@ -1465,10 +1623,10 @@ export default function App() {
       try {
         await api.jumpQueue(idx, true);
       } catch {
-        clearOptimisticSwitch(track.video_id);
+        await recoverPlayback(sequence);
       }
     },
-    [api, beginOptimisticSwitch, clearOptimisticSwitch, setPlayback]
+    [api, beginOptimisticSwitch, recoverPlayback, setPlayback]
   );
 
   const handleEnterIslandAction = useCallback(() => {
@@ -1563,20 +1721,22 @@ export default function App() {
   const trackActionsContextValue = useMemo(
     () => ({
       pinnedTrackIds,
+      followedArtistKeys,
+      isArtistFollowed: isArtistFollowedGlobal,
+      onToggleFollowArtist: handleToggleFollowArtist,
       onPinToggle: handlePinToggle,
       onStartRadio: handleStartRadio,
       onShareTrack: handleShareTrack,
-      onBlockArtist: handleBlockArtist,
-      onSaveTrackMetadata: handleSaveTrackMetadata,
       onOpenAddToPlaylist: handleOpenAddToPlaylist,
     }),
     [
       pinnedTrackIds,
+      followedArtistKeys,
+      isArtistFollowedGlobal,
+      handleToggleFollowArtist,
       handlePinToggle,
       handleStartRadio,
       handleShareTrack,
-      handleBlockArtist,
-      handleSaveTrackMetadata,
       handleOpenAddToPlaylist,
     ]
   );
@@ -1661,10 +1821,12 @@ export default function App() {
             onToggleCollapse={handleToggleSidebar}
             onSelectTab={navigateTo}
             onOpenCreatePlaylist={handleOpenCreatePlaylist}
+            onOpenImportPlaylist={handleOpenImportPlaylist}
           />
 
+          <div className="orbit-workspace relative flex flex-1 min-w-0 min-h-0 gap-2 sm:gap-3">
           <main
-            className="flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent"
+            className="orbit-content flex-1 min-w-0 flex flex-col overflow-hidden relative bg-transparent"
             style={{ contain: 'layout style' }}
           >
             <div key={tabAnimKey} className="flex-1 min-h-0 flex flex-col eh-tab-enter">
@@ -1678,6 +1840,7 @@ export default function App() {
                   downloadedIds={downloadedIds}
                   pins={pins}
                   libraryVersion={libraryVersion}
+                  surpriseLoading={isSurpriseBusy}
                   onPlayTrack={handlePlaySingleHomeTrack}
                   onPlayAll={handlePlayAll}
                   onToggleLike={handleToggleLike}
@@ -1704,6 +1867,7 @@ export default function App() {
               {activeTab === 'search' && (
                 <SearchView
                   initialQuery={submittedSearch}
+                  onSelectTerm={handleTitlebarSearchSubmit}
                   isConnected={isConnected}
                   currentTrackId={activeVideoId}
                   isPlaying={playback?.state === 'playing'}
@@ -1763,11 +1927,13 @@ export default function App() {
                 />
               )}
 
-              {activeTab === 'stats' && (
-                <StatsView
-                  libraryVersion={libraryVersion}
-                  onPlay={handlePlayTrack}
-                  onOpenArtist={(name, channelId) => handleOpenArtist({ name, channelId })}
+              {activeTab === 'playlists' && (
+                <PlaylistsView
+                  playlists={playlists}
+                  onOpenPlaylist={(playlistId) => navigateTo('playlist', playlistId)}
+                  onCreatePlaylist={handleOpenCreatePlaylist}
+                  onImportPlaylist={handleOpenImportPlaylist}
+                  onPlaylistDeleted={handlePlaylistDeleted}
                 />
               )}
 
@@ -1878,6 +2044,7 @@ export default function App() {
             onToggleLike={handleToggleLike}
             onDownload={handleDownload}
           />
+          </div>
         </div>
 
         {/* Floating Liquid Glass Player Dock */}
@@ -1953,6 +2120,21 @@ export default function App() {
         onCreate={handleCreatePlaylist}
       />
 
+      <ImportPlaylistModal
+        isOpen={isImportPlaylistOpen}
+        playlists={playlists}
+        onClose={() => setIsImportPlaylistOpen(false)}
+        onOpenPlaylist={(playlistId) => navigateTo('playlist', playlistId)}
+        onOpenLiked={() => navigateTo('liked')}
+        onImportComplete={handleImportComplete}
+      />
+
+      <ImportPromoModal
+        isOpen={isV14PromoOpen}
+        onDismiss={handleDismissV14Promo}
+        onStartImport={handleAcceptV14Promo}
+      />
+
       <AddToPlaylistModal
         isOpen={!!addToPlaylistTrack}
         track={addToPlaylistTrack}
@@ -1972,6 +2154,7 @@ export default function App() {
         lyricsEdgeBlur={lyricsEdgeBlur}
         onToggleLyricsEdgeBlur={handleToggleLyricsEdgeBlur}
         onPrivacyChanged={() => setLibraryVersion((v) => v + 1)}
+        onOpenImportPlaylist={handleOpenImportPlaylist}
       />
 
       <UpdateAvailableModal

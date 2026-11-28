@@ -510,3 +510,39 @@ async def test_ytm_client_resets_session_and_retries_on_transient_error() -> Non
     assert tracks[0].video_id == "pal_1"
     broken_yt._session.close.assert_called_once()
     assert mock_yt_cls.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_get_artist_profile_ignores_synthetic_name_id() -> None:
+    """Synthetic 'name:...' SQLite channel IDs skip YTM browse and resolve real browseId by name."""
+    mock_yt = MagicMock()
+    mock_yt.search.return_value = [
+        {"browseId": "UC_SHASHWAT", "artist": "Shashwat Sachdev", "thumbnails": []}
+    ]
+    mock_yt.get_artist.return_value = {
+        "name": "Shashwat Sachdev",
+        "songs": {
+            "results": [
+                {
+                    "videoId": "gehra_hua_01",
+                    "title": "Gehra Hua",
+                    "artists": [{"name": "Shashwat Sachdev", "id": "UC_SHASHWAT"}],
+                    "duration": "6:03",
+                }
+            ]
+        },
+        "albums": {"results": []},
+        "singles": {"results": []},
+    }
+
+    client = YTMusicClient(yt_instance=mock_yt)
+    profile = await client.get_artist_profile(
+        name="Shashwat Sachdev",
+        channel_id="name:shashwat sachdev",
+    )
+    assert profile["channel_id"] == "UC_SHASHWAT"
+    assert profile["name"] == "Shashwat Sachdev"
+    assert len(profile["all_tracks"]) == 1
+    assert profile["all_tracks"][0]["video_id"] == "gehra_hua_01"
+    for call in mock_yt.get_artist.call_args_list:
+        assert not str(call.args[0]).startswith("name:")

@@ -1,5 +1,15 @@
 import { useState, useEffect, type FC, type FormEvent } from 'react';
-import { X, Plus, ListMusic, Sparkles, Download, AlignLeft, EyeOff, Ban } from 'lucide-react';
+import {
+  X,
+  Plus,
+  ListMusic,
+  Sparkles,
+  Download,
+  AlignLeft,
+  EyeOff,
+  Ban,
+  FolderInput,
+} from 'lucide-react';
 import { OrbitLogo } from './OrbitLogo';
 import { bridgeApi } from '../api/client';
 import type { CosmicEffectsMode } from './StarfieldBg';
@@ -200,6 +210,7 @@ interface SettingsModalProps {
   lyricsEdgeBlur: boolean;
   onToggleLyricsEdgeBlur: () => void;
   onPrivacyChanged?: () => void;
+  onOpenImportPlaylist?: () => void;
 }
 
 const COSMIC_MODES: { id: CosmicEffectsMode; label: string; desc: string }[] = [
@@ -218,6 +229,7 @@ export const SettingsModal: FC<SettingsModalProps> = ({
   lyricsEdgeBlur,
   onToggleLyricsEdgeBlur,
   onPrivacyChanged,
+  onOpenImportPlaylist,
 }) => {
   const [pauseHistory, setPauseHistory] = useState(false);
   const [blockedArtists, setBlockedArtists] = useState<BlockedArtist[]>([]);
@@ -410,6 +422,33 @@ export const SettingsModal: FC<SettingsModalProps> = ({
             </div>
           )}
 
+          {/* Playlist Importer Shortcut */}
+          {onOpenImportPlaylist && (
+            <div className="flex items-center justify-between p-3.5 rounded-xl bg-white/[0.04] border border-white/10">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-black/50 border border-white/10 flex items-center justify-center flex-none">
+                  <FolderInput size={16} style={{ color: 'var(--dynamic-accent)' }} />
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold text-[#F4F6FF]">Playlist Importer</div>
+                  <div className="text-[11px] text-[#9BA4C4] mt-0.5 truncate">
+                    Import from YouTube, YouTube Music, Spotify &amp; Apple Music
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenImportPlaylist();
+                }}
+                className="px-3.5 py-1.5 rounded-full text-[11px] font-semibold bg-white/[0.1] hover:bg-white/[0.18] text-[#F4F6FF] border border-white/15 transition-colors flex-none"
+              >
+                Import
+              </button>
+            </div>
+          )}
+
           {/* Creator Credit */}
           <div className="p-3.5 rounded-xl bg-black/50 border border-white/10 flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -431,6 +470,100 @@ export const SettingsModal: FC<SettingsModalProps> = ({
             className="px-5 py-2 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] hover:opacity-90 transition-opacity"
           >
             Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface ImportPromoModalProps {
+  isOpen: boolean;
+  onDismiss: () => void;
+  onStartImport: () => void;
+}
+
+export const ImportPromoModal: FC<ImportPromoModalProps> = ({
+  isOpen,
+  onDismiss,
+  onStartImport,
+}) => {
+  if (!isOpen) return null;
+
+  return (
+    <div
+      onClick={onDismiss}
+      className="fixed inset-0 bg-black/75 eh-modal-backdrop z-[96] flex items-center justify-center p-4 select-none"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md ios-liquid-popover eh-modal-in rounded-[26px] p-6 space-y-5"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className="w-10 h-10 rounded-2xl border border-white/15 flex items-center justify-center flex-none"
+              style={{ background: 'rgba(var(--dynamic-accent-rgb), 0.18)' }}
+            >
+              <FolderInput size={18} style={{ color: 'var(--dynamic-accent)' }} />
+            </div>
+            <div>
+              <div
+                className="text-[10px] font-mono uppercase tracking-[0.2em] font-semibold"
+                style={{ color: 'var(--dynamic-accent)' }}
+              >
+                New in ORBIT v1.4
+              </div>
+              <h2 className="text-base font-bold text-[#F4F6FF] mt-0.5">
+                Import Your Playlists
+              </h2>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss"
+            className="p-1 text-[#9BA4C4] hover:text-white rounded-lg hover:bg-white/10 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <p className="text-xs leading-relaxed text-[#C6CFE8]">
+          Bring your existing playlists and albums straight into ORBIT with a single link — no
+          sign-in or API keys needed.
+        </p>
+
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          {['YouTube', 'YouTube Music', 'Spotify', 'Apple Music'].map((platform) => (
+            <div
+              key={platform}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-[#E6ECF8]"
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full flex-none"
+                style={{ backgroundColor: 'var(--dynamic-accent)' }}
+              />
+              <span>{platform}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="px-4 py-2 rounded-full text-xs text-[#9BA4C4] hover:text-white hover:bg-white/[0.06] transition-colors"
+          >
+            Not Now
+          </button>
+          <button
+            type="button"
+            onClick={onStartImport}
+            className="inline-flex items-center gap-1.5 px-5 py-2 rounded-full text-xs font-semibold bg-[#F4F6FF] text-[#020308] hover:opacity-90 transition-opacity"
+          >
+            <FolderInput size={13} />
+            <span>Import Playlist</span>
           </button>
         </div>
       </div>

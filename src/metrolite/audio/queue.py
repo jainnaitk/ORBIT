@@ -168,7 +168,10 @@ class QueueManager:
                     await self.save_to_db()
                 except (sqlite3.Error, OSError) as e:
                     logger.warning("Failed to auto-persist queue state: %s", e)
+                    self._persist_dirty = True
+                    return
                 except asyncio.CancelledError:
+                    self._persist_dirty = True
                     break
 
         with suppress(RuntimeError):
@@ -177,6 +180,8 @@ class QueueManager:
     def _notify(self) -> None:
         """Trigger queue changed callback and auto-persistence."""
         self._generation += 1
+        if not self.shuffle:
+            self._original_items = list(self.items)
         if self.auto_persist and self._db_path and self._db_path.is_file():
             try:
                 asyncio.get_running_loop()
@@ -197,9 +202,15 @@ class QueueManager:
     def _tag_track(track: Track, source: Literal["user", "radio"] = "user") -> Track:
         """Ensure queue tracks carry a valid provenance source ('user' or 'radio')."""
         effective: Literal["user", "radio"] = track.source if track.source in ("user", "radio") else source
-        if track.source == effective:
-            return track
         return track.model_copy(update={"source": effective})
+
+    def _original_index(self, track: Track) -> int:
+        return next(i for i, entry in enumerate(self._original_items) if entry is track)
+
+    def replace_track(self, idx: int, track: Track) -> None:
+        replacement = track.model_copy(update={"source": self.items[idx].source})
+        self._original_items[self._original_index(self.items[idx])] = replacement
+        self.items[idx] = replacement
 
     def set_queue(self, tracks: list[Track], start_index: int = 0) -> None:
         """Replace the entire queue with new tracks."""
@@ -241,7 +252,8 @@ class QueueManager:
             insert_idx = self.current_index + 1
             for offset, t in enumerate(new_tracks):
                 self.items.insert(insert_idx + offset, t)
-            self._original_items.extend(new_tracks)
+            original_pos = self._original_index(self.items[self.current_index]) + 1
+            self._original_items[original_pos:original_pos] = new_tracks
         self._notify()
 
     def promote(self, idx: int) -> bool:
@@ -250,10 +262,8 @@ class QueueManager:
             return False
         promoted = self.items[idx].model_copy(update={"source": "user"})
         # Update _original_items entry if present
-        for o_idx, orig in enumerate(self._original_items):
-            if orig.video_id == promoted.video_id:
-                self._original_items[o_idx] = promoted
-                break
+        if self.shuffle:
+            self._original_items[self._original_index(self.items[idx])] = promoted
         if idx <= self.current_index:
             self.items[idx] = promoted
             self._notify()
@@ -272,8 +282,7 @@ class QueueManager:
         if not (0 <= idx < len(self.items)):
             return None
         removed = self.items.pop(idx)
-        if removed in self._original_items:
-            self._original_items.remove(removed)
+        self._original_items.pop(self._original_index(removed))
 
         if not self.items:
             self.current_index = 0
@@ -285,12 +294,20 @@ class QueueManager:
         self._notify()
         return removed
 
-    def move(self, from_idx: int, to_idx: int) -> None:
-        """Move a track from one index to another, preserving current track pointer."""
+    def move(
+        self,
+        from_idx: int,
+        to_idx: int,
+        target_source: str | None = None,
+    ) -> None:
+        """Move a track from one index to another, supporting global cross-section drag-and-drop."""
         n = len(self.items)
-        if not (0 <= from_idx < n and 0 <= to_idx < n) or from_idx == to_idx:
+        if not (0 <= from_idx < n and 0 <= to_idx < n):
+            return
+        if from_idx == to_idx and target_source is None:
             return
 
+        destination = self.items[to_idx]
         track = self.items.pop(from_idx)
         self.items.insert(to_idx, track)
 
@@ -300,6 +317,35 @@ class QueueManager:
             self.current_index -= 1
         elif to_idx <= self.current_index < from_idx:
             self.current_index += 1
+
+        next_source = track.source
+        if target_source in ("user", "radio"):
+            next_source = target_source  # type: ignore[assignment]
+        elif to_idx > self.current_index:
+            # Infer cleanly when dragged above remaining radio suggestions or below radio items
+            has_user_after = any(
+                self.items[i].source != "radio" for i in range(to_idx + 1, len(self.items))
+            )
+            has_radio_before = any(
+                self.items[i].source == "radio"
+                for i in range(self.current_index + 1, to_idx)
+            )
+            if has_user_after:
+                next_source = "user"
+            elif has_radio_before:
+                next_source = "radio"
+
+        if next_source != track.source:
+            self.items[to_idx] = track.model_copy(update={"source": next_source})
+
+        if self.shuffle:
+            original = self._original_index(track)
+            if from_idx == to_idx:
+                self._original_items[original] = self.items[to_idx]
+            else:
+                self._original_items.pop(original)
+                target = self._original_index(destination) + int(from_idx < to_idx)
+                self._original_items.insert(target, self.items[to_idx])
 
         self._notify()
 
@@ -312,22 +358,28 @@ class QueueManager:
         self._notify()
 
     def _apply_shuffle(self) -> None:
-        """Apply Fisher-Yates shuffle preserving current track at index 0."""
+        """Apply Fisher-Yates shuffle preserving current track at index 0 and user/radio partition."""
         if len(self.items) <= 1:
             return
         curr = self.current_track
         remaining = [t for i, t in enumerate(self.items) if i != self.current_index]
+        user_remaining = [t for t in remaining if t.source != "radio"]
+        radio_remaining = [t for t in remaining if t.source == "radio"]
 
-        # Fisher-Yates shuffle on remaining tracks
-        for i in range(len(remaining) - 1, 0, -1):
-            j = random.randint(0, i)
-            remaining[i], remaining[j] = remaining[j], remaining[i]
+        def _shuffle_in_place(bucket: list[Track]) -> None:
+            for i in range(len(bucket) - 1, 0, -1):
+                j = random.randint(0, i)
+                bucket[i], bucket[j] = bucket[j], bucket[i]
 
+        _shuffle_in_place(user_remaining)
+        _shuffle_in_place(radio_remaining)
+
+        shuffled = [*user_remaining, *radio_remaining]
         if curr is not None:
-            self.items = [curr, *remaining]
+            self.items = [curr, *shuffled]
             self.current_index = 0
         else:
-            self.items = remaining
+            self.items = shuffled
             self.current_index = 0
 
     def set_shuffle(self, enabled: bool) -> None:
@@ -344,8 +396,18 @@ class QueueManager:
             curr = self.current_track
             if self._original_items:
                 self.items = list(self._original_items)
-                if curr and curr in self.items:
-                    self.current_index = self.items.index(curr)
+                if curr and any(item is curr for item in self.items):
+                    self.current_index = self._original_index(curr)
+                elif curr is not None:
+                    by_vid = next(
+                        (i for i, t in enumerate(self.items) if t.video_id == curr.video_id),
+                        None,
+                    )
+                    self.current_index = (
+                        by_vid
+                        if by_vid is not None
+                        else max(0, min(self.current_index, len(self.items) - 1))
+                    )
                 else:
                     self.current_index = max(0, min(self.current_index, len(self.items) - 1))
 
@@ -365,17 +427,22 @@ class QueueManager:
         self.set_repeat_mode(cycle[self.repeat_mode])
         return self.repeat_mode
 
-    async def refill_radio(self, limit: int = 15) -> int:
-        """Refill queue with contextually relevant, deduplicated, popular radio tracks."""
+    async def refill_radio(
+        self,
+        limit: int = 15,
+        auto_promote_until: int = 0,
+    ) -> int:
+        """Refill queue with contextually relevant tracks, building active queue first when configured."""
         if not self.autoplay_radio:
             return 0
         curr = self.current_track
         if not curr:
             return 0
 
-        # Never balloon the queue when plenty of tracks are already queued ahead
+        # Allow larger buffers when building the initial 20-25 active queue + trailing suggestions
         upcoming_count = max(0, len(self.items) - 1 - self.current_index)
-        effective_limit = min(limit, max(0, 18 - upcoming_count))
+        max_upcoming = max(18, auto_promote_until + 8) if auto_promote_until > 0 else 18
+        effective_limit = min(limit, max(0, max_upcoming - upcoming_count))
         if effective_limit <= 0:
             return 0
 
@@ -439,10 +506,11 @@ class QueueManager:
 
         scored_pool = _score_and_filter(list(recommended), base_priority=20.0)
 
-        # If watch radio returned too few clean tracks (or drifted into remixes/duplicates),
+        # If watch radio returned fewer clean tracks than needed (e.g. to reach 20-25 songs),
         # blend in popular contextual songs from the seed artist / soundtrack.
+        min_pool_target = max(6, effective_limit) if auto_promote_until > 0 else 6
         if (
-            len(scored_pool) < 6
+            len(scored_pool) < min_pool_target
             and seed_artist
             and seed_artist not in ("unknown artist", "artist")
             and hasattr(ytm, "search")
@@ -451,6 +519,8 @@ class QueueManager:
             queries = [f"{curr.artist.split(',')[0].strip()} popular songs"]
             if curr.album and curr.album.strip().lower() != curr.title.strip().lower():
                 queries.append(f"{curr.album} songs")
+            if auto_promote_until > 0:
+                queries.append(f"{curr.artist.split(',')[0].strip()} hits playlist")
             for q in queries:
                 if (
                     not self.autoplay_radio
@@ -461,7 +531,7 @@ class QueueManager:
                 ):
                     return 0
                 try:
-                    extra = await ytm.search(q, filter_type="songs", limit=12)
+                    extra = await ytm.search(q, filter_type="songs", limit=18)
                     scored_pool.extend(_score_and_filter(list(extra), base_priority=15.0))
                 except Exception as e:  # noqa: BLE001
                     logger.debug("Contextual radio fallback search failed for %r: %s", q, e)
@@ -489,8 +559,11 @@ class QueueManager:
             if canon in seen_titles:
                 continue
             cand_artist = _primary_artist(track.artist)
-            # Cap per-artist concentration so one artist/upload spam cannot dominate Up Next
-            max_for_artist = 4 if (seed_artist and cand_artist == seed_artist) else 2
+            # Cap per-artist concentration while allowing larger 22-28 track queues when building initial active queue
+            if auto_promote_until > 0:
+                max_for_artist = 6 if (seed_artist and cand_artist == seed_artist) else 4
+            else:
+                max_for_artist = 4 if (seed_artist and cand_artist == seed_artist) else 2
             if cand_artist and cand_artist not in ("unknown artist", "artist"):
                 if artist_counts.get(cand_artist, 0) >= max_for_artist:
                     continue
@@ -513,14 +586,61 @@ class QueueManager:
                     break
 
         if selected:
-            tagged_radio = [t.model_copy(update={"source": "radio"}) for t in selected]
-            self.items.extend(tagged_radio)
-            self._original_items.extend(tagged_radio)
+            upcoming_user_count = sum(
+                1 for t in self.items[self.current_index + 1:] if t.source != "radio"
+            )
+            promote_slots = max(0, auto_promote_until - upcoming_user_count) if auto_promote_until > 0 else 0
+            to_user = [
+                t.model_copy(update={"source": "user"}) for t in selected[:promote_slots]
+            ]
+            to_radio = [
+                t.model_copy(update={"source": "radio"}) for t in selected[promote_slots:]
+            ]
+
+            if to_user:
+                insert_idx = self.current_index + 1
+                while insert_idx < len(self.items) and self.items[insert_idx].source != "radio":
+                    insert_idx += 1
+                for off, ut in enumerate(to_user):
+                    self.items.insert(insert_idx + off, ut)
+                self._original_items.extend(to_user)
+
+            if to_radio:
+                self.items.extend(to_radio)
+                self._original_items.extend(to_radio)
+
             self._notify()
-            return len(tagged_radio)
+            return len(to_user) + len(to_radio)
         return 0
 
-    async def next_track(self, is_error: bool = False) -> Track | None:
+    async def _advance_after_radio(
+        self, steps: int, limit: int, is_current: Callable[[], bool] | None
+    ) -> Track | None:
+        seed = self.current_track
+        generation = self._generation
+        added = await self.refill_radio(limit=limit)
+        if seed is None or self.current_track is not seed or (is_current is not None and not is_current()):
+            return None
+        if not added and generation == self._generation:
+            return None
+
+        # An edit can invalidate the recommendations but supply its own next item.
+        target = self.current_index + steps
+        if self.repeat_mode == "one":
+            return seed
+        if self.repeat_mode == "all":
+            target %= len(self.items)
+        elif self.current_index + 1 < len(self.items):
+            target = min(target, len(self.items) - 1)
+        else:
+            return None
+        self.current_index = target
+        self._notify()
+        return self.current_track
+
+    async def next_track(
+        self, is_error: bool = False, *, is_current: Callable[[], bool] | None = None
+    ) -> Track | None:
         """Advance queue index and return next Track, or None if queue ends.
 
         If is_error is True, verifies consecutive errors do not exceed
@@ -556,21 +676,7 @@ class QueueManager:
 
         # Off mode: check autoplay radio refill
         if self.autoplay_radio:
-            gen_before = self._generation
-            seed_idx = self.current_index
-            seed_id = self.current_track.video_id if self.current_track else None
-            added = await self.refill_radio()
-            if (
-                added > 0
-                and self.current_index == seed_idx
-                and self.current_track is not None
-                and self.current_track.video_id == seed_id
-                and self._generation == gen_before + 1
-                and self.current_index + 1 < len(self.items)
-            ):
-                self.current_index += 1
-                self._notify()
-                return self.current_track
+            return await self._advance_after_radio(1, 15, is_current)
 
         return None
 
@@ -616,11 +722,13 @@ class QueueManager:
             out.append(cand)
         return out
 
-    async def step_tracks(self, steps: int = 1, direction: int = 1) -> Track | None:
+    async def step_tracks(
+        self, steps: int = 1, direction: int = 1, *, is_current: Callable[[], bool] | None = None
+    ) -> Track | None:
         """Jump forward or backward by `steps` tracks in a single step without intermediate loads."""
         steps = max(1, int(steps))
         if direction >= 0 and steps == 1:
-            return await self.next_track()
+            return await self.next_track(is_current=is_current)
         if direction < 0 and steps == 1:
             return self.prev_track()
 
@@ -651,30 +759,24 @@ class QueueManager:
             return self.current_track
 
         if self.autoplay_radio:
-            gen_before = self._generation
-            seed_idx = self.current_index
-            seed_id = self.current_track.video_id if self.current_track else None
-            added = await self.refill_radio(limit=max(15, target - n + 5))
-            if (
-                added > 0
-                and self.current_index == seed_idx
-                and self.current_track is not None
-                and self.current_track.video_id == seed_id
-                and self._generation == gen_before + 1
-                and self.current_index + 1 < len(self.items)
-            ):
-                self.current_index = min(target, len(self.items) - 1)
-                self._notify()
-                return self.current_track
+            return await self._advance_after_radio(steps, max(15, target - n + 5), is_current)
 
         return None
+
+    def _snapshot(self) -> tuple[int, int, str, str]:
+        records = [track.model_dump() for track in self.items]
+        if self.shuffle:
+            positions = {id(track): i for i, track in enumerate(self._original_items)}
+            for track, record in zip(self.items, records, strict=True):
+                record["queue_order"] = positions[id(track)]
+        return self.current_index, int(self.shuffle), self.repeat_mode, json.dumps(records)
 
     def save_to_db_sync(self, db_path: Path | str | None = None) -> None:
         """Synchronously persist queue state to SQLite queue_state table."""
         path = Path(db_path) if db_path is not None else self._db_path
         if not path.is_file():
             return
-        items_json = json.dumps([t.model_dump() for t in self.items])
+        snapshot = self._snapshot()
         with get_sync_connection(path) as conn:
             conn.execute(
                 """
@@ -686,7 +788,7 @@ class QueueManager:
                     repeat_mode = excluded.repeat_mode,
                     items_json = excluded.items_json;
                 """,
-                (self.current_index, 1 if self.shuffle else 0, self.repeat_mode, items_json),
+                snapshot,
             )
             conn.commit()
 
@@ -695,7 +797,7 @@ class QueueManager:
         path = Path(db_path) if db_path is not None else self._db_path
         if not path.is_file():
             return
-        items_json = json.dumps([t.model_dump() for t in self.items])
+        snapshot = self._snapshot()
         async with get_connection(path) as conn:
             await conn.execute(
                 """
@@ -707,36 +809,38 @@ class QueueManager:
                     repeat_mode = excluded.repeat_mode,
                     items_json = excluded.items_json;
                 """,
-                (self.current_index, 1 if self.shuffle else 0, self.repeat_mode, items_json),
+                snapshot,
             )
             await conn.commit()
 
-    def flush_sync(self) -> None:
-        """Cancel pending async persistence task and flush dirty queue state synchronously."""
-        if self._persist_task is not None and not self._persist_task.done():
-            self._persist_task.cancel()
-        self._persist_task = None
+    async def flush(self) -> None:
+        """Drain queued writes before acknowledging shutdown."""
+        if self._persist_task is not None:
+            await asyncio.shield(self._persist_task)
         if self.auto_persist and self._persist_dirty:
+            await self.save_to_db()
             self._persist_dirty = False
-            try:
-                self.save_to_db_sync()
-            except (sqlite3.Error, OSError) as e:
-                logger.warning("Failed to flush queue state on shutdown: %s", e)
 
     def _parse_persisted_items(self, raw_json: str | None) -> list[Track]:
         """Parse persisted items_json defensively, skipping malformed entries."""
         raw_items = json.loads(raw_json or "[]")
+        self._original_items = []
         if not isinstance(raw_items, list):
             return []
         parsed: list[Track] = []
+        positions: list[int] = []
         for idx, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 logger.warning("Skipping non-dict persisted queue entry at index %d", idx)
                 continue
             try:
                 parsed.append(Track(**item))
+                positions.append(item.get("queue_order", idx))
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning("Skipping malformed persisted queue entry at index %d: %s", idx, e)
+        self._original_items = list(parsed)
+        if all(isinstance(p, int) for p in positions) and sorted(positions) == list(range(len(parsed))):
+            self._original_items = [track for _, track in sorted(zip(positions, parsed), key=lambda pair: pair[0])]
         return parsed
 
     def load_from_db_sync(self, db_path: Path | str | None = None) -> bool:
@@ -751,7 +855,6 @@ class QueueManager:
                 if not row:
                     return False
                 self.items = self._parse_persisted_items(row["items_json"])
-                self._original_items = list(self.items)
                 raw_idx = int(row["current_index"] or 0)
                 self.current_index = max(0, min(raw_idx, len(self.items) - 1)) if self.items else 0
                 self.shuffle = bool(row["shuffle"])
@@ -775,7 +878,6 @@ class QueueManager:
                 if not row:
                     return False
                 self.items = self._parse_persisted_items(row["items_json"])
-                self._original_items = list(self.items)
                 raw_idx = int(row["current_index"] or 0)
                 self.current_index = max(0, min(raw_idx, len(self.items) - 1)) if self.items else 0
                 self.shuffle = bool(row["shuffle"])

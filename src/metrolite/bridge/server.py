@@ -10,6 +10,7 @@ import os
 import random
 import secrets
 import socket
+import sqlite3
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -31,7 +32,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from metrolite.audio.media_keys import MediaKeysListener
@@ -40,6 +41,13 @@ from metrolite.audio.queue import QueueManager
 from metrolite.audio.resolver import StreamResolutionError
 from metrolite.config import get_config
 from metrolite.library.downloader import DownloadManager, DownloadProgress, validate_video_id
+from metrolite.library.importer import (
+    ImportDestination,
+    ImportJobState,
+    ImportSourceError,
+    PlaylistImportManager,
+    detect_import_target,
+)
 from metrolite.library.manager import (
     LibraryManager,
     artist_matches_blocked,
@@ -76,6 +84,19 @@ _TRENDING_QUERIES = [
     "latest viral music hits india",
     "trending global music charts",
     "new hit songs bollywood pop",
+]
+
+_SURPRISE_DISCOVERY_QUERIES = [
+    "underrated indie pop songs",
+    "modern soulful r&b hits",
+    "melodic electronic vocal tracks",
+    "fresh indie hindi gems",
+    "synthwave midnight drive tracks",
+    "alternative chill rock hits",
+    "global acoustic session hits",
+    "fresh punjabi chill vibes",
+    "late night groove jazz pop",
+    "feel good summer indie hits",
 ]
 
 _MOOD_CONFIG: dict[str, list[tuple[str, str, str, str, list[str]]]] = {
@@ -343,6 +364,12 @@ class BridgeController:
         self.library = library or LibraryManager(db_path=self.db_path)
         self.downloader = downloader or DownloadManager(db_path=self.db_path)
         self.updater = updater or UpdateManager()
+        self.importer = PlaylistImportManager(
+            ytm=self.ytm,
+            library=self.library,
+            on_progress=self._on_import_progress,
+            on_completed=self._on_import_completed,
+        )
         self.media_keys = media_keys
         self.loop: asyncio.AbstractEventLoop | None = None
         self._tick_task: asyncio.Task[None] | None = None
@@ -353,19 +380,26 @@ class BridgeController:
         self._releases_refresh_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._play_seq: int = 0
+        self._audio_command_seq = 0
+        self._user_intent = 0
         self._shutdown: bool = False
         self._home_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._history_revision = 0
         self._artist_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._album_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._history_threshold_s: float = 30.0
         self._pause_listening_history: bool = False
+        self._play_occurrence = 0
+        self._session_occurrence = 0
         self._play_session_vid: str | None = None
         self._play_session_track: Track | None = None
         self._play_session_listened_s: float = 0.0
         self._play_session_last_ts: float | None = None
         self._play_session_event_id: int | None = None
         self._play_session_last_flushed_s: int = 0
-        self._play_session_flushing: bool = False
+        self._history_lock = asyncio.Lock()
+        self._surprise_lock: asyncio.Lock = asyncio.Lock()
+        self._surprise_last_ts: float = 0.0
 
         self._bind_callbacks()
 
@@ -403,6 +437,23 @@ class BridgeController:
     def _on_update_status(self, state: dict[str, Any]) -> None:
         self.ws_manager.broadcast_sync("update_status", state, self.loop)
 
+    def _on_import_progress(self, state: ImportJobState) -> None:
+        self.ws_manager.broadcast_sync("import_progress", state.model_dump(), self.loop)
+
+    def _on_import_completed(self, state: ImportJobState) -> None:
+        if state.status != "completed":
+            return
+        self.ws_manager.broadcast_sync(
+            "library_changed",
+            {
+                "type": "playlist_imported",
+                "destination": state.destination,
+                "playlist_id": state.target_playlist_id,
+                "matched": state.matched,
+            },
+            self.loop,
+        )
+
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
 
@@ -421,7 +472,8 @@ class BridgeController:
         self.ws_manager.broadcast_sync("playback_tick", tick_data, self.loop)
 
     def _on_player_track_ended(self, reason: str = "eof") -> None:
-        expected_play_seq = self._play_seq
+        # EOF belongs to the audio command, not a newer selection still awaiting its broadcast.
+        expected_play_seq = self._audio_command_seq
         expected_load_seq = getattr(self.player, "_load_seq", None)
         self.run_coro_threadsafe(
             self.handle_track_ended(
@@ -505,7 +557,7 @@ class BridgeController:
 
     def _accumulate_play_session(self) -> None:
         """Add elapsed wall-clock seconds to the active track play session."""
-        if self._play_session_vid is None or self._play_session_last_ts is None:
+        if self._pause_listening_history or self._play_session_vid is None or self._play_session_last_ts is None:
             return
         now = time.monotonic()
         delta = max(0.0, min(5.0, now - self._play_session_last_ts))
@@ -517,27 +569,27 @@ class BridgeController:
         self._play_session_last_ts = None
 
     def _reset_play_session(self, track: Track | None, playing: bool = False) -> None:
+        self._session_occurrence = self._play_occurrence
         self._play_session_vid = track.video_id if track else None
         self._play_session_track = track
         self._play_session_listened_s = 0.0
-        self._play_session_last_ts = time.monotonic() if (playing and track is not None) else None
+        self._play_session_last_ts = time.monotonic() if playing and track and not self._pause_listening_history else None
         self._play_session_event_id = None
         self._play_session_last_flushed_s = 0
 
     async def _flush_play_session(self, force: bool = False) -> None:
+        async with self._history_lock:
+            await self._write_play_session(force)
+
+    async def _write_play_session(self, force: bool) -> None:
         """Persist qualified play event (>= history_threshold_s) and update duration."""
         self._accumulate_play_session()
-        if (
-            self._pause_listening_history
-            or not self._play_session_vid
-            or self._play_session_flushing
-        ):
+        if self._pause_listening_history or not self._play_session_vid:
             return
         sec = int(self._play_session_listened_s)
         threshold = max(1, int(self._history_threshold_s or 30))
         if sec < threshold:
             return
-        self._play_session_flushing = True
         try:
             if self._play_session_event_id is None:
                 eid = await self.library.record_play_event(
@@ -554,20 +606,23 @@ class BridgeController:
                 self._play_session_last_flushed_s = sec
         except Exception as e:  # noqa: BLE001
             logger.debug("Play event flush skipped: %s", e)
-        finally:
-            self._play_session_flushing = False
 
-    async def _rotate_play_session(self, next_track: Track | None, playing: bool = True) -> None:
+    async def _rotate_play_session(
+        self, next_track: Track | None, playing: bool = True, *, expected_seq: int | None = None,
+    ) -> None:
         """Flush any qualified previous play session before starting the next track."""
-        if self._play_session_vid and (
-            next_track is None or next_track.video_id != self._play_session_vid
-        ):
-            await self._flush_play_session(force=True)
-            self._reset_play_session(next_track, playing=playing)
-        elif next_track is not None:
-            if self._play_session_vid != next_track.video_id:
+        async with self._history_lock:
+            if expected_seq is not None and expected_seq != self._play_seq:
+                return
+            if (
+                next_track is None or self._play_session_vid != next_track.video_id
+                or self._session_occurrence != self._play_occurrence
+            ):
+                await self._write_play_session(force=True)
+                if expected_seq is not None and expected_seq != self._play_seq:
+                    return
                 self._reset_play_session(next_track, playing=playing)
-            elif playing and self._play_session_last_ts is None:
+            elif playing and not self._pause_listening_history and self._play_session_last_ts is None:
                 self._play_session_last_ts = time.monotonic()
 
     async def _refresh_followed_releases_worker(self, limit_artists: int = 6) -> None:
@@ -602,7 +657,7 @@ class BridgeController:
                 async with sem:
                     cid = art["channel_id"]
                     name = art["name"]
-                    lookup_cid = None if str(cid).startswith("local:") else cid
+                    lookup_cid = None if str(cid).startswith(("local:", "name:")) else cid
                     with suppress(Exception):
                         profile = await self.ytm.get_artist_profile(
                             name=name, channel_id=lookup_cid
@@ -665,7 +720,7 @@ class BridgeController:
                         "channel_id": cid,
                         "artist_name": aname,
                         "title": rel.get("title"),
-                        "browseId": rel.get("browseId"),
+                        "browseId": rel.get("browse_id") or rel.get("browseId"),
                         "year": rel.get("year"),
                         "type": rel.get("type") or "Release",
                         "thumbnail_url": rel.get("thumbnail_url"),
@@ -687,6 +742,7 @@ class BridgeController:
     ) -> dict[str, Any]:
         """Build a rich, personalized multi-shelf home feed adapting to taste, pins & moods."""
         cache_key = mood.lower().strip() or "for_you"
+        history_revision = self._history_revision
         now = time.monotonic()
         if not refresh and cache_key in self._home_cache:
             expires_at, cached_payload = self._home_cache[cache_key]
@@ -754,7 +810,6 @@ class BridgeController:
                 if len(self._home_cache) >= 8 and cache_key not in self._home_cache:
                     self._home_cache.pop(next(iter(self._home_cache)), None)
                 self._home_cache[cache_key] = (now + 300.0, payload)
-            self.spawn_task(asyncio.to_thread(trim_memory))
             return payload
 
         # Full Personalized "For You" view
@@ -1098,11 +1153,10 @@ class BridgeController:
         has_content = bool(speed_dial or pinned_tracks or pinned_artists or new_releases) or any(
             bool(sec.get("contents")) for sec in sections
         )
-        if has_content:
+        if has_content and history_revision == self._history_revision:
             if len(self._home_cache) >= 8 and cache_key not in self._home_cache:
                 self._home_cache.pop(next(iter(self._home_cache)), None)
             self._home_cache[cache_key] = (now + 300.0, payload)
-        self.spawn_task(asyncio.to_thread(trim_memory))
         return payload
 
     def _cancel_pending_prefetch(self) -> None:
@@ -1157,7 +1211,6 @@ class BridgeController:
             async def _warm_streams() -> None:
                 with suppress(asyncio.CancelledError, Exception):
                     await resolver.prefetch(stream_ids)
-                    await asyncio.to_thread(trim_memory)
 
             with suppress(RuntimeError):
                 self._adjacent_prefetch_task = self.spawn_task(_warm_streams())
@@ -1169,8 +1222,29 @@ class BridgeController:
         if lyrics_targets:
             self._schedule_lyrics_prefetch(lyrics_targets)
 
+    async def _load_for_command(self, track: Track, seq: int, *, announce: bool = True) -> bool:
+        def is_current() -> bool:
+            return seq == self._play_seq
+
+        if announce:
+            await self.ws_manager.broadcast(
+                "track_changed", self._track_changed_payload(track, state="buffering")
+            )
+        if not is_current():
+            return False
+        if announce:
+            self._schedule_lyrics_prefetch([track])
+        self._audio_command_seq = seq
+        await self.player.load_and_play(track, is_current=is_current)
+        return is_current()
+
     async def _after_play_started(self, target: Track | None) -> None:
-        await self._rotate_play_session(target, playing=True)
+        play_seq = self._play_seq
+        # Pause/resume changes the transport command, but not this native play occurrence.
+        self._play_occurrence = play_seq
+        await self._rotate_play_session(target, expected_seq=play_seq)
+        if play_seq != self._play_seq:
+            return
         if os.environ.get("PYTEST_CURRENT_TEST"):
             preview = self.queue.next_track_preview
             if preview:
@@ -1180,46 +1254,39 @@ class BridgeController:
 
         self._cancel_pending_prefetch()
 
-        if target is not None and not self._pause_listening_history:
-            async def _record() -> None:
-                with suppress(Exception):
-                    await self.library.record_play(target.video_id, target)
-
-            self.spawn_task(_record())
+        preview = self.queue.next_track_preview
+        if preview:
+            self._preload_task = self.spawn_task(self.player.preload_next(preview))
 
         remaining = len(self.queue.items) - 1 - self.queue.current_index
-        if self.queue.autoplay_radio and remaining < 3 and self.queue.current_track is not None:
+        if self.queue.autoplay_radio and remaining < 22 and self.queue.current_track is not None:
             my_seq = self._play_seq
 
             async def _refill() -> None:
                 with suppress(asyncio.CancelledError, Exception):
-                    added = await self.queue.refill_radio(limit=14)
+                    added = await self.queue.refill_radio(limit=28, auto_promote_until=22)
                     if my_seq != self._play_seq:
                         return
                     if added > 0:
                         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
                     nxt_preview = self.queue.next_track_preview
-                    if nxt_preview:
+                    if nxt_preview and (not preview or preview.video_id != nxt_preview.video_id):
                         curr_preloaded = getattr(self.player, "next_track", None)
                         if curr_preloaded is None or curr_preloaded.video_id != nxt_preview.video_id:
                             with suppress(Exception):
                                 await self.player.preload_next(nxt_preview)
                     self._schedule_adjacent_prefetch(target or self.queue.current_track)
-                    await asyncio.to_thread(trim_memory)
 
             self._radio_task = self.spawn_task(_refill())
         else:
-            preview = self.queue.next_track_preview
-            if preview:
-                async def _preload() -> None:
-                    with suppress(asyncio.CancelledError, Exception):
-                        await self.player.preload_next(preview)
-                        await asyncio.to_thread(trim_memory)
-
-                self._preload_task = self.spawn_task(_preload())
-            else:
-                self.spawn_task(asyncio.to_thread(trim_memory))
             self._schedule_adjacent_prefetch(target or self.queue.current_track)
+
+        async with self._history_lock:
+            if target is not None and not self._pause_listening_history and play_seq == self._play_seq:
+                try:
+                    await self.library.record_play(target.video_id, target)
+                except (sqlite3.Error, OSError) as exc:
+                    logger.warning("Could not record listening history: %s", exc)
 
     def sync_preloaded_next(self) -> None:
         """Invalidate stale mpv preloaded tracks and preload the updated next_track_preview."""
@@ -1253,7 +1320,6 @@ class BridgeController:
             async def _repreload(target: Track) -> None:
                 with suppress(asyncio.CancelledError, Exception):
                     await self.player.preload_next(target)
-                    await asyncio.to_thread(trim_memory)
 
             with suppress(RuntimeError):
                 self._preload_task = self.spawn_task(_repreload(preview))
@@ -1334,19 +1400,19 @@ class BridgeController:
                 )
                 return
 
-        next_track = await self.queue.next_track(is_error=is_error)
+        next_track = await self.queue.next_track(
+            is_error=is_error, is_current=lambda: req_seq == self._play_seq
+        )
         if req_seq != self._play_seq:
             return
 
         if next_track:
             try:
-                if not is_error and self.player.consume_gapless_promotion(next_track.video_id):
-                    await self._after_play_started(next_track)
-                else:
-                    await self.player.load_and_play(next_track)
-                    if req_seq != self._play_seq:
-                        return
-                    await self._after_play_started(next_track)
+                promoted = not is_error and self.player.consume_gapless_promotion(next_track.video_id)
+                if not promoted and not await self._load_for_command(next_track, req_seq, announce=False):
+                    return
+                self._audio_command_seq = req_seq
+                await self._after_play_started(next_track)
             except Exception as e:  # noqa: BLE001
                 if req_seq != self._play_seq:
                     return
@@ -1379,8 +1445,9 @@ class BridgeController:
                 self._track_changed_payload(next_track),
             )
         else:
-            await self._flush_play_session(force=True)
-            self._reset_play_session(None, playing=False)
+            await self._rotate_play_session(None, playing=False, expected_seq=req_seq)
+            if req_seq != self._play_seq:
+                return
             self.player.pause()
             await self.ws_manager.broadcast(
                 "track_changed",
@@ -1388,24 +1455,43 @@ class BridgeController:
             )
         await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
 
+    async def pause(self) -> dict[str, Any]:
+        self._user_intent += 1
+        self._play_seq += 1
+        req_seq = self._play_seq
+        self.player.pause()
+        self._pause_play_session()
+        await self._flush_play_session(force=True)
+        tick_data = self.get_playback_tick_data()
+        if req_seq == self._play_seq:
+            await self.ws_manager.broadcast("playback_tick", tick_data)
+        return tick_data
+
     async def toggle_play_pause(self) -> dict[str, Any]:
         if self.player.state in ("playing", "buffering"):
-            self._pause_play_session()
-            await self._flush_play_session(force=True)
-            self.player.pause()
-            tick_data = self.get_playback_tick_data()
-            await self.ws_manager.broadcast("playback_tick", tick_data)
-            return tick_data
+            return await self.pause()
         return await self.play()
 
     async def play(
         self, video_id: str | None = None, track: Track | None = None
     ) -> dict[str, Any]:
-        self.player.reset_errors()
-        self.queue.reset_errors()
-        self._cancel_pending_prefetch()
+        self._user_intent += 1
         self._play_seq += 1
         req_seq = self._play_seq
+        self.player.reset_errors()
+        self.queue.reset_errors()
+        curr = self.queue.current_track
+        if (
+            track is None and video_id is None and self.player.state == "paused"
+            and curr is not None and self.player.current_track is not None
+            and self.player.current_track.video_id == curr.video_id
+            and getattr(self.player, "loaded_video_id", None) == curr.video_id
+        ):
+            self._audio_command_seq = req_seq
+            self.player.resume()
+            await self._rotate_play_session(curr, playing=True, expected_seq=req_seq)
+            return self.get_playback_tick_data()
+        self._cancel_pending_prefetch()
 
         target: Track | None = track
         if target is None and video_id:
@@ -1434,7 +1520,7 @@ class BridgeController:
                     None,
                 )
                 if idx is not None:
-                    self.queue.items[idx] = target
+                    self.queue.replace_track(idx, target)
                     self.queue.current_index = idx
                     self.queue._notify()
                 else:
@@ -1446,71 +1532,31 @@ class BridgeController:
                     self.queue.current_index = inserted_idx
                     self.queue._notify()
 
-        curr_target = target
+        curr_target = target or self.queue.current_track
         try:
-            if target is not None:
-                await self.ws_manager.broadcast(
-                    "track_changed",
-                    self._track_changed_payload(target, state="buffering"),
-                )
-                self._schedule_lyrics_prefetch([target])
-                await self.player.load_and_play(target)
-                if req_seq != self._play_seq:
+            if curr_target is not None:
+                if not await self._load_for_command(curr_target, req_seq):
                     return self.get_playback_tick_data()
                 if (
                     self.player.state in ("paused", "stopped")
-                    and getattr(self.player, "loaded_video_id", target.video_id) != target.video_id
+                    and getattr(self.player, "loaded_video_id", curr_target.video_id) != curr_target.video_id
                 ):
                     await self.ws_manager.broadcast("playback_tick", self.get_playback_tick_data())
                     return self.get_playback_tick_data()
-                await self._after_play_started(target)
+                await self._after_play_started(curr_target)
+                if req_seq != self._play_seq:
+                    return self.get_playback_tick_data()
                 await self.ws_manager.broadcast(
                     "track_changed",
-                    self._track_changed_payload(target),
+                    self._track_changed_payload(curr_target),
                 )
-                await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
-            else:
-                curr = self.queue.current_track
-                curr_target = curr
-                same_track_paused = (
-                    self.player.state == "paused"
-                    and curr is not None
-                    and self.player.current_track is not None
-                    and self.player.current_track.video_id == curr.video_id
-                    and getattr(self.player, "loaded_video_id", curr.video_id) == curr.video_id
-                )
-                if same_track_paused or (
-                    self.player.state == "paused"
-                    and curr is None
-                    and getattr(self.player, "loaded_video_id", None) is not None
-                ):
-                    self.player.resume()
-                    if curr is not None:
-                        await self._rotate_play_session(curr, playing=True)
-                    elif self._play_session_vid is not None:
-                        self._play_session_last_ts = time.monotonic()
-                elif curr is not None:
-                    await self.ws_manager.broadcast(
-                        "track_changed",
-                        self._track_changed_payload(curr, state="buffering"),
-                    )
-                    self._schedule_lyrics_prefetch([curr])
-                    await self.player.load_and_play(curr)
-                    if req_seq != self._play_seq:
-                        return self.get_playback_tick_data()
-                    if (
-                        self.player.state in ("paused", "stopped")
-                        and getattr(self.player, "loaded_video_id", curr.video_id) != curr.video_id
-                    ):
-                        await self.ws_manager.broadcast(
-                            "playback_tick", self.get_playback_tick_data()
-                        )
-                        return self.get_playback_tick_data()
-                    await self._after_play_started(curr)
-                    await self.ws_manager.broadcast(
-                        "track_changed",
-                        self._track_changed_payload(curr),
-                    )
+                if target is not None:
+                    await self.ws_manager.broadcast("queue_changed", self.get_queue_data())
+            elif self.player.state == "paused" and getattr(self.player, "loaded_video_id", None) is not None:
+                self._audio_command_seq = req_seq
+                self.player.resume()
+                if self._play_session_vid is not None and not self._pause_listening_history:
+                    self._play_session_last_ts = time.monotonic()
         except Exception as e:  # noqa: BLE001
             if req_seq != self._play_seq:
                 return self.get_playback_tick_data()
@@ -1535,31 +1581,25 @@ class BridgeController:
         return self.get_playback_tick_data()
 
     async def next_track(self, steps: int = 1) -> dict[str, Any]:
+        self._user_intent += 1
         steps = max(1, int(steps))
         self.player.reset_errors()
         self.queue.reset_errors()
         self._cancel_pending_prefetch()
         self._play_seq += 1
         req_seq = self._play_seq
-        nxt = (
-            await self.queue.next_track()
-            if steps == 1
-            else await self.queue.step_tracks(steps=steps, direction=1)
+        nxt = await self.queue.step_tracks(
+            steps=steps, direction=1, is_current=lambda: req_seq == self._play_seq
         )
         if req_seq != self._play_seq:
             return self.get_playback_tick_data()
         if nxt:
             try:
                 if steps == 1 and self.player.switch_to_preloaded_next(nxt):
+                    self._audio_command_seq = req_seq
                     await self._after_play_started(nxt)
                 else:
-                    await self.ws_manager.broadcast(
-                        "track_changed",
-                        self._track_changed_payload(nxt, state="buffering"),
-                    )
-                    self._schedule_lyrics_prefetch([nxt])
-                    await self.player.load_and_play(nxt)
-                    if req_seq != self._play_seq:
+                    if not await self._load_for_command(nxt, req_seq):
                         return self.get_playback_tick_data()
                     if (
                         self.player.state in ("paused", "stopped")
@@ -1608,6 +1648,7 @@ class BridgeController:
         return self.get_playback_tick_data()
 
     async def prev_track(self, steps: int = 1) -> dict[str, Any]:
+        self._user_intent += 1
         steps = max(1, int(steps))
         self.player.reset_errors()
         self.queue.reset_errors()
@@ -1621,13 +1662,7 @@ class BridgeController:
         )
         if prv:
             try:
-                await self.ws_manager.broadcast(
-                    "track_changed",
-                    self._track_changed_payload(prv, state="buffering"),
-                )
-                self._schedule_lyrics_prefetch([prv])
-                await self.player.load_and_play(prv)
-                if req_seq != self._play_seq:
+                if not await self._load_for_command(prv, req_seq):
                     return self.get_playback_tick_data()
                 if (
                     self.player.state in ("paused", "stopped")
@@ -1686,13 +1721,16 @@ class BridgeController:
             curr_state = self.player.state
             try:
                 if curr_state == "playing":
-                    curr_trk = self.player.current_track or self.queue.current_track
-                    if curr_trk is not None:
-                        if self._play_session_vid != curr_trk.video_id:
-                            self._reset_play_session(curr_trk, playing=True)
-                        elif self._play_session_last_ts is None:
-                            self._play_session_last_ts = time.monotonic()
-                        await self._flush_play_session(force=False)
+                    async with self._history_lock:
+                        curr_trk = self.player.current_track
+                        if (
+                            self.player.state == "playing" and curr_trk is not None
+                            and curr_trk.video_id == self._play_session_vid and not self._pause_listening_history
+                            and self._play_occurrence == self._session_occurrence
+                        ):
+                            if self._play_session_last_ts is None:
+                                self._play_session_last_ts = time.monotonic()
+                            await self._write_play_session(force=False)
                 elif last_state == "playing":
                     self._pause_play_session()
                     await self._flush_play_session(force=True)
@@ -1701,12 +1739,12 @@ class BridgeController:
                     if self.ws_manager.active_connections:
                         data = self.get_playback_tick_data()
                         await self.ws_manager.broadcast("playback_tick", data)
-                    if last_state == "playing" and curr_state != "playing":
+                    if last_state == "playing" and curr_state in ("stopped", "paused"):
                         last_trim_ts = time.monotonic()
                         await asyncio.to_thread(trim_memory)
                     last_state = curr_state
                 now = time.monotonic()
-                if now - last_trim_ts >= 120.0:
+                if curr_state in ("stopped", "paused") and now - last_trim_ts >= 120.0:
                     last_trim_ts = now
                     await asyncio.to_thread(trim_memory)
             except asyncio.CancelledError:
@@ -1736,8 +1774,6 @@ class BridgeController:
         self._pause_play_session()
         self.stop_tick_loop()
         self.stop_media_keys()
-        if hasattr(self.queue, "flush_sync"):
-            self.queue.flush_sync()
         self._cancel_pending_prefetch()
         if self._releases_refresh_task and not self._releases_refresh_task.done():
             self._releases_refresh_task.cancel()
@@ -1747,6 +1783,8 @@ class BridgeController:
         self._background_tasks.clear()
         if hasattr(self.downloader, "stop"):
             self.downloader.stop()
+        if hasattr(self.importer, "cancel_all"):
+            self.importer.cancel_all()
         if hasattr(self.updater, "stop"):
             self.updater.stop()
         if hasattr(self.player, "terminate"):
@@ -1758,6 +1796,11 @@ class PlayRequest(BaseModel):
     video_id: str | None = None
     track: Track | None = None
     track_meta: Track | None = None
+
+
+class SearchHistoryRequest(BaseModel):
+    term: str | None = Field(default=None, min_length=1)
+    track: Track | None = None
 
 
 class SeekRequest(BaseModel):
@@ -1775,6 +1818,7 @@ class QueueActionRequest(BaseModel):
     index: int | None = None
     from_idx: int | None = None
     to_idx: int | None = None
+    target_source: str | None = None
     shuffle: bool | None = None
     repeat_mode: str | None = None
     autoplay_radio: bool | None = None
@@ -1798,6 +1842,13 @@ class PlaylistAddTracksRequest(BaseModel):
 
 class PlaylistDeleteTrackRequest(BaseModel):
     video_id: str | None = None
+
+
+class ImportUrlRequest(BaseModel):
+    url: str = Field(min_length=1)
+    destination: ImportDestination = "new_playlist"
+    playlist_name: str | None = None
+    target_playlist_id: str | None = None
 
 
 class DownloadTrackRequest(BaseModel):
@@ -1884,6 +1935,8 @@ def create_app(
             yield
         finally:
             ctrl._pause_play_session()
+            await ctrl._flush_play_session(force=True)
+            await ctrl.queue.flush()
             ctrl.shutdown()
             with suppress(Exception):
                 from metrolite.ytm.lyrics import close_lyrics_clients
@@ -1892,7 +1945,7 @@ def create_app(
 
     app = FastAPI(
         title="MetroLite Bridge API",
-        version="0.1.0",
+        version=get_config().updates.current_version,
         description="Localhost REST & WebSocket audio bridge for MetroLite",
         lifespan=lifespan,
     )
@@ -1962,7 +2015,7 @@ def create_app(
         return {
             "status": "ok",
             "app": "MetroLite",
-            "version": "0.1.0",
+            "version": app.version,
             "state": ctrl.player.state,
             "track": f"{curr.title} • {curr.artist}" if curr else None,
         }
@@ -2056,12 +2109,34 @@ def create_app(
             db_path=ctrl.db_path,
         )
 
+    @app.get("/search/history", dependencies=[Depends(verify_token)])
+    async def search_history() -> dict[str, Any]:
+        return await ctrl.library.search_history()
+
+    @app.post("/search/history", dependencies=[Depends(verify_token)])
+    async def remember_search(body: SearchHistoryRequest) -> dict[str, str]:
+        if not (body.term or "").strip() and body.track is None:
+            raise HTTPException(status_code=422, detail="A search term or track is required")
+        if not ctrl._pause_listening_history:
+            if body.track is not None:
+                await ctrl.library.remember_search_track(body.track)
+            elif body.term:
+                await ctrl.library.remember_search_term(body.term)
+            await ctrl.ws_manager.broadcast("search_history_changed", {})
+        return {"status": "ok"}
+
     @app.get("/search", dependencies=[Depends(verify_token)])
     async def get_search(
         q: str = Query(..., min_length=1),
         filter: str = Query(default="songs"),
         limit: int = Query(default=25, ge=1, le=50),
     ) -> list[dict[str, Any]]:
+        if q.strip() and not ctrl._pause_listening_history:
+            try:
+                await ctrl.library.remember_search_term(q)
+                ctrl.ws_manager.broadcast_sync("search_history_changed", {}, ctrl.loop)
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("Could not save recent search: %s", exc)
         try:
             eff_filter: str | None = None if filter.lower() == "all" else filter
             results = await ctrl.ytm.search(query=q, filter_type=eff_filter, limit=limit)
@@ -2102,10 +2177,18 @@ def create_app(
         if cached_payload is None:
             try:
                 cached_payload = await ctrl.ytm.get_artist_profile(name=name, channel_id=channel_id)
-                if len(ctrl._artist_cache) >= 8 and cache_key not in ctrl._artist_cache:
-                    ctrl._artist_cache.pop(next(iter(ctrl._artist_cache)), None)
-                ctrl._artist_cache[cache_key] = (now + 300.0, cached_payload)
-                ctrl.spawn_task(asyncio.to_thread(trim_memory))
+                has_profile_content = bool(
+                    cached_payload.get("all_tracks")
+                    or cached_payload.get("popular_tracks")
+                    or cached_payload.get("albums")
+                    or cached_payload.get("singles")
+                    or cached_payload.get("description")
+                    or cached_payload.get("thumbnail_url")
+                )
+                if has_profile_content:
+                    if len(ctrl._artist_cache) >= 8 and cache_key not in ctrl._artist_cache:
+                        ctrl._artist_cache.pop(next(iter(ctrl._artist_cache)), None)
+                    ctrl._artist_cache[cache_key] = (now + 300.0, cached_payload)
             except Exception as e:
                 logger.error("Artist profile fetch failed (%r / %r): %s", name, channel_id, e)
                 raise HTTPException(
@@ -2113,7 +2196,9 @@ def create_app(
                     detail=f"Failed to fetch artist profile: {e}",
                 ) from e
 
-        artist_name = str(cached_payload.get("artist") or name or "").strip()
+        artist_name = str(
+            cached_payload.get("name") or cached_payload.get("artist") or name or ""
+        ).strip()
         artist_cid = str(cached_payload.get("channel_id") or channel_id or "").strip() or None
         is_followed = await ctrl.library.is_artist_followed(channel_id=artist_cid, name=artist_name)
         pins = await ctrl.library.get_pins()
@@ -2154,7 +2239,6 @@ def create_app(
             if len(ctrl._album_cache) >= 8 and cache_key not in ctrl._album_cache:
                 ctrl._album_cache.pop(next(iter(ctrl._album_cache)), None)
             ctrl._album_cache[cache_key] = (now + 300.0, payload)
-            ctrl.spawn_task(asyncio.to_thread(trim_memory))
             return payload
         except Exception as e:
             logger.error("Album fetch failed (%r / %r): %s", browse_id, title, e)
@@ -2178,12 +2262,11 @@ def create_app(
 
     @app.post("/player/pause", dependencies=[Depends(verify_token)])
     async def player_pause() -> dict[str, Any]:
-        ctrl._pause_play_session()
-        await ctrl._flush_play_session(force=True)
-        ctrl.player.pause()
-        tick_data = ctrl.get_playback_tick_data()
-        await ctrl.ws_manager.broadcast("playback_tick", tick_data)
-        return tick_data
+        return await ctrl.pause()
+
+    @app.get("/player/state", dependencies=[Depends(verify_token)])
+    async def player_state() -> dict[str, Any]:
+        return ctrl.get_playback_tick_data()
 
     @app.post("/player/toggle", dependencies=[Depends(verify_token)])
     async def player_toggle() -> dict[str, Any]:
@@ -2288,16 +2371,18 @@ def create_app(
     @app.post("/queue", dependencies=[Depends(verify_token)])
     async def update_queue(body: QueueActionRequest) -> dict[str, Any]:
         action = body.action.lower()
+        ctrl._user_intent += 1
 
         if action == "set":
             ctrl._cancel_pending_prefetch()
             tracks = body.items or ([body.item] if body.item else [])
+            if body.shuffle is not None:
+                ctrl.queue.shuffle = body.shuffle
             ctrl.queue.set_queue(tracks, start_index=body.start_index)
             if body.auto_play and ctrl.queue.current_track:
-                try:
-                    await ctrl.play(track=ctrl.queue.current_track)
-                except StreamResolutionError as e:
-                    logger.error("Stream resolution failed during queue autoplay: %s", e)
+                result = await ctrl.play(track=ctrl.queue.current_track)
+                if result.get("error"):
+                    return {**ctrl.get_queue_data(), "playback_error": "Unable to play the selected track"}
 
         elif action == "append":
             if body.items:
@@ -2318,7 +2403,12 @@ def create_app(
 
         elif action == "move":
             if body.from_idx is not None and body.to_idx is not None:
-                ctrl.queue.move(body.from_idx, body.to_idx)
+                try:
+                    ctrl.queue.move(
+                        body.from_idx, body.to_idx, target_source=body.target_source
+                    )
+                except TypeError:
+                    ctrl.queue.move(body.from_idx, body.to_idx)
 
         elif action == "promote":
             if body.index is None or not ctrl.queue.promote(body.index):
@@ -2326,7 +2416,11 @@ def create_app(
 
         elif action == "clear":
             ctrl._cancel_pending_prefetch()
-            ctrl.queue.clear()
+            current = ctrl.player.current_track
+            if current is not None and ctrl.player.state in ("playing", "paused", "buffering"):
+                ctrl.queue.set_queue([current])
+            else:
+                ctrl.queue.clear()
 
         elif action == "shuffle":
             new_shuf = body.shuffle if body.shuffle is not None else not ctrl.queue.shuffle
@@ -2344,7 +2438,9 @@ def create_app(
             ctrl.queue.current_index = body.index
             ctrl.queue._notify()
             if body.auto_play and ctrl.queue.current_track:
-                await ctrl.play(track=ctrl.queue.current_track)
+                result = await ctrl.play(track=ctrl.queue.current_track)
+                if result.get("error"):
+                    return {**ctrl.get_queue_data(), "playback_error": "Unable to play the selected track"}
 
         elif action == "autoplay_radio":
             new_radio = (
@@ -2468,6 +2564,47 @@ def create_app(
         )
         return {"status": "ok", "removed": removed}
 
+    @app.post("/import/url", dependencies=[Depends(verify_token)])
+    async def start_url_import(body: ImportUrlRequest) -> dict[str, Any]:
+        try:
+            detect_import_target(body.url)
+        except ImportSourceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if body.destination == "existing_playlist":
+            pid = (body.target_playlist_id or "").strip()
+            if not pid:
+                raise HTTPException(status_code=400, detail="Missing target_playlist_id")
+            existing = await ctrl.library.list_playlists()
+            if not any(p.get("id") == pid for p in existing):
+                raise HTTPException(status_code=404, detail="Target playlist not found")
+
+        try:
+            job = await ctrl.importer.start_import(
+                url=body.url,
+                destination=body.destination,
+                playlist_name=body.playlist_name,
+                target_playlist_id=body.target_playlist_id,
+                spawn_fn=ctrl.spawn_task,
+            )
+        except ImportSourceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return job.model_dump()
+
+    @app.get("/import/jobs/{job_id}", dependencies=[Depends(verify_token)])
+    async def get_import_job(job_id: str) -> dict[str, Any]:
+        job = ctrl.importer.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        return job.model_dump()
+
+    @app.post("/import/jobs/{job_id}/cancel", dependencies=[Depends(verify_token)])
+    async def cancel_import_job(job_id: str) -> dict[str, Any]:
+        job = ctrl.importer.cancel_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        return job.model_dump()
+
     @app.post("/downloads/{video_id}", dependencies=[Depends(verify_token)])
     async def queue_download(
         video_id: str,
@@ -2481,13 +2618,11 @@ def create_app(
     @app.delete("/downloads/{video_id}", dependencies=[Depends(verify_token)])
     async def delete_download(video_id: str) -> dict[str, Any]:
         valid_vid = _require_valid_video_id(video_id)
-        if ctrl.player.next_track is not None and ctrl.player.next_track.video_id == valid_vid:
+        row = await ctrl.library.get_track(valid_vid)
+        local_path = row.get("local_path") if row else None
+        if local_path and getattr(ctrl.player, "next_source", None) == local_path:
             ctrl.player.clear_preloaded_next()
-        active_is_target = (
-            (ctrl.player.current_track is not None and ctrl.player.current_track.video_id == valid_vid)
-            or getattr(ctrl.player, "loaded_video_id", None) == valid_vid
-        )
-        if active_is_target:
+        if local_path and getattr(ctrl.player, "current_source", None) == local_path:
             ctrl.player.stop()
             if hasattr(ctrl.player.resolver, "invalidate"):
                 ctrl.player.resolver.invalidate(valid_vid)
@@ -2502,6 +2637,23 @@ def create_app(
     @app.get("/downloads", dependencies=[Depends(verify_token)])
     async def list_downloads() -> list[dict[str, Any]]:
         return await ctrl.downloader.list_downloads()
+
+    @app.get("/downloads/status", dependencies=[Depends(verify_token)])
+    async def download_statuses() -> dict[str, DownloadProgress]:
+        return ctrl.downloader.list_statuses()
+
+    @app.get("/downloads/{video_id}/artwork", dependencies=[Depends(verify_token)])
+    async def get_download_artwork(video_id: str) -> Response:
+        valid_vid = _require_valid_video_id(video_id)
+        art = await ctrl.downloader.get_local_artwork(valid_vid)
+        if art is None:
+            raise HTTPException(status_code=404, detail="Local artwork not available")
+        art_bytes, mime_type = art
+        return Response(
+            content=art_bytes,
+            media_type=mime_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @app.get("/settings", dependencies=[Depends(verify_token)])
     async def get_settings() -> dict[str, Any]:
@@ -2553,7 +2705,14 @@ def create_app(
             if isinstance(val, (int, float)) and val > 0:
                 ctrl._history_threshold_s = float(val)
         if "pause_listening_history" in settings_dict:
-            ctrl._pause_listening_history = bool(settings_dict["pause_listening_history"])
+            paused = bool(settings_dict["pause_listening_history"])
+            async with ctrl._history_lock:
+                if paused != ctrl._pause_listening_history:
+                    ctrl._pause_play_session()
+                    await ctrl._write_play_session(force=True)
+                    ctrl._pause_listening_history = paused
+                    if not paused and ctrl.player.state == "playing":
+                        ctrl._play_session_last_ts = time.monotonic()
 
         await ctrl.ws_manager.broadcast(
             "library_changed",
@@ -2692,6 +2851,16 @@ def create_app(
         )
         return {"status": "deleted" if removed else "not_found", "name": name}
 
+    @app.delete("/history", dependencies=[Depends(verify_token)])
+    async def clear_history() -> dict[str, str]:
+        async with ctrl._history_lock:
+            await ctrl.library.clear_history()
+            ctrl._history_revision += 1
+            ctrl._reset_play_session(ctrl.player.current_track, playing=ctrl.player.state == "playing")
+        ctrl._home_cache.clear()
+        await ctrl.ws_manager.broadcast("library_changed", {"type": "history_cleared"})
+        return {"status": "cleared"}
+
     @app.delete("/history/{video_id}", dependencies=[Depends(verify_token)])
     async def delete_history_entry(video_id: str) -> dict[str, Any]:
         valid_vid = _require_valid_video_id(video_id)
@@ -2751,61 +2920,134 @@ def create_app(
         body: SurpriseRadioRequest | None = None,
     ) -> dict[str, Any]:
         seed_vid = (body.seed_video_id if body else None) or None
-        seed_meta: dict[str, Any] | None = None
-        if seed_vid:
-            seed_vid = _require_valid_video_id(seed_vid)
-        else:
-            liked, played, hist = await asyncio.gather(
-                ctrl.library.list_liked(),
-                ctrl.library.get_most_played(limit=12),
-                ctrl.library.get_history(limit=12),
+        is_discovery_surprise = seed_vid is None
+
+        if is_discovery_surprise and ctrl._surprise_lock.locked():
+            return {"status": "busy", "seed": None, "queue": ctrl.get_queue_data()}
+
+        ctrl._user_intent += 1
+        intent = ctrl._user_intent
+        async with ctrl._surprise_lock:
+            now_mono = time.monotonic()
+            if is_discovery_surprise and (now_mono - ctrl._surprise_last_ts) < 0.85:
+                return {"status": "debounced", "seed": None, "queue": ctrl.get_queue_data()}
+
+            exclude_ids: set[str] = set()
+            seed_meta: dict[str, Any] | None = None
+
+            if seed_vid:
+                seed_vid = _require_valid_video_id(seed_vid)
+            else:
+                liked, played, hist, pins_data = await asyncio.gather(
+                    ctrl.library.list_liked(),
+                    ctrl.library.get_most_played(limit=50),
+                    ctrl.library.get_history(limit=80),
+                    ctrl.library.get_pins(),
+                )
+                for group in (liked, played, hist, pins_data.get("tracks", [])):
+                    for item in group:
+                        vid = item.get("video_id")
+                        if vid:
+                            exclude_ids.add(str(vid))
+
+                for _, cached_home in list(ctrl._home_cache.values()):
+                    for item in cached_home.get("speed_dial", []) or []:
+                        if isinstance(item, dict) and item.get("video_id"):
+                            exclude_ids.add(str(item["video_id"]))
+                    for sec in cached_home.get("sections", []) or []:
+                        for item in sec.get("contents", []) or []:
+                            if isinstance(item, dict) and item.get("video_id"):
+                                exclude_ids.add(str(item["video_id"]))
+
+                curr_t = ctrl.queue.current_track
+                if curr_t and curr_t.video_id:
+                    exclude_ids.add(curr_t.video_id)
+
+                taste_pool = ctrl._filter_blocked_items(liked[:12] + played[:12] + hist[:12])
+                if taste_pool:
+                    seed_meta = random.choice(taste_pool)
+                    seed_vid = str(seed_meta["video_id"])
+
+            async def _safe_radio_pick(vid: str | None) -> list[Track]:
+                if not vid:
+                    return []
+                try:
+                    return list(await ctrl.ytm.get_watch_radio(vid, limit=25))
+                except Exception:  # noqa: BLE001
+                    return []
+
+            async def _safe_discovery(q: str) -> list[Track]:
+                try:
+                    return list(await ctrl.ytm.search(q, filter_type="songs", limit=24))
+                except Exception:  # noqa: BLE001
+                    return []
+
+            discovery_queries = random.sample(
+                _SURPRISE_DISCOVERY_QUERIES, k=min(2, len(_SURPRISE_DISCOVERY_QUERIES))
             )
-            pool = ctrl._filter_blocked_items(liked[:10] + played[:10] + hist[:10])
-            if pool:
-                seed_meta = random.choice(pool)
-                seed_vid = str(seed_meta["video_id"])
+            radio_res, disc_a, disc_b = await asyncio.gather(
+                _safe_radio_pick(seed_vid),
+                _safe_discovery(discovery_queries[0]),
+                _safe_discovery(discovery_queries[1]) if len(discovery_queries) > 1 else _safe_discovery(discovery_queries[0]),
+            )
 
-        tracks: list[Track] = []
-        if seed_vid:
-            with suppress(Exception):
-                raw = await ctrl.ytm.get_watch_radio(seed_vid, limit=18)
-                tracks = [
-                    t
-                    for t in raw
-                    if not (
-                        ctrl._blocked_norms
-                        and artist_matches_blocked(t.artist, ctrl._blocked_norms)
-                    )
-                ]
-        if not tracks:
-            try:
-                q = random.choice(_TRENDING_QUERIES)
-                raw = await ctrl.ytm.search(q, filter_type="songs", limit=18)
-                tracks = [
-                    t
-                    for t in raw
-                    if not (
-                        ctrl._blocked_norms
-                        and artist_matches_blocked(t.artist, ctrl._blocked_norms)
-                    )
-                ]
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"Surprise radio failed: {e}") from e
+            def _is_valid(t: Track) -> bool:
+                if not t.video_id:
+                    return False
+                return not (ctrl._blocked_norms and artist_matches_blocked(t.artist, ctrl._blocked_norms))
 
-        if not tracks:
-            raise HTTPException(status_code=502, detail="No playable tracks available for radio")
+            fresh_tracks: list[Track] = []
+            seen_vids: set[str] = set()
+            fallback_tracks: list[Track] = []
 
-        if len(tracks) > 2:
-            head, tail = tracks[0], tracks[1:]
-            random.shuffle(tail)
-            tracks = [head, *tail]
+            raw_candidates = (
+                [*disc_a, *disc_b, *radio_res]
+                if is_discovery_surprise
+                else [*radio_res, *disc_a]
+            )
+            for t in raw_candidates:
+                if not _is_valid(t) or t.video_id in seen_vids:
+                    continue
+                seen_vids.add(t.video_id)
+                if is_discovery_surprise and t.video_id in exclude_ids:
+                    fallback_tracks.append(t)
+                else:
+                    fresh_tracks.append(t)
 
-        ctrl._cancel_pending_prefetch()
-        ctrl.queue.set_queue(tracks, start_index=0)
-        if ctrl.queue.current_track:
-            with suppress(StreamResolutionError):
-                await ctrl.play(track=ctrl.queue.current_track)
-        return {"status": "ok", "seed": seed_meta, "queue": ctrl.get_queue_data()}
+            if is_discovery_surprise:
+                random.shuffle(fresh_tracks)
+                random.shuffle(fallback_tracks)
+                if len(fresh_tracks) < 12:
+                    fresh_tracks.extend(fallback_tracks)
+
+            if not fresh_tracks:
+                raise HTTPException(status_code=502, detail="No playable tracks available for radio")
+
+            if not is_discovery_surprise and len(fresh_tracks) > 2:
+                head, tail = fresh_tracks[0], fresh_tracks[1:]
+                random.shuffle(tail)
+                fresh_tracks = [head, *tail]
+
+            active_slice = [t.model_copy(update={"source": "user"}) for t in fresh_tracks[:24]]
+            if intent != ctrl._user_intent:
+                return {"status": "superseded", "seed": seed_meta, "queue": ctrl.get_queue_data()}
+            radio_tail = [t.model_copy(update={"source": "radio"}) for t in fresh_tracks[24:30]]
+
+            ctrl._cancel_pending_prefetch()
+            ctrl.queue.set_queue(active_slice, start_index=0)
+            if radio_tail:
+                ctrl.queue.items.extend(radio_tail)
+                ctrl.queue._original_items.extend(radio_tail)
+                ctrl.queue._notify()
+
+            if ctrl.queue.current_track:
+                with suppress(StreamResolutionError):
+                    await ctrl.play(track=ctrl.queue.current_track)
+
+            if is_discovery_surprise:
+                ctrl._surprise_last_ts = time.monotonic()
+
+            return {"status": "ok", "seed": seed_meta, "queue": ctrl.get_queue_data()}
 
     @app.get("/artists/library", dependencies=[Depends(verify_token)])
     async def get_artists_library() -> dict[str, Any]:
@@ -2847,16 +3089,23 @@ def create_app(
 
     @app.post("/artists/radio", dependencies=[Depends(verify_token)])
     async def start_artist_radio(body: ArtistRadioRequest) -> dict[str, Any]:
+        ctrl._user_intent += 1
+        intent = ctrl._user_intent
         lookup_cid = (
             None
-            if not body.channel_id or str(body.channel_id).startswith("local:")
+            if not body.channel_id or str(body.channel_id).startswith(("local:", "name:"))
             else body.channel_id
         )
         profile: dict[str, Any] = {}
         with suppress(Exception):
             profile = await ctrl.ytm.get_artist_profile(name=body.name, channel_id=lookup_cid)
 
-        top_raw = profile.get("top_songs") or []
+        top_raw = (
+            profile.get("popular_tracks")
+            or profile.get("top_songs")
+            or profile.get("all_tracks")
+            or []
+        )
         seed_tracks: list[Track] = []
         for item in top_raw:
             if isinstance(item, dict) and item.get("video_id"):
@@ -2866,16 +3115,17 @@ def create_app(
         related_tracks: list[Track] = []
         if seed_tracks:
             with suppress(Exception):
-                related_tracks = await ctrl.ytm.get_watch_radio(seed_tracks[0].video_id, limit=14)
-        if not seed_tracks and not related_tracks:
+                related_tracks = await ctrl.ytm.get_watch_radio(seed_tracks[0].video_id, limit=24)
+        if len(seed_tracks) + len(related_tracks) < 22:
             with suppress(Exception):
-                related_tracks = await ctrl.ytm.search(
-                    f"{body.name} songs", filter_type="songs", limit=16
+                extra = await ctrl.ytm.search(
+                    f"{body.name} songs", filter_type="songs", limit=24
                 )
+                related_tracks.extend(extra)
 
         merged: list[Track] = []
         seen_ids: set[str] = set()
-        for t in [*seed_tracks[:8], *related_tracks]:
+        for t in [*seed_tracks[:12], *related_tracks]:
             if t.video_id in seen_ids:
                 continue
             if ctrl._blocked_norms and artist_matches_blocked(t.artist, ctrl._blocked_norms):
@@ -2892,14 +3142,23 @@ def create_app(
             random.shuffle(rest)
             merged = [first, *rest]
 
+        active_slice = [t.model_copy(update={"source": "user"}) for t in merged[:24]]
+        if intent != ctrl._user_intent:
+            return {"status": "superseded", "artist": body.name, "queue": ctrl.get_queue_data()}
+        radio_tail = [t.model_copy(update={"source": "radio"}) for t in merged[24:30]]
+
         ctrl._cancel_pending_prefetch()
-        ctrl.queue.set_queue(merged[:20], start_index=0)
+        ctrl.queue.set_queue(active_slice, start_index=0)
+        if radio_tail:
+            ctrl.queue.items.extend(radio_tail)
+            ctrl.queue._original_items.extend(radio_tail)
+            ctrl.queue._notify()
         if ctrl.queue.current_track:
             with suppress(StreamResolutionError):
                 await ctrl.play(track=ctrl.queue.current_track)
         return {
             "status": "ok",
-            "artist": profile.get("artist") or body.name,
+            "artist": profile.get("name") or profile.get("artist") or body.name,
             "queue": ctrl.get_queue_data(),
         }
 
@@ -2922,12 +3181,22 @@ def create_app(
 
     @app.post("/updates/install", dependencies=[Depends(verify_token)])
     async def install_update() -> dict[str, Any]:
-        return ctrl.updater.launch_installer()
+        return await asyncio.to_thread(ctrl.updater.launch_installer)
+
+    @app.get("/updates/verified-path", dependencies=[Depends(verify_token)])
+    async def verified_update_path() -> str:
+        try:
+            return str(await asyncio.to_thread(ctrl.updater.verified_installer_path))
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/shutdown", dependencies=[Depends(verify_token)])
     async def shutdown_server() -> dict[str, str]:
         """Cleanly terminate audio playback, remove bridge file, and stop FastAPI server."""
         logger.info("Shutdown requested via bridge API")
+        await ctrl.queue.flush()
+        ctrl._pause_play_session()
+        await ctrl._flush_play_session(force=True)
         loop = asyncio.get_running_loop()
         server_obj = getattr(app.state, "server", None)
 

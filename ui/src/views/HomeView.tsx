@@ -19,6 +19,7 @@ import {
   PinOff,
   Disc3,
   UserRound,
+  Loader2,
 } from 'lucide-react';
 import { TrackImage } from '../components/TrackImage';
 import { ArtistLinks } from '../components/ArtistLinks';
@@ -51,6 +52,7 @@ interface HomeViewProps {
   downloadedIds?: Set<string>;
   pins?: PinsResponse | null;
   libraryVersion?: number;
+  surpriseLoading?: boolean;
   onPlayTrack: (track: Track) => void;
   onPlayAll: (tracks: Track[]) => void;
   onToggleLike: (track: Track) => void;
@@ -89,6 +91,12 @@ const MOOD_PRESETS: { id: string; label: string }[] = [
 ];
 
 const cachedByMood = new Map<string, PersonalizedHomeResponse>();
+let historyRevision = 0;
+
+export function forgetHomeHistory(): void {
+  historyRevision++;
+  cachedByMood.delete('for_you');
+}
 
 function getStableGreeting(): string {
   const hour = new Date().getHours();
@@ -295,6 +303,7 @@ export const HomeView = memo(({
   downloadedIds,
   pins,
   libraryVersion = 0,
+  surpriseLoading = false,
   onPlayTrack,
   onPlayAll,
   onToggleLike,
@@ -399,7 +408,9 @@ export const HomeView = memo(({
     }
 
     try {
+      const requestedRevision = historyRevision;
       const data = await bridgeApi.getPersonalizedHome(mood, forceRefresh);
+      if (mood === 'for_you' && requestedRevision !== historyRevision) return;
       if (hasPlayableContent(data)) {
         if (cachedByMood.size >= 3 && !cachedByMood.has(mood)) {
           const oldest = cachedByMood.keys().next().value;
@@ -570,7 +581,7 @@ export const HomeView = memo(({
 
         {isLoading && !hasRenderableContent ? (
           <div className="space-y-7 eh-skeleton">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div className="home-track-grid grid gap-3">
               {Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} className="h-14 ios-liquid-card rounded-2xl" />
               ))}
@@ -633,24 +644,31 @@ export const HomeView = memo(({
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                <div className="home-track-grid grid gap-3">
                   {/* Surprise Me Radio Dice Card */}
                   {onSurpriseRadio && (
                     <button
                       type="button"
+                      disabled={surpriseLoading}
                       onClick={onSurpriseRadio}
-                      className="group ios-liquid-card flex items-center gap-3 p-3 rounded-2xl text-left border border-white/[0.14] bg-gradient-to-r from-[rgba(var(--dynamic-accent-rgb),0.18)] to-white/[0.03] hover:brightness-110 transition-all cursor-pointer"
+                      className="group ios-liquid-card flex items-center gap-3 p-3 rounded-2xl text-left border border-white/[0.14] bg-gradient-to-r from-[rgba(var(--dynamic-accent-rgb),0.18)] to-white/[0.03] hover:brightness-110 disabled:opacity-60 disabled:cursor-wait transition-all cursor-pointer"
                     >
                       <div
                         className="w-12 h-12 rounded-xl flex items-center justify-center flex-none shadow-md"
                         style={{ background: 'rgba(var(--dynamic-accent-rgb), 0.24)' }}
                       >
-                        <Dices size={20} style={{ color: 'var(--dynamic-accent)' }} />
+                        {surpriseLoading ? (
+                          <Loader2 size={20} className="animate-spin" style={{ color: 'var(--dynamic-accent)' }} />
+                        ) : (
+                          <Dices size={20} style={{ color: 'var(--dynamic-accent)' }} />
+                        )}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold text-[#F4F6FF] truncate">Surprise Me</div>
+                        <div className="text-xs font-bold text-[#F4F6FF] truncate">
+                          {surpriseLoading ? 'Finding Fresh Mix...' : 'Surprise Me'}
+                        </div>
                         <div className="text-[11px] text-[#B4BEDB] truncate">
-                          Instant taste-seeded radio
+                          New discoveries beyond your Home feed
                         </div>
                       </div>
                     </button>
@@ -830,7 +848,7 @@ export const HomeView = memo(({
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                <div className="home-track-grid grid gap-3">
                   {speedDial.slice(0, 6).map((track) => {
                     const isCurrent = currentTrackId === track.video_id;
                     return (
@@ -919,7 +937,7 @@ export const HomeView = memo(({
                       </button>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+                    <div className="home-track-grid grid gap-2.5">
                       {validTracks.slice(0, 9).map((item, idx) => {
                         const isCurrent = currentTrackId === item.video_id;
                         const isLiked = likedIds ? likedIds.has(item.video_id) : !!item.is_liked;

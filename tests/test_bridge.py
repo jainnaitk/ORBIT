@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import sqlite3
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -155,7 +157,7 @@ def test_health_check_exempt_from_token(client: TestClient) -> None:
     data = res.json()
     assert data["status"] == "ok"
     assert data["app"] == "MetroLite"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == client.app.state.controller.updater.current_version
 
 
 def test_protected_endpoints_require_token(client: TestClient, test_token: str) -> None:
@@ -719,6 +721,324 @@ def test_queue_set_autoplay_stream_resolution_error(
     )
     assert res.status_code == 200
     assert len(res.json()["items"]) == 1
+    assert res.json()["playback_error"]
+
+
+def test_clear_history_preserves_library_and_search(client, test_token):
+    headers = {"X-Bridge-Token": test_token}
+    song = {"video_id": "favorite", "title": "Favorite", "artist": "Artist"}
+    client.post("/liked/favorite", json={"track_meta": song}, headers=headers).raise_for_status()
+    lib = client.app.state.controller.library
+    asyncio.run(lib.record_play("favorite", song))
+    asyncio.run(lib.record_play_event("favorite", listened_s=35))
+    for query in ("Artist", "artist"):
+        client.get("/search", params={"q": query}, headers=headers).raise_for_status()
+    client.post("/search/history", json={"track": song}, headers=headers).raise_for_status()
+    client.delete("/history", headers=headers).raise_for_status()
+    assert client.get("/history", headers=headers).json() == []
+    assert client.get("/stats", headers=headers).json()["total_plays"] == 0
+    assert client.get("/liked", headers=headers).json()[0]["video_id"] == "favorite"
+    recent = client.get("/search/history", headers=headers).json()
+    assert recent["terms"] == ["artist"]
+    assert [t["video_id"] for t in recent["tracks"]] == ["favorite"]
+
+
+def test_search_terms_do_not_require_results_or_share_retention_with_tracks(client, mock_controller, test_token):
+    headers = {"X-Bridge-Token": test_token}
+    mock_controller.ytm.search = AsyncMock(return_value=[])
+    mock_controller.library.history_limit = 2
+    for term in ("one", "Two", "ONE"):
+        assert client.get("/search", params={"q": term}, headers=headers).json() == []
+    for video_id in ("a", "b", "c"):
+        client.post("/search/history", json={"track": {"video_id": video_id}}, headers=headers).raise_for_status()
+    data = client.get("/search/history", headers=headers).json()
+    assert data["terms"] == ["ONE", "Two"]
+    assert [t["video_id"] for t in data["tracks"]] == ["c", "b"]
+
+
+async def test_history_write_cannot_cross_track_boundary(mock_controller, monkeypatch):
+    c = mock_controller
+    a, b = Track(video_id="a"), Track(video_id="b")
+    started, release = asyncio.Event(), asyncio.Event()
+    original = c.library.record_play_event
+
+    async def delayed(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(c.library, "record_play_event", delayed)
+    c._reset_play_session(a)
+    c._play_session_listened_s = 31
+    first = asyncio.create_task(c._flush_play_session())
+    await started.wait()
+    switch = asyncio.create_task(c._rotate_play_session(b, playing=False))
+    release.set()
+    await asyncio.gather(first, switch)
+    c._play_session_listened_s = 55
+    await c._flush_play_session()
+    stats = await c.library.get_stats()
+    assert {r["video_id"]: r["seconds"] for r in stats["top_tracks"]} == {"a": 31, "b": 55}
+
+
+def test_pause_history_excludes_elapsed_private_time(client, mock_controller, test_token):
+    c = mock_controller
+    headers = {"X-Bridge-Token": test_token}
+    c.player.state = "playing"
+    c._reset_play_session(Track(video_id="a"), playing=True)
+    client.put("/settings", json={"pause_listening_history": True}, headers=headers).raise_for_status()
+    for _ in range(10):
+        asyncio.run(c._flush_play_session())
+    assert c._play_session_last_ts is None
+    client.put("/settings", json={"pause_listening_history": False}, headers=headers).raise_for_status()
+    assert c._play_session_listened_s < 1
+    assert c._play_session_last_ts is not None
+
+
+def test_cancel_download_keeps_stream_playing(client, mock_controller, test_token):
+    player = mock_controller.player
+    track = Track(video_id="live", title="Playing online")
+    player.play_source("https://audio.invalid/sample", track)
+    client.delete("/downloads/live", headers={"X-Bridge-Token": test_token}).raise_for_status()
+    player.mpv.stop.assert_not_called()
+    assert player.current_track == track
+
+
+async def test_late_radio_does_not_replace_explicit_play(mock_controller, test_token):
+    c = mock_controller
+    entered, resume = asyncio.Event(), asyncio.Event()
+
+    async def wait_for_profile(**kwargs):
+        entered.set()
+        await resume.wait()
+        return {"popular_tracks": [Track(video_id="radio").model_dump()]}
+
+    c.ytm.get_artist_profile = wait_for_profile
+    app = create_app(controller=c, token=test_token)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"X-Bridge-Token": test_token}) as api:
+        radio = asyncio.create_task(api.post("/artists/radio", json={"name": "Artist"}))
+        await entered.wait()
+        (await api.post("/player/play", json={"video_id": "selected"})).raise_for_status()
+        resume.set()
+        assert (await radio).json()["status"] == "superseded"
+        assert c.queue.current_track.video_id == c.player.current_track.video_id == "selected"
+
+
+@pytest.mark.parametrize("first_command", ["play", "next", "prev"])
+async def test_new_selection_wins_after_delayed_broadcast(mock_controller, first_command):
+    c = mock_controller
+    a, b, d = [Track(video_id=vid) for vid in ("a", "b", "d")]
+    c.queue.set_queue([a, b, d], start_index=1)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def broadcast(event, data):
+        if event == "track_changed" and data["state"] == "buffering" and not entered.is_set():
+            entered.set()
+            await release.wait()
+
+    c.ws_manager.broadcast = broadcast
+    if first_command == "play":
+        first = c.play(track=a)
+    elif first_command == "next":
+        first = c.next_track()
+    else:
+        first = c.prev_track()
+    pending = asyncio.create_task(first)
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        await c.play(track=b)
+    finally:
+        release.set()
+        await pending
+    c.player.mpv.play.assert_called_once_with("https://mock-stream/b")
+    assert c.player.current_track.video_id == c.queue.current_track.video_id == "b"
+
+
+@pytest.mark.parametrize("command", ["eof", "pause", "toggle"])
+async def test_delayed_history_flush_does_not_pause_new_play(mock_controller, command):
+    c = mock_controller
+    c.queue.autoplay_radio = False
+    await c.play(track=Track(video_id="old"))
+    c._play_session_listened_s = 31
+    entered, release, loaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = c.library.record_play_event
+
+    async def delayed_write(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    c.library.record_play_event = delayed_write
+    end = {"eof": c.handle_track_ended, "pause": c.pause, "toggle": c.toggle_play_pause}[command]
+    pending = asyncio.create_task(end())
+    await asyncio.wait_for(entered.wait(), 2)
+    c.player.mpv.play.side_effect = lambda _url: loaded.set()
+    play = asyncio.create_task(c.play(track=Track(video_id="new")))
+    try:
+        await asyncio.wait_for(loaded.wait(), 2)
+    finally:
+        release.set()
+        await asyncio.gather(pending, play)
+    assert c.player.loaded_video_id == "new"
+    assert c.player.state == "playing"
+
+
+async def test_eof_while_announcing_a_new_selection_belongs_to_old_audio(mock_controller):
+    c = mock_controller
+    c.queue.autoplay_radio = False
+    await c.play(track=Track(video_id="old"))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def broadcast(event, data):
+        if event == "track_changed" and data["state"] == "buffering":
+            entered.set()
+            await release.wait()
+
+    c.ws_manager.broadcast = broadcast
+    selection = asyncio.create_task(c.play(track=Track(video_id="selected")))
+    await asyncio.wait_for(entered.wait(), 2)
+    callbacks = []
+    c.run_coro_threadsafe = callbacks.append
+    try:
+        c._on_player_track_ended("eof")
+        await callbacks.pop()
+    finally:
+        release.set()
+        await selection
+    assert c.player.loaded_video_id == c.queue.current_track.video_id == "selected"
+    assert c.player.state == "playing"
+
+
+@pytest.mark.parametrize("steps", [1, 3])
+async def test_play_next_during_radio_refill(mock_controller, test_token, steps):
+    c = mock_controller
+    c.queue.set_queue([Track(video_id="seed")])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_radio(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return [Track(video_id="stale_radio")]
+
+    c.ytm.get_watch_radio = slow_radio
+    app = create_app(controller=c, token=test_token)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"X-Bridge-Token": test_token}) as api:
+        advance = asyncio.create_task(c.handle_track_ended() if steps == 1 else c.next_track(steps=steps))
+        await asyncio.wait_for(entered.wait(), 2)
+        try:
+            (await api.post("/queue", json={"action": "add_next", "item": {"video_id": "requested"}})).raise_for_status()
+        finally:
+            release.set()
+            await advance
+    assert [t.video_id for t in c.queue.items] == ["seed", "requested"]
+    assert c.queue.current_index == 1
+    assert c.player.loaded_video_id == "requested" and c.player.state == "playing"
+
+
+async def test_pause_supersedes_pending_radio_advance(mock_controller):
+    c = mock_controller
+    c.queue.set_queue([Track(video_id="seed")])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_radio(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return [Track(video_id="suggestion")]
+
+    c.ytm.get_watch_radio = slow_radio
+    skip = asyncio.create_task(c.next_track())
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        await c.pause()
+        c.queue.add_next(Track(video_id="keep_upcoming"))
+    finally:
+        release.set()
+        await skip
+    assert c.queue.current_track.video_id == "seed"
+    assert c.queue.next_track_preview.video_id == "keep_upcoming"
+    c.player.mpv.play.assert_not_called()
+
+
+async def test_native_resolution_cannot_overtake_newer_broadcast(mock_controller):
+    c = mock_controller
+    resolving, announcing = asyncio.Event(), asyncio.Event()
+    finish_resolve, finish_announce = asyncio.Event(), asyncio.Event()
+
+    async def resolve(video_id):
+        if video_id == "first":
+            resolving.set()
+            await finish_resolve.wait()
+        return f"https://mock-stream/{video_id}"
+
+    async def broadcast(event, data):
+        if event == "track_changed" and data["state"] == "buffering" and data["track"]["video_id"] == "second":
+            announcing.set()
+            await finish_announce.wait()
+
+    c.player.resolver.resolve = resolve
+    c.ws_manager.broadcast = broadcast
+    first = asyncio.create_task(c.play(track=Track(video_id="first")))
+    await asyncio.wait_for(resolving.wait(), 2)
+    second = asyncio.create_task(c.play(track=Track(video_id="second")))
+    try:
+        await asyncio.wait_for(announcing.wait(), 2)
+        finish_resolve.set()
+        await first
+        c.player.mpv.play.assert_not_called()
+    finally:
+        finish_resolve.set()
+        finish_announce.set()
+        await asyncio.gather(first, second)
+    c.player.mpv.play.assert_called_once_with("https://mock-stream/second")
+
+
+@pytest.mark.parametrize("seconds,expected_plays", [(60, 2), (20, 0)])
+async def test_repeated_listens_qualify_independently(mock_controller, seconds, expected_plays):
+    c = mock_controller
+    c.queue.autoplay_radio = False
+    c.queue.set_repeat_mode("one")
+    await c.play(track=Track(video_id="repeat"))
+    c._play_session_listened_s = seconds / 2
+    await c.pause()
+    await c.play()  # Resume the first occurrence, including its elapsed listening time.
+    assert int(c._play_session_listened_s) == seconds // 2
+    c._play_session_listened_s = seconds
+    await c.handle_track_ended()
+    assert int(c._play_session_listened_s) == 0
+    c._play_session_listened_s = seconds
+    await c._flush_play_session(force=True)
+    stats = await c.library.get_stats()
+    assert stats["total_plays"] == expected_plays
+    assert stats["total_seconds"] == seconds * expected_plays
+
+
+async def test_gapless_preload_does_not_wait_for_radio(mock_controller, monkeypatch):
+    c = mock_controller
+    current, upcoming = Track(video_id="current"), Track(video_id="upcoming")
+    c.queue.set_queue([current, upcoming])
+    c.queue.autoplay_radio = True
+    radio_reply = asyncio.Event()
+    preloaded = asyncio.Event()
+
+    async def slow_radio(*args, **kwargs):
+        await radio_reply.wait()
+        return 0
+
+    async def preload(track):
+        assert track.video_id == upcoming.video_id
+        preloaded.set()
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.setattr(c.queue, "refill_radio", slow_radio)
+    monkeypatch.setattr(c.player, "preload_next", preload)
+    monkeypatch.setattr(c, "_schedule_adjacent_prefetch", MagicMock())
+    try:
+        await c._after_play_started(current)
+        await asyncio.wait_for(preloaded.wait(), timeout=2)
+        assert not c._radio_task.done()
+    finally:
+        radio_reply.set()
+        await c._radio_task
 
 
 def test_player_toggle_and_shutdown_endpoints(

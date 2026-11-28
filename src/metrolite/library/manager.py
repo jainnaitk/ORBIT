@@ -199,6 +199,56 @@ class LibraryManager:
             logger.info("Track %s like state changed to %s", video_id, new_liked_state)
             return new_liked_state
 
+    async def add_liked_tracks(
+        self,
+        tracks: list[Track | dict[str, Any] | str] | Track | dict[str, Any] | str,
+    ) -> int:
+        """Idempotently mark tracks as liked, preserving existing liked_at timestamps."""
+        track_list = tracks if isinstance(tracks, list) else [tracks]
+        if not track_list:
+            return 0
+
+        now_iso = _utc_now_iso()
+        added_count = 0
+        async with get_connection(self.db_path) as conn:
+            for item in track_list:
+                if isinstance(item, str):
+                    v_id = item
+                    t_meta: Track | dict[str, Any] | None = None
+                elif isinstance(item, Track):
+                    v_id = item.video_id
+                    t_meta = item
+                elif isinstance(item, dict):
+                    v_id = str(item.get("video_id") or "").strip()
+                    t_meta = item
+                else:
+                    continue
+
+                if not v_id:
+                    continue
+
+                await self._upsert_track(conn, v_id, t_meta)
+                cursor = await conn.execute(
+                    "SELECT is_liked FROM tracks WHERE video_id = ?;", (v_id,)
+                )
+                row = await cursor.fetchone()
+                was_liked = bool(row["is_liked"]) if row else False
+
+                await conn.execute(
+                    """
+                    UPDATE tracks
+                    SET is_liked = 1, liked_at = COALESCE(liked_at, ?)
+                    WHERE video_id = ?;
+                    """,
+                    (now_iso, v_id),
+                )
+                if not was_liked:
+                    added_count += 1
+
+            await conn.commit()
+            logger.info("Idempotently added %d tracks to liked songs", added_count)
+            return added_count
+
     async def is_liked(self, video_id: str) -> bool:
         async with get_connection(self.db_path) as conn:
             cursor = await conn.execute(
@@ -235,7 +285,9 @@ class LibraryManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def create_playlist(self, name: str, description: str = "") -> dict[str, Any]:
+    async def create_playlist(
+        self, name: str, description: str = "", *, tracks: list[Track] | None = None
+    ) -> dict[str, Any]:
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Playlist name cannot be empty")
@@ -251,6 +303,12 @@ class LibraryManager:
                 """,
                 (playlist_id, clean_name, description.strip(), now, now),
             )
+            for position, track in enumerate(tracks or []):
+                await self._upsert_track(conn, track.video_id, track)
+                await conn.execute(
+                    "INSERT INTO playlist_tracks (playlist_id, video_id, position, added_at) VALUES (?, ?, ?, ?)",
+                    (playlist_id, track.video_id, position, now),
+                )
             await conn.commit()
 
         logger.info("Created playlist '%s' (%s)", clean_name, playlist_id)
@@ -258,7 +316,7 @@ class LibraryManager:
             "id": playlist_id,
             "name": clean_name,
             "description": description.strip(),
-            "track_count": 0,
+            "track_count": len(tracks or []),
             "created_at": now,
             "updated_at": now,
         }
@@ -340,6 +398,7 @@ class LibraryManager:
             return 0
 
         async with get_connection(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE;")
             cursor = await conn.execute("SELECT id FROM playlists WHERE id = ?;", (playlist_id,))
             if not await cursor.fetchone():
                 raise ValueError(f"Playlist {playlist_id} does not exist")
@@ -745,6 +804,46 @@ class LibraryManager:
             await conn.commit()
             return cur.rowcount > 0
 
+    async def clear_history(self) -> None:
+        """Erase listening activity without deleting library tracks or playlist membership."""
+        async with get_connection(self.db_path) as conn:
+            await conn.execute("DELETE FROM play_events;")
+            await conn.execute("UPDATE tracks SET play_count = 0, last_played_at = NULL WHERE play_count != 0 OR last_played_at IS NOT NULL;")
+            await conn.commit()
+
+    async def remember_search_term(self, term: str) -> None:
+        term = term.strip()
+        if not term:
+            return
+        async with get_connection(self.db_path) as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO recent_search_terms(term_key, term) VALUES (?, ?)",
+                (term.casefold(), term),
+            )
+            await conn.execute(
+                "DELETE FROM recent_search_terms WHERE id NOT IN (SELECT id FROM recent_search_terms ORDER BY id DESC LIMIT ?)",
+                (self.history_limit,),
+            )
+            await conn.commit()
+
+    async def remember_search_track(self, track: Track) -> None:
+        async with get_connection(self.db_path) as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO recent_search_tracks(video_id, track_json) VALUES (?, ?)",
+                (track.video_id, track.model_dump_json()),
+            )
+            await conn.execute(
+                "DELETE FROM recent_search_tracks WHERE id NOT IN (SELECT id FROM recent_search_tracks ORDER BY id DESC LIMIT ?)",
+                (self.history_limit,),
+            )
+            await conn.commit()
+
+    async def search_history(self) -> dict[str, Any]:
+        async with get_connection(self.db_path) as conn:
+            terms = await conn.execute_fetchall("SELECT term FROM recent_search_terms ORDER BY id DESC")
+            tracks = await conn.execute_fetchall("SELECT track_json FROM recent_search_tracks ORDER BY id DESC")
+        return {"terms": [r[0] for r in terms], "tracks": [json.loads(r[0]) for r in tracks]}
+
     async def update_track_metadata(
         self,
         video_id: str,
@@ -873,7 +972,8 @@ class LibraryManager:
                        COALESCE(t.is_liked, 0) AS is_liked,
                        t.local_path,
                        COUNT(pe.id) AS plays,
-                       COALESCE(SUM(pe.listened_s), 0) AS seconds
+                       COALESCE(SUM(pe.listened_s), 0) AS seconds,
+                       COALESCE(SUM(pe.listened_s), 0) AS listened_s
                 FROM play_events pe
                 LEFT JOIN tracks t ON t.video_id = pe.video_id
                 {where_clause}
@@ -908,14 +1008,18 @@ class LibraryManager:
                 bucket = artist_agg.get(norm)
                 if bucket is None:
                     artist_agg[norm] = {
+                        "name": name,
                         "artist": name,
+                        "artist_norm": norm,
                         "plays": row_plays,
                         "seconds": row_secs,
+                        "listened_s": row_secs,
                         "thumbnail_url": followed_thumbs.get(norm) or thumb,
                     }
                 else:
                     bucket["plays"] += row_plays
                     bucket["seconds"] += row_secs
+                    bucket["listened_s"] += row_secs
                     if not bucket["thumbnail_url"] and thumb:
                         bucket["thumbnail_url"] = thumb
 
@@ -951,6 +1055,11 @@ class LibraryManager:
         cid = (channel_id or "").strip() or make_synthetic_channel_id(clean_name)
         now = _utc_now_iso()
         async with get_connection(self.db_path) as conn:
+            # Remove any stale follow record with the same normalized artist under a different synthetic/legacy channel_id
+            await conn.execute(
+                "DELETE FROM followed_artists WHERE artist_norm = ? AND channel_id != ?;",
+                (norm, cid),
+            )
             await conn.execute(
                 """
                 INSERT INTO followed_artists (channel_id, name, artist_norm, thumbnail_url, followed_at)
@@ -970,6 +1079,7 @@ class LibraryManager:
             "artist_norm": norm,
             "thumbnail_url": thumbnail_url,
             "followed_at": now,
+            "is_followed": True,
         }
 
     async def unfollow_artist(self, channel_id_or_name: str) -> bool:
@@ -1085,8 +1195,19 @@ class LibraryManager:
             key=lambda a: (a["liked_count"] + a["offline_count"], a["play_count"], a["name"].lower()),
             reverse=True,
         )
-        # Keep display names consistent for tie-breaking if needed
-        return {"followed": followed, "in_library": in_library}
+        enriched_followed: list[dict[str, Any]] = []
+        for f_item in followed:
+            stats = library_map.get(f_item["artist_norm"])
+            enriched_followed.append(
+                {
+                    **f_item,
+                    "track_count": stats["track_count"] if stats else 0,
+                    "liked_count": stats["liked_count"] if stats else 0,
+                    "offline_count": stats["offline_count"] if stats else 0,
+                    "is_followed": True,
+                }
+            )
+        return {"followed": enriched_followed, "in_library": in_library}
 
     async def get_local_artist_tracks(
         self, name: str | None = None, channel_id: str | None = None

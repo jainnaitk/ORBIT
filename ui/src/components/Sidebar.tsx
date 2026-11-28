@@ -6,11 +6,11 @@ import {
   Download,
   Clock,
   Plus,
+  FolderInput,
   ListMusic,
   PanelLeftClose,
   PanelLeftOpen,
   UsersRound,
-  BarChart3,
 } from 'lucide-react';
 import type { Playlist } from '../api/types';
 
@@ -20,16 +20,16 @@ export type NavTab =
   | 'library'
   | 'liked'
   | 'downloads'
+  | 'playlists'
   | 'history'
   | 'artists'
-  | 'stats'
   | 'playlist'
   | 'artist'
   | 'album';
 
 interface SidebarProps {
   activeTab: NavTab;
-  activePlaylistId: string | null;
+  activePlaylistId?: string | null;
   playlists: Playlist[];
   likedCount: number;
   downloadCount: number;
@@ -37,11 +37,11 @@ interface SidebarProps {
   onToggleCollapse: () => void;
   onSelectTab: (tab: NavTab, playlistId?: string) => void;
   onOpenCreatePlaylist: () => void;
+  onOpenImportPlaylist: () => void;
 }
 
 export const Sidebar = memo(({
   activeTab,
-  activePlaylistId,
   playlists,
   likedCount,
   downloadCount,
@@ -49,6 +49,7 @@ export const Sidebar = memo(({
   onToggleCollapse,
   onSelectTab,
   onOpenCreatePlaylist,
+  onOpenImportPlaylist,
 }: SidebarProps) => {
   const railItem = (
     tab: NavTab,
@@ -57,7 +58,7 @@ export const Sidebar = memo(({
     badge?: number,
     activeColor?: string
   ) => {
-    const active = activeTab === tab;
+    const active = activeTab === tab || (tab === 'playlists' && activeTab === 'playlist');
     const accent = activeColor || 'var(--dynamic-accent)';
     const useDynamicBg = !activeColor;
 
@@ -173,97 +174,53 @@ export const Sidebar = memo(({
           '#FF4D8D'
         )}
         {railItem('downloads', 'Offline', <Download size={16} />, downloadCount, '#34D399')}
+        {railItem('playlists', 'Playlists', <ListMusic size={16} />, playlists.length)}
         {railItem('artists', 'Artists', <UsersRound size={16} />)}
         {railItem('history', 'History', <Clock size={16} />)}
-        {railItem('stats', 'Stats', <BarChart3 size={16} />)}
       </nav>
 
-      {/* Playlists Section with Crisp Divider */}
+      {/* Playlists Actions (Collapsed: strictly + and Import icons; Expanded: Actions without inline list) */}
       <div className="pt-2.5 mt-0.5 border-t border-white/[0.10] flex-1 min-h-0 flex flex-col">
-        <div
-          className={`flex items-center ${
-            collapsed ? 'justify-center' : 'justify-between px-3'
-          } mb-2`}
-        >
-          {!collapsed && (
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7A84A6]">
-              Playlists
-            </span>
-          )}
-          <button
-            onClick={onOpenCreatePlaylist}
-            title="New Playlist"
-            aria-label="New Playlist"
-            className="w-7 h-7 flex items-center justify-center rounded-full bg-white/[0.06] border border-white/[0.10] text-[#B2BCD9] hover:text-white hover:bg-white/[0.14] hover:border-white/20 transition-all"
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto no-scrollbar space-y-1.5">
-          {playlists.length === 0 && !collapsed && (
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-2 pt-1">
             <button
               onClick={onOpenCreatePlaylist}
-              className="w-full px-3 py-2 rounded-xl text-[11px] text-[#6D7796] hover:text-[#9AA5C4] hover:bg-white/[0.05] text-left transition-colors"
+              title="New Playlist"
+              aria-label="New Playlist"
+              className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-white/[0.06] border border-white/[0.10] text-[#B2BCD9] hover:text-white hover:bg-white/[0.14] hover:border-white/20 transition-all"
             >
-              + Create your first playlist
+              <Plus size={15} />
             </button>
-          )}
-          {playlists.map((pl: Playlist) => {
-            const isActive = activeTab === 'playlist' && activePlaylistId === pl.id;
-            if (collapsed) {
-              return (
-                <button
-                  key={pl.id}
-                  onClick={() => onSelectTab('playlist', pl.id)}
-                  title={pl.name}
-                  className={`w-8 h-8 sm:w-10 sm:h-10 mx-auto rounded-full flex items-center justify-center text-[10px] sm:text-xs font-bold border transition-all ${
-                    isActive
-                      ? 'bg-white/[0.16] text-white border-[rgba(var(--dynamic-accent-rgb),0.6)]'
-                      : 'bg-white/[0.05] text-[#9BA4C4] border-white/10 hover:text-white hover:bg-white/[0.12]'
-                  }`}
-                >
-                  {pl.name.slice(0, 2).toUpperCase()}
-                </button>
-              );
-            }
-            return (
-              <button
-                key={pl.id}
-                onClick={() => onSelectTab('playlist', pl.id)}
-                className={`relative w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs truncate text-left transition-colors border ${
-                  isActive
-                    ? 'text-white font-semibold'
-                    : 'border-transparent text-[#9BA4C4] hover:bg-white/[0.06] hover:text-white'
-                }`}
-                style={
-                  isActive
-                    ? {
-                        background: 'rgba(var(--dynamic-accent-rgb), 0.14)',
-                        borderColor: 'rgba(var(--dynamic-accent-rgb), 0.32)',
-                      }
-                    : undefined
-                }
-              >
-                {isActive && (
-                  <span
-                    className="absolute left-0.5 top-2 bottom-2 w-[3px] rounded-full"
-                    style={{
-                      background: 'var(--dynamic-accent)',
-                      boxShadow: '0 0 10px var(--dynamic-accent)',
-                    }}
-                  />
-                )}
-                <ListMusic
-                  size={14}
-                  className="flex-none"
-                  style={isActive ? { color: 'var(--dynamic-accent)' } : undefined}
-                />
-                <span className="truncate">{pl.name}</span>
-              </button>
-            );
-          })}
-        </div>
+            <button
+              onClick={onOpenImportPlaylist}
+              title="Import Playlist"
+              aria-label="Import Playlist"
+              className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-white/[0.06] border border-white/[0.10] text-[#B2BCD9] hover:text-white hover:bg-white/[0.14] hover:border-white/20 transition-all"
+            >
+              <FolderInput size={14} />
+            </button>
+          </div>
+        ) : (
+          <div className="px-1.5 space-y-1.5">
+            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7A84A6]">
+              Playlist Actions
+            </div>
+            <button
+              onClick={onOpenCreatePlaylist}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-[#B2BCD9] hover:text-white hover:bg-white/[0.08] border border-transparent hover:border-white/[0.10] transition-colors"
+            >
+              <Plus size={14} className="flex-none" />
+              <span>New Playlist</span>
+            </button>
+            <button
+              onClick={onOpenImportPlaylist}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-[#B2BCD9] hover:text-white hover:bg-white/[0.08] border border-transparent hover:border-white/[0.10] transition-colors"
+            >
+              <FolderInput size={14} className="flex-none" />
+              <span>Import Playlist</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Bottom Expand / Collapse Toggle */}

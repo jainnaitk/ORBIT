@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
@@ -67,6 +68,18 @@ CREATE TABLE IF NOT EXISTS queue_state (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recent_search_terms (
+    id INTEGER PRIMARY KEY,
+    term_key TEXT NOT NULL UNIQUE,
+    term TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recent_search_tracks (
+    id INTEGER PRIMARY KEY,
+    video_id TEXT NOT NULL UNIQUE,
+    track_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS play_events (
@@ -139,6 +152,18 @@ def init_db_sync(db_path: Path | str | None = None) -> Path:
         conn.execute("PRAGMA synchronous = NORMAL;")
         with conn:
             conn.executescript(SCHEMA_SQL)
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_history'").fetchone():
+                # Replay oldest first so the last spelling/selection wins independently in each list.
+                for term, video_id, track_json in conn.execute(
+                    "SELECT term, video_id, track_json FROM search_history ORDER BY id"
+                ):
+                    term = term.strip()
+                    if term:
+                        conn.execute("INSERT OR REPLACE INTO recent_search_terms(term_key, term) VALUES (?, ?)", (term.casefold(), term))
+                    if video_id and track_json:
+                        conn.execute("INSERT OR REPLACE INTO recent_search_tracks(video_id, track_json) VALUES (?, ?)", (video_id, track_json))
+                conn.execute("DROP TABLE search_history")
         with suppress(Exception):
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     finally:
@@ -148,17 +173,7 @@ def init_db_sync(db_path: Path | str | None = None) -> Path:
 
 async def init_db(db_path: Path | str | None = None) -> Path:
     """Initialize database tables asynchronously using aiosqlite with WAL recovery."""
-    path = Path(db_path) if db_path is not None else get_default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(str(path), timeout=5.0) as conn:
-        await conn.execute("PRAGMA busy_timeout = 5000;")
-        await conn.execute("PRAGMA journal_mode = WAL;")
-        await conn.execute("PRAGMA synchronous = NORMAL;")
-        await conn.executescript(SCHEMA_SQL)
-        await conn.commit()
-        with suppress(Exception):
-            await conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    return path
+    return await asyncio.to_thread(init_db_sync, db_path)
 
 
 @asynccontextmanager

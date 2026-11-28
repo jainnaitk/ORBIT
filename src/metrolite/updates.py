@@ -450,6 +450,31 @@ class UpdateManager:
             logger.debug("CHANGELOG.md fallback failed: %s", _format_http_error(exc))
             return []
 
+    async def _installer_checksum(
+        self, installer: dict[str, Any], assets: list[dict[str, Any]]
+    ) -> str | None:
+        for field in ("digest", "sha256"):
+            value = str(installer.get(field) or "").lower().removeprefix("sha256:")
+            if _SHA256_HEX_RE.fullmatch(value):
+                return value
+        manifest = next((a for a in assets if a.get("name") == "SHA256SUMS.txt"), None)
+        url = str((manifest or {}).get("browser_download_url") or "")
+        if not url or not self._is_trusted_url(url):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            if self._is_trusted_url(str(response.url)):
+                for line in response.text.splitlines():
+                    parts = line.split(maxsplit=1)
+                    if (len(parts) == 2 and parts[1].lstrip("*") == installer["name"]
+                            and _SHA256_HEX_RE.fullmatch(parts[0])):
+                        return parts[0].lower()
+        except httpx.HTTPError:
+            return None
+        return None
+
     async def check_for_updates(self, force: bool = False) -> dict[str, Any]:
         """Query GitHub Releases API (with mirror fallback) for the latest ORBIT version."""
         if not self.enabled or not self.github_repo or "/" not in self.github_repo:
@@ -504,8 +529,7 @@ class UpdateManager:
 
         asset_name = str(installer.get("name")) if installer else None
         asset_size = int(installer.get("size") or 0) if installer else 0
-        raw_sha256 = str(installer.get("sha256") or "").strip().lower() if installer else ""
-        asset_sha256 = raw_sha256 if _SHA256_HEX_RE.match(raw_sha256) else None
+        asset_sha256 = await self._installer_checksum(installer, assets) if installer else None
 
         browser_url = (
             str(installer.get("browser_download_url") or "").strip() or None
@@ -532,7 +556,7 @@ class UpdateManager:
             if (
                 candidate.is_file()
                 and candidate.stat().st_size == asset_size
-                and (not asset_sha256 or _file_sha256(candidate) == asset_sha256)
+                and asset_sha256 and await asyncio.to_thread(_file_sha256, candidate) == asset_sha256
             ):
                 existing_path = str(candidate)
 
@@ -643,7 +667,7 @@ class UpdateManager:
         if expected_size > 0 and final_size != expected_size:
             raise ValueError(f"Incomplete download ({final_size} of {expected_size} bytes)")
         if expected_sha256:
-            actual_sha256 = _file_sha256(part_path)
+            actual_sha256 = await asyncio.to_thread(_file_sha256, part_path)
             if actual_sha256 != expected_sha256:
                 raise ValueError("Installer SHA-256 checksum mismatch")
 
@@ -684,11 +708,28 @@ class UpdateManager:
         target = self._safe_target_path(local_name)
         expected_size = int(self._state.get("asset_size") or 0)
         expected_sha256 = self._state.get("asset_sha256")
+        if not expected_sha256:
+            # Older/mirror metadata can omit the digest. Use the sums published beside the installer.
+            release_prefix = f"https://github.com/{self.github_repo}/releases/"
+            github_url = next((url for url in trusted_urls if url.startswith(release_prefix)), None)
+            if github_url:
+                sums_url = github_url.rsplit("/", 1)[0] + "/SHA256SUMS.txt"
+                expected_sha256 = await self._installer_checksum(
+                    {"name": asset_name}, [{"name": "SHA256SUMS.txt", "browser_download_url": sums_url}]
+                )
+                self._state["asset_sha256"] = expected_sha256
+        if not expected_sha256:
+            self._state.update(
+                status="error", downloaded_path=None,
+                error="No verified SHA-256 checksum is available for this installer.",
+            )
+            self._emit()
+            return self.get_state()
         if (
             target.is_file()
             and expected_size > 0
             and target.stat().st_size == expected_size
-            and (not expected_sha256 or _file_sha256(target) == expected_sha256)
+            and await asyncio.to_thread(_file_sha256, target) == expected_sha256
         ):
             self._state.update(
                 {
@@ -702,7 +743,7 @@ class UpdateManager:
             )
             self._emit()
             if auto_install:
-                return self.launch_installer()
+                return await asyncio.to_thread(self.launch_installer)
             return self.get_state()
 
         part_path = target.with_name(f"{target.name}.{os.getpid()}.part")
@@ -739,7 +780,7 @@ class UpdateManager:
                 )
                 self._emit()
                 if auto_install:
-                    return self.launch_installer()
+                    return await asyncio.to_thread(self.launch_installer)
                 return self.get_state()
             except Exception as exc:  # noqa: BLE001
                 if part_path.exists():
@@ -766,29 +807,30 @@ class UpdateManager:
         self._emit()
         return self.get_state()
 
-    def launch_installer(self) -> dict[str, Any]:
-        """Launch the downloaded Windows installer (.exe or .msi) to upgrade ORBIT."""
+    def verified_installer_path(self) -> Path:
+        """Recheck the release artifact immediately before either installer launch path."""
         raw_path = self._state.get("downloaded_path")
         if not raw_path:
-            self._state["status"] = "error"
-            self._state["error"] = "Installer has not been downloaded yet."
-            self._emit()
-            return self.get_state()
-
+            raise ValueError("Installer has not been downloaded yet.")
         target = Path(raw_path).resolve()
-        root = self.updates_dir.resolve()
-        if not target.is_file() or root not in target.parents:
-            self._state["status"] = "error"
-            self._state["error"] = "Downloaded installer file is missing or invalid."
-            self._emit()
-            return self.get_state()
+        if not target.is_file() or self.updates_dir.resolve() not in target.parents:
+            raise ValueError("Downloaded installer file is missing or invalid.")
+        if target.suffix.lower() not in (".exe", ".msi"):
+            raise ValueError(f"Unsupported installer format: {target.suffix}")
+        digest = self._state.get("asset_sha256")
+        if not digest or _file_sha256(target) != digest:
+            raise ValueError("Installer SHA-256 verification failed. Download the update again.")
+        return target
 
-        ext = target.suffix.lower()
-        if ext not in (".exe", ".msi"):
-            self._state["status"] = "error"
-            self._state["error"] = f"Unsupported installer format: {ext}"
+    def launch_installer(self) -> dict[str, Any]:
+        """Launch the downloaded Windows installer (.exe or .msi) to upgrade ORBIT."""
+        try:
+            target = self.verified_installer_path()
+        except (OSError, ValueError) as exc:
+            self._state.update(status="error", error=str(exc), downloaded_path=None)
             self._emit()
             return self.get_state()
+        ext = target.suffix.lower()
 
         if os.environ.get("PYTEST_CURRENT_TEST"):
             self._state["status"] = "launched"

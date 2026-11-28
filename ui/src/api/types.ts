@@ -216,14 +216,17 @@ export type StatsRange = '1w' | '1m' | '3m' | '6m' | '1y' | 'all';
 
 export interface StatsTrackItem extends Track {
   plays: number;
-  listened_s: number;
+  listened_s?: number;
+  seconds?: number;
 }
 
 export interface StatsArtistItem {
-  name: string;
-  artist_norm: string;
+  name?: string;
+  artist?: string;
+  artist_norm?: string;
   plays: number;
-  listened_s: number;
+  listened_s?: number;
+  seconds?: number;
   thumbnail_url?: string | null;
 }
 
@@ -345,11 +348,39 @@ export interface UpdateState {
   error?: string | null;
 }
 
+export type ImportPlatform = 'youtube' | 'youtube_music' | 'spotify' | 'apple_music';
+export type ImportDestination = 'new_playlist' | 'existing_playlist' | 'liked';
+export type ImportJobStatus =
+  | 'queued'
+  | 'fetching'
+  | 'matching'
+  | 'saving'
+  | 'completed'
+  | 'cancelled'
+  | 'error';
+
+export interface ImportJobState {
+  job_id: string;
+  status: ImportJobStatus;
+  source_platform: ImportPlatform;
+  playlist_name: string;
+  destination: ImportDestination;
+  target_playlist_id: string | null;
+  total: number;
+  processed: number;
+  matched: number;
+  failed: number;
+  unmatched_items: string[];
+  error: string | null;
+}
+
 export type BridgeEventMap = {
+  search_history_changed: Record<string, never>;
   playback_tick: PlaybackTick;
   track_changed: TrackChangedEvent;
   queue_changed: QueueData;
   download_progress: DownloadProgress;
+  import_progress: ImportJobState;
   library_changed: LibraryChangedEvent;
   update_status: UpdateState;
   error: BridgeErrorEvent;

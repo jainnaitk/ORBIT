@@ -1,9 +1,10 @@
 import { memo, useEffect, useState, useCallback, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Search as SearchIcon, Loader2, X, RefreshCw } from 'lucide-react';
 import { TrackList } from '../components/TrackList';
 import { useTwoFingerClose } from '../utils/gestures';
 import type { Track, DownloadProgress } from '../api/types';
-import { bridgeApi } from '../api/client';
+import { bridgeApi, bridgeSocket } from '../api/client';
 
 interface SearchViewProps {
   initialQuery?: string;
@@ -13,16 +14,17 @@ interface SearchViewProps {
   downloads?: Record<string, DownloadProgress>;
   likedIds?: Set<string>;
   downloadedIds?: Set<string>;
-  onPlay: (track: Track, index: number, allTracks?: Track[]) => void;
+  onPlay: (track: Track, index: number, allTracks?: Track[]) => Promise<boolean>;
   onToggleLike: (track: Track) => void;
   onDownload: (track: Track) => void;
   onDeleteDownload: (track: Track) => void;
-  onAddNext: (track: Track) => void;
-  onAppendQueue: (track: Track) => void;
+  onAddNext: (track: Track) => Promise<boolean>;
+  onAppendQueue: (track: Track) => Promise<boolean>;
   onOpenAddToPlaylist: (track: Track) => void;
   onOpenArtist?: (artistName: string, artistId?: string | null) => void;
   onOpenAlbum?: (albumName: string, albumId: string | null | undefined, track: Track) => void;
   onCloseSearch?: () => void;
+  onSelectTerm: (term: string) => void;
 }
 
 const FILTER_TYPES = [
@@ -49,9 +51,24 @@ export const SearchView = memo(({
   onOpenArtist,
   onOpenAlbum,
   onCloseSearch,
+  onSelectTerm,
 }: SearchViewProps) => {
   const [filterType, setFilterType] = useState<string>('songs');
   const [results, setResults] = useState<Track[]>([]);
+  const [history, setHistory] = useState<{ terms: string[]; tracks: Track[] }>({ terms: [], tracks: [] });
+  useEffect(() => {
+    let revision = 0;
+    const refresh = async () => {
+      const mine = ++revision;
+      try {
+        const data = await bridgeApi.getSearchHistory();
+        if (mine === revision) setHistory(data);
+      } catch { /* The bridge may still be connecting. */ }
+    };
+    void refresh();
+    const unsubscribe = bridgeSocket.on('search_history_changed', refresh);
+    return () => { revision++; unsubscribe(); };
+  }, [isConnected]);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [settledKey, setSettledKey] = useState<string>('');
@@ -124,6 +141,23 @@ export const SearchView = memo(({
   }, [isConnected, trimmedQuery, filterType, activeKey, searchError, isLoading, executeSearch]);
 
   const showSkeleton = isLoading || (Boolean(trimmedQuery) && settledKey !== activeKey);
+  const shownTracks = trimmedQuery ? results : history.tracks;
+  const prefix = trimmedQuery.toLocaleLowerCase();
+  const suggestions = history.terms.filter(term => term.toLocaleLowerCase().startsWith(prefix));
+  const termsRef = useRef<HTMLDivElement>(null);
+  const termList = useVirtualizer({
+    horizontal: true,
+    count: suggestions.length,
+    getScrollElement: () => termsRef.current,
+    getItemKey: index => suggestions[index],
+    estimateSize: () => 124,
+    gap: 8,
+  });
+  useEffect(() => { if (termsRef.current) termsRef.current.scrollLeft = 0; }, [prefix]);
+
+  const rememberSelection = async (track: Track, action: Promise<boolean>) => {
+    if (await action) await bridgeApi.rememberSearch({ track }).catch(() => {});
+  };
 
   useTwoFingerClose({
     enabled: Boolean(onCloseSearch),
@@ -186,7 +220,28 @@ export const SearchView = memo(({
             </button>
           ))}
         </div>
+        {suggestions.length > 0 && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="shrink-0 text-[#9AA5C4]">Recent searches</span>
+            <div ref={termsRef} role="region" aria-label="Recent search terms" tabIndex={0} className="min-w-0 flex-1 overflow-x-auto">
+              <div className="relative h-8" style={{ width: termList.getTotalSize() }}>
+                {termList.getVirtualItems().map(item => {
+                  const term = suggestions[item.index];
+                  return (
+                    <button key={term} data-index={item.index} ref={termList.measureElement} type="button" title={term}
+                      className="absolute left-0 top-0 w-max max-w-48 truncate ios-liquid-pill rounded-full px-3 py-1 text-[#E6ECF8]"
+                      style={{ transform: `translateX(${item.start}px)` }} onClick={() => onSelectTerm(term)}>
+                      {term}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {!trimmedQuery && history.tracks.length > 0 && <h2 className="px-5 py-3 text-xs font-semibold text-[#A6B0CF]">Recently played or queued from search</h2>}
 
       {!showSkeleton && searchError && results.length === 0 ? (
         <div
@@ -212,20 +267,20 @@ export const SearchView = memo(({
         </div>
       ) : (
         <TrackList
-          tracks={showSkeleton && results.length === 0 ? [] : results}
-          loading={showSkeleton}
+          tracks={trimmedQuery && showSkeleton ? [] : shownTracks}
+          loading={Boolean(trimmedQuery) && showSkeleton}
           scrollKey={activeKey}
           currentTrackId={currentTrackId}
           isPlaying={isPlaying}
           downloads={downloads}
           likedIds={likedIds}
           downloadedIds={downloadedIds}
-          onPlay={(track, index) => onPlay(track, index, results)}
+          onPlay={(track, index) => void rememberSelection(track, onPlay(track, index, shownTracks))}
           onToggleLike={onToggleLike}
           onDownload={onDownload}
           onDeleteDownload={onDeleteDownload}
-          onAddNext={onAddNext}
-          onAppendQueue={onAppendQueue}
+          onAddNext={track => void rememberSelection(track, onAddNext(track))}
+          onAppendQueue={track => void rememberSelection(track, onAppendQueue(track))}
           onOpenAddToPlaylist={onOpenAddToPlaylist}
           onOpenArtist={onOpenArtist}
           onOpenAlbum={onOpenAlbum}

@@ -159,6 +159,8 @@ class AudioPlayer:
 
         self.current_track: Track | None = None
         self.next_track: Track | None = None
+        self.current_source: str | None = None
+        self.next_source: str | None = None
         self.time_pos: float = 0.0
         self.duration: float = 0.0
         self.volume: int = cfg.audio.default_volume
@@ -198,8 +200,8 @@ class AudioPlayer:
                 "hr_seek": "yes",
                 "cache": "yes",
                 "cache_pause_initial": "no",
-                "demuxer_readahead_secs": 6,
-                "audio_buffer": 0.1,
+                "demuxer_readahead_secs": cfg.audio.readahead_s,
+                "audio_buffer": cfg.audio.output_buffer_s,
                 "demuxer_max_bytes": demuxer_max_bytes,
                 "demuxer_max_back_bytes": demuxer_max_back_bytes,
                 "volume": float(self.volume),
@@ -321,6 +323,8 @@ class AudioPlayer:
                     if self.next_track is not None:
                         self._gapless_promoted_id = self.next_track.video_id
                         self.current_track = self.next_track
+                        self.current_source = self.next_source
+                        self.next_source = None
                         self._loaded_video_id = self.next_track.video_id
                         self.next_track = None
                     else:
@@ -571,6 +575,8 @@ class AudioPlayer:
         self._seek_guard_until = 0.0
         self.current_track = track
         self._loaded_video_id = track.video_id if track is not None else None
+        self.current_source = str(url)
+        self.next_source = None
         self.next_track = None
         self.time_pos = 0.0
         self.duration = float(track.duration_s) if (track and track.duration_s) else 0.0
@@ -597,7 +603,9 @@ class AudioPlayer:
             headers=http_headers if http_headers is not None else getattr(source, "http_headers", None),
         )
 
-    async def load_and_play(self, track: Track) -> None:
+    async def load_and_play(
+        self, track: Track, *, is_current: Callable[[], bool] | None = None
+    ) -> None:
         """Resolve track audio source and start playback immediately (cancels stale switches)."""
         self._load_seq += 1
         my_seq = self._load_seq
@@ -605,7 +613,7 @@ class AudioPlayer:
         try:
             source = await self.resolver.resolve(track.video_id)
         except Exception:
-            if my_seq == self._load_seq:
+            if my_seq == self._load_seq and (is_current is None or is_current()):
                 self._loading_new_track = False
                 self._expecting_new_file = False
                 if self._loaded_video_id != track.video_id:
@@ -614,7 +622,7 @@ class AudioPlayer:
                         self.mpv.stop()
                 self._update_state()
             raise
-        if my_seq != self._load_seq:
+        if my_seq != self._load_seq or (is_current is not None and not is_current()):
             return
         if self._pause_requested:
             self._pause_requested = False
@@ -638,6 +646,7 @@ class AudioPlayer:
         """Clear any previously appended gapless track from mpv's playlist."""
         self._preload_seq += 1
         self.next_track = None
+        self.next_source = None
         self._gapless_promoted_id = None
         with suppress(Exception):
             self.mpv.playlist_clear()
@@ -658,8 +667,9 @@ class AudioPlayer:
             self.set_http_headers(headers)
         with suppress(Exception):
             self.mpv.playlist_clear()
-        self.next_track = track
         self.mpv.loadfile(str(source), mode="append")
+        self.next_track = track
+        self.next_source = str(source)
 
     async def preload_next(self, track: Track) -> None:
         """Resolve and preload next track for gapless transition (aborts if track switched)."""
@@ -694,6 +704,8 @@ class AudioPlayer:
             self._loading_new_track = False
             self._expecting_new_file = True
             self.current_track = track
+            self.current_source = self.next_source
+            self.next_source = None
             self._loaded_video_id = track.video_id
             self.next_track = None
             self.time_pos = 0.0
@@ -779,6 +791,8 @@ class AudioPlayer:
         with suppress(Exception):
             self.mpv.stop()
         self.current_track = None
+        self.current_source = None
+        self.next_source = None
         self.next_track = None
         self.time_pos = 0.0
         self.duration = 0.0

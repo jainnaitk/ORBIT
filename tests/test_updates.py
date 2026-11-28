@@ -141,6 +141,17 @@ def test_local_installer_filename_versions_generic_setup() -> None:
     )
 
 
+async def test_native_release_digest_and_manifest(tmp_path, monkeypatch):
+    updater = UpdateManager(updates_dir=tmp_path)
+    digest = hashlib.sha256(b"fixture").hexdigest()
+    asset = {"name": "ORBIT-Setup.exe", "digest": f"sha256:{digest}"}
+    assert await updater._installer_checksum(asset, [asset]) == digest
+    asset.pop("digest")
+    url = "https://github.com/example/release/SHA256SUMS.txt"
+    _install_fake_httpx(monkeypatch, {url: _FakeResponse(url=url, text_data=f"{digest}  ORBIT-Setup.exe\n")})
+    assert await updater._installer_checksum(asset, [{"name": "SHA256SUMS.txt", "browser_download_url": url}]) == digest
+
+
 @pytest.mark.asyncio
 async def test_check_for_updates_falls_back_to_mirror_on_github_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -479,6 +490,7 @@ def test_launch_installer_passes_in_place_update_flags(
         updates_dir=updates_dir,
     )
     mgr._state["downloaded_path"] = str(installer)
+    mgr._state["asset_sha256"] = hashlib.sha256(b"MZ-test").hexdigest()
 
     captured: list[list[str]] = []
 

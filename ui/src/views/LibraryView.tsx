@@ -10,23 +10,24 @@ import {
   ListMusic,
   FolderDown,
   TrendingUp,
+  BarChart3,
   Search,
   X,
   ArrowUpDown,
   MoreVertical,
-  CheckCircle2,
-  Loader2,
 } from 'lucide-react';
 import { TrackList } from '../components/TrackList';
 import { TrackImage } from '../components/TrackImage';
 import { ArtistLinks } from '../components/ArtistLinks';
+import { HistoryAnalyticsPanel, formatListeningTime } from '../components/HistoryAnalyticsPanel';
+import { toast } from '../components/ToastHost';
 import {
   TrackContextMenu,
   isTrackDownloaded,
   useTrackContextMenu,
 } from '../components/TrackContextMenu';
 import { cancelTrackPreload, scheduleTrackPreload, bridgeApi } from '../api/client';
-import type { Track, Playlist, DownloadProgress } from '../api/types';
+import type { Track, Playlist, DownloadProgress, ListeningStats } from '../api/types';
 import type { NavTab } from '../components/Sidebar';
 
 type SortField = 'added' | 'title' | 'artist';
@@ -118,13 +119,16 @@ export const LibraryView = memo(({
   onOpenArtist,
   onOpenAlbum,
 }: LibraryViewProps) => {
-  const [historySort, setHistorySort] = useState<'recent' | 'most_played'>('recent');
+  const [historySort, setHistorySort] = useState<'recent' | 'most_played' | 'analytics'>('recent');
+  const [historyStats, setHistoryStats] = useState<ListeningStats | null>(null);
   const [filterText, setFilterText] = useState<string>('');
   const [sortBy, setSortBy] = useState<SortField>('added');
   const [sortAsc, setSortAsc] = useState<boolean>(false);
 
-  const needsFetch = tab === 'history' || (tab === 'playlist' && !!playlistId);
-  const viewKey = `${tab}:${playlistId || ''}:${historySort}`;
+  const historyFetchMode = historySort === 'most_played' ? 'most_played' : 'recent';
+  const needsFetch =
+    (tab === 'history' && historySort !== 'analytics') || (tab === 'playlist' && !!playlistId);
+  const viewKey = `${tab}:${playlistId || ''}:${historyFetchMode}`;
   const cachedForKey = needsFetch ? __ORBIT_LIB_CACHE__[viewKey] : undefined;
 
   const [fetchedState, setFetchedState] = useState<{ key: string; items: Track[] }>(() => ({
@@ -157,10 +161,16 @@ export const LibraryView = memo(({
       if (showLoader) setIsLoading(true);
       try {
         if (tab === 'history') {
-          const list = await bridgeApi.getHistory(150, historySort);
+          const list = await bridgeApi.getHistory(150, historyFetchMode);
           if (mySeq !== reqSeqRef.current) return;
           setLibCache(viewKey, list);
           setFetchedState({ key: viewKey, items: list });
+          bridgeApi
+            .getStats('1m')
+            .then((s) => {
+              if (mySeq === reqSeqRef.current) setHistoryStats(s);
+            })
+            .catch(() => {});
         } else if (tab === 'playlist' && playlistId) {
           const list = await bridgeApi.getPlaylistTracks(playlistId);
           if (mySeq !== reqSeqRef.current) return;
@@ -175,7 +185,7 @@ export const LibraryView = memo(({
         }
       }
     },
-    [needsFetch, tab, playlistId, historySort, viewKey]
+    [needsFetch, tab, playlistId, historyFetchMode, viewKey]
   );
 
   useEffect(() => {
@@ -290,6 +300,30 @@ export const LibraryView = memo(({
   };
 
   const totalDuration = rawTracks.reduce((acc, t) => acc + (t.duration_s || 0), 0);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const clearDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (confirmClear) clearDialog.current?.showModal(); }, [confirmClear]);
+  useEffect(() => { setConfirmClear(false); }, [tab]);
+  const clearHistory = async () => {
+    setClearing(true);
+    try {
+      await bridgeApi.clearHistory();
+      reqSeqRef.current++;
+      for (const key of Object.keys(__ORBIT_LIB_CACHE__)) {
+        if (key.startsWith('history:')) delete __ORBIT_LIB_CACHE__[key];
+      }
+      setFetchedState({ key: viewKey, items: [] });
+      setHistoryStats(null);
+      setIsLoading(false);
+      setConfirmClear(false);
+      toast.show('Listening history cleared', 'success');
+    } catch {
+      toast.show('Could not clear listening history', 'error');
+    } finally {
+      setClearing(false);
+    }
+  };
   const formatTotalTime = (secs: number) => {
     const mins = Math.floor(secs / 60);
     const hrs = Math.floor(mins / 60);
@@ -315,14 +349,28 @@ export const LibraryView = memo(({
     }
     if (tab === 'history') {
       return {
-        badge: historySort === 'most_played' ? 'Top Replay' : 'Playback Log',
-        title: historySort === 'most_played' ? 'Most Played' : 'Listening History',
+        badge:
+          historySort === 'analytics'
+            ? 'History & Stats'
+            : historySort === 'most_played'
+            ? 'Top Replay'
+            : 'Playback Log',
+        title:
+          historySort === 'analytics'
+            ? 'Listening Stats'
+            : historySort === 'most_played'
+            ? 'Most Played'
+            : 'Listening History',
         desc:
-          isLoading && rawTracks.length === 0
+          historySort === 'analytics'
+            ? `${historyStats?.total_plays ?? 0} qualified plays • ${formatListeningTime(historyStats?.total_seconds ?? 0)}`
+            : isLoading && rawTracks.length === 0
             ? 'Loading listening log...'
             : `${rawTracks.length} tracks logged`,
         icon:
-          historySort === 'most_played' ? (
+          historySort === 'analytics' ? (
+            <BarChart3 size={36} style={{ color: 'var(--dynamic-accent)' }} />
+          ) : historySort === 'most_played' ? (
             <TrendingUp size={36} className="text-[#34D399]" />
           ) : (
             <Clock size={36} style={{ color: 'var(--dynamic-accent)' }} />
@@ -353,12 +401,12 @@ export const LibraryView = memo(({
   return (
     <div
       style={{ contain: 'layout style' }}
-      className="flex-1 flex flex-col lg:flex-row h-full overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
+      className="library-layout relative flex-1 flex flex-col min-h-0 overflow-hidden select-none ios-liquid-panel rounded-[26px] my-1"
     >
       {/* Left Sticky Editorial Header Column */}
-      <aside className="flex-none lg:w-[270px] xl:w-[295px] p-5 sm:p-6 border-b lg:border-b-0 lg:border-r border-white/[0.08] bg-white/[0.02] flex flex-col justify-between gap-5">
-        <div className="flex lg:flex-col items-center lg:items-start gap-4 lg:gap-4 min-w-0">
-          <div className="w-20 h-20 lg:w-44 lg:h-44 rounded-2xl bg-[#06080F] border border-white/10 flex items-center justify-center shadow-2xl overflow-hidden flex-none">
+      <aside className="library-heading flex-none px-4 py-3 border-white/[0.08] bg-white/[0.02] flex flex-col gap-3">
+        <div className="library-summary flex items-center gap-3 min-w-0">
+          <div className={`library-cover w-12 h-12 ${tab === 'history' ? 'rounded-full' : 'rounded-xl'} bg-[#06080F] border border-white/10 flex items-center justify-center overflow-hidden flex-none`}>
             {rawTracks[0] ? (
               <TrackImage
                 src={rawTracks[0].thumbnail_url}
@@ -388,34 +436,70 @@ export const LibraryView = memo(({
 
         <div className="space-y-3">
           {tab === 'history' && (
-            <div className="flex items-center gap-1 p-0.5 rounded-full bg-white/[0.05] border border-white/[0.09] w-fit">
-              <button
-                onClick={() => setHistorySort('recent')}
-                className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
-                  historySort === 'recent'
-                    ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
-                    : 'text-[#B4BEDB] hover:text-white'
-                }`}
-              >
-                <Clock size={12} />
-                <span>Recent</span>
-              </button>
-              <button
-                onClick={() => setHistorySort('most_played')}
-                className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
-                  historySort === 'most_played'
-                    ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
-                    : 'text-[#B4BEDB] hover:text-white'
-                }`}
-              >
-                <TrendingUp size={12} />
-                <span>Most Played</span>
-              </button>
-            </div>
+            <>
+              <div aria-label="History views" className="history-tabs inline-flex items-center p-0.5 rounded-full bg-white/[0.05] border border-white/[0.09] max-w-full">
+                <button
+                  onClick={() => setHistorySort('recent')}
+                  className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                    historySort === 'recent'
+                      ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                      : 'text-[#B4BEDB] hover:text-white'
+                  }`}
+                >
+                  <Clock size={12} />
+                  <span>Recent</span>
+                </button>
+                <button
+                  onClick={() => setHistorySort('most_played')}
+                  className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                    historySort === 'most_played'
+                      ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                      : 'text-[#B4BEDB] hover:text-white'
+                  }`}
+                >
+                  <TrendingUp size={12} />
+                  <span>Most Played</span>
+                </button>
+                <button
+                  onClick={() => setHistorySort('analytics')}
+                  className={`px-3 py-1 rounded-full text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
+                    historySort === 'analytics'
+                      ? 'bg-[#F4F6FF] text-[#020308] font-semibold'
+                      : 'text-[#B4BEDB] hover:text-white'
+                  }`}
+                >
+                  <BarChart3 size={12} />
+                  <span>Stats</span>
+                </button>
+              </div>
+
+              {historyStats && historySort !== 'analytics' && (
+                <div className="grid grid-cols-2 gap-2 pt-0.5">
+                  <div className="rounded-xl bg-white/[0.04] border border-white/[0.08] px-2.5 py-2">
+                    <div className="text-[9.5px] uppercase tracking-wider text-[#7A84A6]">
+                      30d Time
+                    </div>
+                    <div className="text-xs font-semibold font-mono text-[#E6ECF8] mt-0.5 truncate">
+                      {formatListeningTime(historyStats.total_seconds)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white/[0.04] border border-white/[0.08] px-2.5 py-2">
+                    <div className="text-[9.5px] uppercase tracking-wider text-[#7A84A6]">
+                      Top Artist
+                    </div>
+                    <div className="text-xs font-semibold text-[#E6ECF8] mt-0.5 truncate">
+                      {historyStats.top_artists[0]?.name ||
+                        historyStats.top_artists[0]?.artist ||
+                        '—'}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           <div className="flex items-center gap-2 flex-wrap">
-            {displayedTracks.length > 0 && (
+            {displayedTracks.length > 0 && !(tab === 'history' && historySort === 'analytics') && (
               <>
                 <button
                   onClick={() => onPlayAll(displayedTracks, false)}
@@ -431,7 +515,7 @@ export const LibraryView = memo(({
                   <Shuffle size={14} />
                   Shuffle
                 </button>
-                {tab !== 'downloads' && (
+                {tab !== 'downloads' && tab !== 'history' && (
                   <button
                     onClick={() => onDownloadAll(displayedTracks)}
                     title="Download all tracks"
@@ -453,69 +537,95 @@ export const LibraryView = memo(({
               </button>
             )}
           </div>
-        </div>
-      </aside>
-
-      {/* Right Scrollable Track List Column */}
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        {/* Filter + Sort Bar */}
-        <div className="flex-none px-4 sm:px-5 py-2.5 border-b border-white/[0.08] flex items-center justify-between gap-2.5 flex-wrap bg-white/[0.015]">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/40 border border-white/10 w-full sm:w-64">
-            <Search size={12} className="text-[#8E99BA] flex-none" />
-            <input
-              type="text"
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              placeholder={`Filter ${header.title.toLowerCase()}...`}
-              className="bg-transparent text-xs text-[#F4F6FF] placeholder-[#6D7796] focus:outline-none flex-1 min-w-0"
-            />
-            {filterText && (
-              <button
-                type="button"
-                onClick={() => setFilterText('')}
-                className="text-[#8E99BA] hover:text-white"
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
-
-          {tab !== 'history' && (
-            <div className="flex items-center gap-1.5">
-              <select
-                value={sortBy}
-                onChange={(e) => {
-                  const field = e.target.value as SortField;
-                  setSortBy(field);
-                  setSortAsc(field === 'added' ? false : true);
-                }}
-                className="h-8 px-2.5 rounded-full bg-white/[0.06] border border-white/[0.10] text-[11px] text-[#E6ECF8] focus:outline-none cursor-pointer"
-              >
-                <option value="added" className="bg-[#0B0F1A]">
-                  Date Added
-                </option>
-                <option value="title" className="bg-[#0B0F1A]">
-                  Title
-                </option>
-                <option value="artist" className="bg-[#0B0F1A]">
-                  Artist
-                </option>
-              </select>
-              <button
-                type="button"
-                onClick={() => setSortAsc((v) => !v)}
-                title={sortAsc ? 'Ascending order' : 'Descending order'}
-                className="h-8 px-2.5 rounded-full bg-white/[0.06] border border-white/[0.10] text-[11px] text-[#A6B0CF] hover:text-white inline-flex items-center gap-1"
-              >
-                <ArrowUpDown size={12} />
-                <span>{sortAsc ? 'Asc' : 'Desc'}</span>
+          {tab === 'history' && (
+            <div className="w-full flex justify-center">
+              <button type="button" onClick={() => setConfirmClear(true)} className="ios-liquid-pill rounded-full px-4 py-2 text-xs inline-flex items-center gap-1.5">
+                <Trash2 size={13} /> Clear History
               </button>
             </div>
           )}
         </div>
+      </aside>
 
-        {/* Virtualized Grouped History vs Standard TrackList */}
-        {tab === 'history' && historySort === 'recent' ? (
+      {tab === 'history' && confirmClear && (
+        <dialog ref={clearDialog} aria-labelledby="clear-history-title" onCancel={e => { if (clearing) e.preventDefault(); else setConfirmClear(false); }} className="m-auto max-w-sm rounded-2xl bg-[#141820] text-[#F4F6FF] border border-white/15 p-5 backdrop:bg-black/70">
+            <h2 id="clear-history-title" className="font-semibold">Clear listening history?</h2>
+            <p className="my-3 text-sm text-[#A6B0CF]">This removes Recent, Most Played, and listening stats. Your liked songs, playlists, downloads, and searches are kept.</p>
+            <div className="flex justify-end gap-2 text-xs">
+              <button autoFocus disabled={clearing} onClick={() => setConfirmClear(false)} className="ios-liquid-pill px-3 py-2">Cancel</button>
+              <button disabled={clearing} onClick={clearHistory} className="rounded-full bg-[#F4F6FF] text-[#101016] px-3 py-2">{clearing ? 'Clearing…' : 'Clear History'}</button>
+            </div>
+        </dialog>
+      )}
+
+      {/* Right Scrollable Column */}
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        {!(tab === 'history' && historySort === 'analytics') && (
+          <div className="flex-none px-4 sm:px-5 py-2.5 border-b border-white/[0.08] flex items-center justify-between gap-2.5 flex-wrap bg-white/[0.015]">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/40 border border-white/10 w-full sm:w-64">
+              <Search size={12} className="text-[#8E99BA] flex-none" />
+              <input
+                type="text"
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                placeholder={`Filter ${header.title.toLowerCase()}...`}
+                className="bg-transparent text-xs text-[#F4F6FF] placeholder-[#6D7796] focus:outline-none flex-1 min-w-0"
+              />
+              {filterText && (
+                <button
+                  type="button"
+                  onClick={() => setFilterText('')}
+                  className="text-[#8E99BA] hover:text-white"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            {tab !== 'history' && (
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={sortBy}
+                  onChange={(e) => {
+                    const field = e.target.value as SortField;
+                    setSortBy(field);
+                    setSortAsc(field === 'added' ? false : true);
+                  }}
+                  className="h-8 px-2.5 rounded-full bg-white/[0.06] border border-white/[0.10] text-[11px] text-[#E6ECF8] focus:outline-none cursor-pointer"
+                >
+                  <option value="added" className="bg-[#0B0F1A]">
+                    Date Added
+                  </option>
+                  <option value="title" className="bg-[#0B0F1A]">
+                    Title
+                  </option>
+                  <option value="artist" className="bg-[#0B0F1A]">
+                    Artist
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setSortAsc((v) => !v)}
+                  title={sortAsc ? 'Ascending order' : 'Descending order'}
+                  className="h-8 px-2.5 rounded-full bg-white/[0.06] border border-white/[0.10] text-[11px] text-[#A6B0CF] hover:text-white inline-flex items-center gap-1"
+                >
+                  <ArrowUpDown size={12} />
+                  <span>{sortAsc ? 'Asc' : 'Desc'}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Merged Analytics Panel vs Virtualized Grouped History vs Standard TrackList */}
+        {tab === 'history' && historySort === 'analytics' ? (
+          <HistoryAnalyticsPanel
+            libraryVersion={libraryVersion}
+            onPlay={onPlay}
+            onOpenArtist={(artistName, artistId) => onOpenArtist?.(artistName, artistId)}
+            onStatsLoaded={setHistoryStats}
+          />
+        ) : tab === 'history' && historySort === 'recent' ? (
           isLoading && displayedTracks.length === 0 ? (
             <div className="flex-1 p-5 space-y-2.5">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -573,12 +683,7 @@ export const LibraryView = memo(({
                   const track = row.track;
                   const isCurrent = currentTrackId === track.video_id;
                   const isLiked = likedIds ? likedIds.has(track.video_id) : !!track.is_liked;
-                  const dl = downloads[track.video_id];
                   const isDownloaded = isTrackDownloaded(track, downloadedIds, downloads);
-                  const isDownloading =
-                    dl?.status === 'downloading' ||
-                    dl?.status === 'queued' ||
-                    dl?.status === 'tagging';
 
                   return (
                     <div
@@ -654,24 +759,6 @@ export const LibraryView = memo(({
 
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (isDownloaded) onDeleteDownload(track);
-                          else if (!isDownloading) onDownload(track);
-                        }}
-                        className="hidden sm:inline-flex p-1.5 text-[#A6B0CF] hover:text-[#34D399] flex-none"
-                      >
-                        {isDownloaded ? (
-                          <CheckCircle2 size={14} className="text-[#34D399]" />
-                        ) : isDownloading ? (
-                          <Loader2 size={14} className="animate-spin" />
-                        ) : (
-                          <Download size={14} className="opacity-0 group-hover:opacity-80" />
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
                         title="Remove from History"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -710,8 +797,6 @@ export const LibraryView = memo(({
                 onOpenArtist={onOpenArtist}
                 onOpenAlbum={onOpenAlbum}
                 onOpenAddToPlaylist={onOpenAddToPlaylist}
-                onDownload={onDownload}
-                onDeleteDownload={onDeleteDownload}
               />
             </div>
           )
@@ -729,8 +814,8 @@ export const LibraryView = memo(({
             isDownloadsTab={tab === 'downloads'}
             onPlay={(track, index) => onPlay(track, index, displayedTracks)}
             onToggleLike={onToggleLike}
-            onDownload={onDownload}
-            onDeleteDownload={onDeleteDownload}
+            onDownload={tab === 'history' ? undefined : onDownload}
+            onDeleteDownload={tab === 'history' ? undefined : onDeleteDownload}
             onAddNext={onAddNext}
             onAppendQueue={onAppendQueue}
             onOpenAddToPlaylist={onOpenAddToPlaylist}

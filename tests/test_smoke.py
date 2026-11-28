@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from metrolite.config import get_config, load_config
+from metrolite.library.manager import LibraryManager
 from metrolite.main import main
 from metrolite.store.db import (
     get_connection,
@@ -130,6 +132,21 @@ async def test_sqlite_async_initialization(tmp_path: Path) -> None:
         assert track["title"] == "Test Song"
         assert track["artist"] == "Test Artist"
         assert track["is_liked"] == 1
+
+
+async def test_search_history_upgrade_preserves_both_orders(tmp_path: Path) -> None:
+    db_file = tmp_path / "upgrade.db"
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("CREATE TABLE search_history(id INTEGER PRIMARY KEY, term TEXT, video_id TEXT, track_json TEXT)")
+        conn.executemany("INSERT INTO search_history(term, video_id, track_json) VALUES (?, ?, ?)", [
+            ("Jazz", "a", '{"video_id":"a"}'), ("ambient", "", None),
+            ("JAZZ", "b", '{"video_id":"b"}'), ("other", "a", '{"video_id":"a"}'),
+        ])
+    conn.close()
+    await init_db(db_file)
+    init_db_sync(db_file)
+    history = await LibraryManager(db_file).search_history()
+    assert history == {"terms": ["other", "JAZZ", "ambient"], "tracks": [{"video_id": "a"}, {"video_id": "b"}]}
 
 
 def test_cli_help(capsys: pytest.CaptureFixture[str]) -> None:

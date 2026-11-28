@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { TrackImage } from './TrackImage';
 import { ArtistLinks } from './ArtistLinks';
+import { isTrackDownloaded } from './TrackContextMenu';
 import { bridgeSocket } from '../api/client';
 import type { PlaybackTick, QueueData, Track, DownloadProgress, EqPreset } from '../api/types';
 
@@ -382,12 +383,7 @@ export const PlayerBar = ({
     dlState?.status === 'downloading' ||
     dlState?.status === 'queued' ||
     dlState?.status === 'tagging';
-  const isDownloaded =
-    !!currentTrack &&
-    (downloadedIds?.has(currentTrack.video_id) ||
-      currentTrack.download_status === 'completed' ||
-      dlState?.status === 'completed' ||
-      !!currentTrack.local_path);
+  const isDownloaded = !!currentTrack && isTrackDownloaded(currentTrack, downloadedIds, downloads);
 
   const queueCount = queue?.items?.length || 0;
 
@@ -644,8 +640,8 @@ export const PlayerBar = ({
         </div>
       </div>
 
-      {/* Right: Utility Cluster (Lyrics, Fullscreen Stage, EQ, Download, Volume, Queue) */}
-      <div className="flex items-center gap-1 lg:gap-1.5 w-auto md:w-[255px] lg:w-[295px] justify-end relative flex-none">
+      {/* Right: Utility Cluster (Lyrics, Queue, Fullscreen Stage, EQ, Download, Volume) */}
+      <div className="flex items-center gap-1 lg:gap-1.5 w-auto md:w-[270px] lg:w-[310px] justify-end relative flex-none">
         <button
           onClick={onToggleLyrics}
           title="Toggle Docked Lyrics Panel"
@@ -657,6 +653,21 @@ export const PlayerBar = ({
           style={isLyricsOpen ? { color: 'var(--dynamic-accent)' } : undefined}
         >
           <AlignLeft size={14} />
+        </button>
+
+        <button
+          onClick={onToggleQueue}
+          title="Toggle Queue Drawer"
+          className={`flex items-center gap-1.5 h-8 px-2 sm:px-2.5 rounded-full text-xs transition-all border ${
+            isQueueOpen
+              ? 'ios-liquid-pill text-[#F1F4FA] border-[rgba(var(--dynamic-accent-rgb),0.55)] font-semibold'
+              : 'bg-white/[0.06] text-[#9AA5C4] hover:text-white hover:bg-white/[0.10] border-white/[0.10]'
+          }`}
+        >
+          <ListMusic size={14} style={isQueueOpen ? { color: 'var(--dynamic-accent)' } : undefined} />
+          {queueCount > 0 && (
+            <span className="hidden sm:inline text-[10px] font-mono tabular-nums">{queueCount}</span>
+          )}
         </button>
 
         <button
@@ -771,21 +782,6 @@ export const PlayerBar = ({
             className="orbit-slider w-12 lg:w-16 cursor-pointer"
           />
         </div>
-
-        <button
-          onClick={onToggleQueue}
-          title="Toggle Queue Drawer"
-          className={`flex items-center gap-1.5 h-8 px-2 sm:px-2.5 rounded-full text-xs transition-all border ${
-            isQueueOpen
-              ? 'ios-liquid-pill text-[#F1F4FA] border-[rgba(var(--dynamic-accent-rgb),0.55)] font-semibold'
-              : 'bg-white/[0.06] text-[#9AA5C4] hover:text-white hover:bg-white/[0.10] border-white/[0.10]'
-          }`}
-        >
-          <ListMusic size={14} style={isQueueOpen ? { color: 'var(--dynamic-accent)' } : undefined} />
-          {queueCount > 0 && (
-            <span className="hidden sm:inline text-[10px] font-mono tabular-nums">{queueCount}</span>
-          )}
-        </button>
       </div>
     </footer>
   );
