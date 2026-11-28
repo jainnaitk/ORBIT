@@ -32,7 +32,6 @@
   </script>
 
   <!-- Performance Preconnects & Typography: Inter -->
-  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
@@ -50,7 +49,7 @@
   </style>
 
   <!-- Three.js r128 for GPU-Accelerated 3D Relativistic Black Hole -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+  <script src="/vendor/three-r128.js" defer></script>
 
   <style>
     /* =====================================================================
@@ -1520,7 +1519,7 @@
 
       <div class="mt-6 flex items-center justify-between py-3.5 border-y border-white/[0.08] text-sm">
         <span class="text-[#939DBB]">Version</span>
-        <span id="modal-version-pill" class="font-mono text-[#F4F6FF]">v0.1.0</span>
+        <span id="modal-version-pill" class="font-mono text-[#F4F6FF]">Latest release</span>
       </div>
 
       <div id="modal-changelog-wrap" class="hidden mt-4 rounded-2xl bg-[#080B14] border border-white/[0.08] p-3.5 space-y-2">
@@ -3445,7 +3444,7 @@
     const GITHUB_OWNER = 'jainnaitk';
     const GITHUB_REPO = 'ORBIT';
     const RELEASE = {
-      version: '0.1.0',
+      version: '',
       exeName: 'ORBIT-Setup.exe',
       exeUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download/ORBIT-Setup.exe`,
       changelog: [],
@@ -3518,7 +3517,7 @@
 
     function updateModalMeta() {
       const verEl = document.getElementById('modal-version-pill');
-      if (verEl) verEl.textContent = `v${RELEASE.version}`;
+      if (verEl) verEl.textContent = RELEASE.version ? `v${RELEASE.version}` : 'Latest release';
       const wrap = document.getElementById('modal-changelog-wrap');
       const list = document.getElementById('modal-changelog-list');
       if (wrap && list) {
